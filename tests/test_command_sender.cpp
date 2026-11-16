@@ -160,7 +160,26 @@ static void testLandSequence() {
     CHECK(h.results.back().ok);
 }
 
+static void testRepositionIsCommandInt() {
+    Harness h;
+    h.cs.runSequence("hold", {makeReposition(-35.3632621, 149.1652374, 120.0f, 150.0f, true)}, h.now);
+    CHECK(h.sent.back().msgid == MAVLINK_MSG_ID_COMMAND_INT);
+    mavlink_command_int_t c{};
+    mavlink_msg_command_int_decode(&h.sent.back(), &c);
+    CHECK(c.command == MAV_CMD_DO_REPOSITION);
+    CHECK(c.frame == MAV_FRAME_GLOBAL_RELATIVE_ALT_INT);
+    CHECK(c.x == -353632621);  // full degE7 precision, no float rounding
+    CHECK(c.y == 1491652374);
+    CHECK_NEAR(c.z, 120.0, 1e-6);
+    CHECK_NEAR(c.param2, MAV_DO_REPOSITION_FLAGS_CHANGE_MODE, 1e-6);
+    CHECK_NEAR(c.param3, 150.0, 1e-6);  // radius
+    CHECK_NEAR(c.param4, 1.0, 1e-6);    // CCW
+    h.ack(MAV_CMD_DO_REPOSITION, MAV_RESULT_ACCEPTED);
+    CHECK(h.results.back().final && h.results.back().ok);
+}
+
 int main() {
+    testRepositionIsCommandInt();
     testLandSequence();
     testSequenceHappy();
     testSequenceAbortsOnDenied();

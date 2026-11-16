@@ -47,6 +47,15 @@ struct Attitude {
     double yaw_deg = 0.0;
 };
 
+// Earth-frame attitude of a camera mounted on `body` at (mount_yaw, mount_pitch)
+// relative to the body (yaw first, then pitch; no mount roll). With an earth
+// frame camera attitude, use a CameraModel with mount_pitch_deg = 0.
+Attitude composeMount(const Attitude& body, double mount_yaw_deg, double mount_pitch_deg);
+
+// Attitude of `cam` (earth frame) expressed relative to `body`: yaw = pan,
+// pitch = tilt, roll = camera roll, all relative to the platform.
+Attitude relativeTo(const Attitude& body, const Attitude& cam);
+
 // Direction (not normalised) of the ray through pixel (px, py) in NED.
 Vec3 pixelRayNed(const CameraModel& cam, const Attitude& att, double px, double py);
 

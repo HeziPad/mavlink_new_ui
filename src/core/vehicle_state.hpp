@@ -1,5 +1,6 @@
 #pragma once
 
+#include "geo.hpp"
 #include "mission.hpp"
 
 #include <array>
@@ -52,6 +53,12 @@ struct VehicleState {
     double roll_deg = 0.0;
     double pitch_deg = 0.0;
     double yaw_deg = 0.0;
+    // Euler angle rates (deg/s), converted from the body rates in ATTITUDE,
+    // and when the sample arrived: lets the UI predict between samples.
+    double roll_rate = 0.0;
+    double pitch_rate = 0.0;
+    double yaw_rate = 0.0;
+    Clock::time_point att_rx{};
 
     // ---- VFR HUD ------------------------------------------------------------
     bool has_vfr_hud = false;
@@ -70,6 +77,7 @@ struct VehicleState {
     double vn = 0.0;
     double ve = 0.0;
     double vd = 0.0;
+    Clock::time_point pos_rx{};
 
     // ---- home ---------------------------------------------------------------
     bool has_home = false;
@@ -116,8 +124,32 @@ struct VehicleState {
     std::vector<MissionItem> mission;       // what the vehicle holds (incl. home at 0)
     bool mission_transfer_active = false;
 
+    // ---- navigation / wind ------------------------------------------------------
+    bool has_nav = false;
+    double nav_alt_error = 0.0;             // NAV_CONTROLLER_OUTPUT: target - current (m)
+    bool has_wind = false;
+    double wind_from_deg = 0.0;             // direction the wind blows FROM
+    double wind_speed = 0.0;
+
+    // ---- gimbal ---------------------------------------------------------------
+    // GIMBAL_DEVICE_ATTITUDE_STATUS. ArduPilot: roll / pitch are earth-frame,
+    // yaw is relative to the vehicle (flag) or earth-frame.
+    bool has_gimbal = false;
+    double gimbal_roll = 0.0;
+    double gimbal_pitch = 0.0;
+    double gimbal_yaw = 0.0;
+    bool gimbal_yaw_earth = false;
+    Clock::time_point gimbal_rx{};
+
+    // ---- measured message rates (Hz, 1 s window) ---------------------------------
+    double attitude_hz = 0.0;
+    double position_hz = 0.0;
+
     // ---- parameters (read once after connect) -----------------------------------
     int q_guided_mode = -1;                 // Q_GUIDED_MODE, -1 unknown
+    double airspeed_cruise = -1.0;          // AIRSPEED_CRUISE (m/s), -1 unknown
+    double trans_decel = -1.0;              // Q_TRANS_DECEL (m/s^2)
+    double loiter_radius = -1.0;            // WP_LOITER_RAD (m)
     std::array<int, 16> servo_function{};   // SERVOn_FUNCTION, 0 until read
     int servo_functions_known = 0;          // how many of the 16 have arrived
     bool servo_map_final = false;           // all arrived, or gave up waiting
@@ -158,6 +190,38 @@ constexpr uint16_t kLiftSpinPwm = 1150;
 // assist for a moment; only call it assist once it lasts this long.
 constexpr auto kAssistDebounce = std::chrono::seconds(2);
 LiftRotors liftRotorState(const VehicleState& s, Clock::time_point now);
+
+// ---- prediction between samples ----------------------------------------------
+// Telemetry arrives at 10-25 Hz; drawing only the latest sample makes motion
+// step. These extrapolate from the last sample with its rates, for at most
+// kMaxPredict, so the UI can draw a continuous estimate every frame.
+constexpr double kMaxPredictAttitude = 0.25;  // s
+constexpr double kMaxPredictPosition = 0.5;   // s
+geo::Attitude predictAttitude(const VehicleState& s, Clock::time_point now);
+struct PredictedPosition {
+    double lat = 0.0;
+    double lon = 0.0;
+    double alt_rel = 0.0;
+};
+PredictedPosition predictPosition(const VehicleState& s, Clock::time_point now);
+// Euler angle rates from body rates (rad/s in, deg/s out).
+void bodyRatesToEuler(double roll_rad, double pitch_rad, double p, double q, double r, double& roll_rate,
+                      double& pitch_rate, double& yaw_rate);
+
+// ---- camera line of sight -------------------------------------------------------
+struct CameraLos {
+    geo::Attitude earth;   // camera attitude in the earth frame (yaw = LOS azimuth, pitch = elevation)
+    double pan_rel = 0.0;  // relative to the platform
+    double tilt_rel = 0.0;
+    bool gimbal = false;   // false: fixed mount from settings
+};
+// gimbal angles fresher than this are used; otherwise the fixed mount tilt
+constexpr double kGimbalTimeout = 2.0;  // s
+// gimbal_body_frame: the gimbal reports body-frame angles even though the
+// message says earth-frame roll/pitch. ArduPilot's servo mount (no feedback)
+// does this; gimbals with attitude feedback follow the spec (earth frame).
+CameraLos cameraLos(const VehicleState& s, const geo::Attitude& aircraft, double fixed_tilt_deg,
+                    Clock::time_point now, bool gimbal_body_frame = false);
 // Call after reported_vtol / landed change.
 void updateCruiseLatch(VehicleState& s);
 // Call after servo outputs or VTOL state change.

@@ -25,9 +25,14 @@ double tanDeg(double d) {
 }  // namespace
 
 CameraView::CameraView(VideoReceiver* video, QWidget* parent) : HudView(parent), video_(video) {
-    roll_.rate = pitch_.rate = 16.0;
-    as_.rate = alt_.rate = 10.0;
-    yaw_.rate = 14.0;
+    // targets move continuously (predicted every frame), so these only take
+    // the edge off; they are no longer what makes the motion smooth
+    roll_.rate = pitch_.rate = cam_roll_.rate = cam_el_.rate = pan_rel_.rate = tilt_rel_.rate = 25.0;
+    yaw_.rate = cam_az_.rate = 25.0;
+    as_.rate = 10.0;
+    alt_.rate = 20.0;
+    cam_el_.set(mount_pitch_);
+    tilt_rel_.set(mount_pitch_);
 }
 
 bool CameraView::live() const {
@@ -44,17 +49,21 @@ QColor CameraView::pipTagColor() const {
 
 void CameraView::setState(const VehicleState& s) {
     s_ = s;
-    if (s.has_attitude) {
-        roll_.set(s.roll_deg);
-        pitch_.set(s.pitch_deg);
-        yaw_.set(geo::wrap360(s.yaw_deg));
-    }
     if (s.has_vfr_hud) {
         as_.set(s.airspeed);
     }
-    if (s.has_position) {
-        alt_.set(s.alt_rel);
-    }
+}
+
+void CameraView::setMotion(const geo::Attitude& aircraft, const CameraLos& los) {
+    roll_.set(aircraft.roll_deg);
+    pitch_.set(aircraft.pitch_deg);
+    yaw_.set(geo::wrap360(aircraft.yaw_deg));
+    cam_roll_.set(los.earth.roll_deg);
+    cam_el_.set(los.earth.pitch_deg);
+    cam_az_.set(geo::wrap360(los.earth.yaw_deg));
+    pan_rel_.set(los.pan_rel);
+    tilt_rel_.set(los.tilt_rel);
+    gimbal_ = los.gimbal;
 }
 
 void CameraView::setCamera(double hfov_deg, double mount_pitch_deg) {
@@ -71,9 +80,11 @@ void CameraView::setGuideMode(bool on) {
 
 void CameraView::tick(double dt) {
     time_ += dt;
-    roll_.step(dt);
-    pitch_.step(dt);
+    for (Tween* t : {&roll_, &pitch_, &cam_roll_, &cam_el_, &pan_rel_, &tilt_rel_}) {
+        t->step(dt);
+    }
     yaw_.step(dt);
+    cam_az_.step(dt);
     as_.step(dt);
     alt_.step(dt);
     travelled_ += s_.groundspeed * dt;
@@ -96,10 +107,10 @@ double CameraView::focal() const {
     return (width() / 2.0) / tanDeg(hfov_ / 2.0);
 }
 
-// A point at `elevation` above the horizon, in the frame rotated by -roll and
-// centred on the boresight. Camera boresight elevation = pitch + mount pitch.
+// A point at `elevation` above the horizon, in the frame rotated by the image
+// roll and centred on the boresight (whose elevation is the LOS elevation).
 double CameraView::elevationToY(double elevation_deg) const {
-    const double rel = std::clamp(elevation_deg - (pitch_.value + mount_pitch_), -89.0, 89.0);
+    const double rel = std::clamp(elevation_deg - cam_el_.value, -89.0, 89.0);
     return -focal() * tanDeg(rel);
 }
 
@@ -175,7 +186,7 @@ void CameraView::paintSynthetic(QPainter& p) {
 
     p.save();
     p.translate(c);
-    p.rotate(-roll_.value);
+    p.rotate(-cam_roll_.value);
 
     // sky
     QLinearGradient sky(0, hy - diag, 0, hy);
@@ -243,7 +254,7 @@ void CameraView::paintHud(QPainter& p) {
     p.save();
     p.setClipRect(QRectF(c.x() - r.width() * 0.32, c.y() - r.height() * 0.30, r.width() * 0.64, r.height() * 0.57));
     p.translate(c);
-    p.rotate(-roll_.value);
+    p.rotate(-cam_roll_.value);
     const double hy = elevationToY(0.0);
     p.setPen(QPen(alpha(hud, 0.9), compact_ ? 1.2 : 1.6));
     p.drawLine(QPointF(-r.width() * 0.4, hy), QPointF(-60, hy));
@@ -282,7 +293,7 @@ void CameraView::paintHud(QPainter& p) {
         // flight path marker: where the aircraft is actually going
         if (s_.has_position && s_.groundspeed > 2.0) {
             const double track = std::atan2(s_.ve, s_.vn) * geo::kRadToDeg;
-            const double drift = std::clamp(geo::wrap180(track - yaw_.value), -40.0, 40.0);
+            const double drift = std::clamp(geo::wrap180(track - cam_az_.value), -40.0, 40.0);
             const double gamma = std::atan2(-s_.vd, std::hypot(s_.vn, s_.ve)) * geo::kRadToDeg;
             const QPointF fpm(f * tanDeg(drift), elevationToY(gamma));
             p.setPen(QPen(hud, 1.6));
@@ -330,6 +341,7 @@ void CameraView::paintHud(QPainter& p) {
     }
 
     paintHeadingTape(p, QRectF(c.x() - r.width() * 0.22, 66, r.width() * 0.44, 38));
+    paintReadouts(p);
     const double tape_h = std::min(r.height() * 0.46, 360.0);
     paintVerticalTape(p, QRectF(c.x() - r.width() * 0.36 - 70, c.y() - tape_h / 2, 70, tape_h), as_.value, 2.0, true,
                       QStringLiteral("AS"));
@@ -345,15 +357,15 @@ void CameraView::paintHud(QPainter& p) {
                            .arg(s_.groundspeed, 0, 'f', 1)
                            .arg(s_.climb, 0, 'f', 1);
         const QFont fnt = monoFont(12, true);
-        drawText(p, QRectF(c.x() - 300, c.y() + r.height() * 0.30, 600, 20), Qt::AlignCenter, text, fnt,
-                 alpha(hud, 0.9));
+        // under the heading box: the bottom centre is where the dock panels open
+        drawText(p, QRectF(c.x() - 300, 130, 600, 20), Qt::AlignCenter, text, fnt, alpha(hud, 0.9));
     }
 
     if (guide_) {
-        const QString text = QStringLiteral("GUIDE · click the ground to send the aircraft");
+        const QString text = QStringLiteral("GUIDE · tap the ground to send the aircraft");
         const QFont fnt = labelFont(11);
         const double w = QFontMetricsF(fnt).horizontalAdvance(text) + 30;
-        const QRectF box(c.x() - w / 2, 112, w, 26);
+        const QRectF box(c.x() - w / 2, 156, w, 26);
         drawGlass(p, chamferPath(box, 7), kCyan, 0.8, kGlassDeep);
         drawText(p, box, Qt::AlignCenter, text, fnt, kCyan);
         drawBrackets(p, r.adjusted(8, 8, -8, -8), 28, alpha(kCyan, 0.7), 2.0);
@@ -372,7 +384,7 @@ void CameraView::paintHeadingTape(QPainter& p, const QRectF& r) {
     const QColor hud = kGreen;
     const double span = 60.0;
     const double ppd = r.width() / span;
-    const double hdg = yaw_.value;
+    const double hdg = cam_az_.value;  // the tape follows what the camera sees
     p.setPen(QPen(alpha(hud, 0.6), 1));
     p.drawLine(QPointF(r.left(), r.bottom()), QPointF(r.right(), r.bottom()));
     const QFont f = monoFont(11);
@@ -394,7 +406,17 @@ void CameraView::paintHeadingTape(QPainter& p, const QRectF& r) {
             drawText(p, QRectF(x - 16, r.top(), 32, 16), Qt::AlignCenter, label, f, alpha(hud, 0.85));
         }
     }
+    // aircraft nose on the LOS tape (when it's in view)
+    const double nose = geo::wrap180(yaw_.value - hdg);
+    if (std::abs(nose) < span / 2) {
+        const double x = r.center().x() + nose * ppd;
+        p.setPen(Qt::NoPen);
+        p.setBrush(alpha(kCyan, 0.9));
+        p.drawPolygon(QPolygonF({QPointF(x, r.top() + 2), QPointF(x - 5, r.top() - 6), QPointF(x + 5, r.top() - 6)}));
+    }
     p.restore();
+    drawText(p, QRectF(r.left() - 48, r.bottom() - 16, 44, 14), Qt::AlignRight | Qt::AlignVCenter,
+             QStringLiteral("LOS"), labelFont(10), alpha(hud, 0.7));
     // boxed readout + caret
     const QRectF box(r.center().x() - 28, r.bottom() + 2, 56, 20);
     p.setPen(QPen(kGreen, 1.2));
@@ -406,6 +428,79 @@ void CameraView::paintHeadingTape(QPainter& p, const QRectF& r) {
     p.setPen(Qt::NoPen);
     p.drawPolygon(QPolygonF({QPointF(r.center().x(), r.bottom() - 1), QPointF(r.center().x() - 5, r.bottom() - 8),
                              QPointF(r.center().x() + 5, r.bottom() - 8)}));
+}
+
+// Aircraft attitude (left) and camera line of sight (right). The HUD lines
+// follow the camera; these give the platform's own angles and where the
+// camera points relative to it.
+void CameraView::paintReadouts(QPainter& p) {
+    const QColor hud = kGreen;
+    const QFont lf = labelFont(10);
+    const QFont vf = monoFont(13, true);
+    auto signedDeg = [](double v) {
+        return QStringLiteral("%1%2°").arg(v >= 0 ? QStringLiteral("+") : QString()).arg(v, 0, 'f', 0);
+    };
+    auto row = [&](const QRectF& box, int i, const QString& k, const QString& v, const QColor& c) {
+        const double y = box.top() + 26 + i * 19;
+        drawText(p, QRectF(box.left() + 10, y, 50, 16), Qt::AlignLeft | Qt::AlignVCenter, k, lf, alpha(hud, 0.65));
+        drawText(p, QRectF(box.left() + 56, y, box.width() - 64, 16), Qt::AlignRight | Qt::AlignVCenter, v, vf, c);
+    };
+    const double top = 120;
+
+    // ---- aircraft ---------------------------------------------------------------
+    {
+        const QRectF box(16, top, 168, 92);
+        p.setPen(QPen(alpha(hud, 0.5), 1));
+        p.setBrush(alpha(kBg, 0.55));
+        p.drawRect(box);
+        drawText(p, QRectF(box.left() + 10, box.top() + 5, 120, 16), Qt::AlignLeft | Qt::AlignVCenter,
+                 QStringLiteral("AIRCRAFT"), labelFont(10.5), hud);
+        row(box, 0, QStringLiteral("ROLL"), signedDeg(roll_.value), hud);
+        row(box, 1, QStringLiteral("PITCH"), signedDeg(pitch_.value), hud);
+        row(box, 2, QStringLiteral("HDG"),
+            QStringLiteral("%1°").arg(static_cast<int>(std::lround(yaw_.value)) % 360, 3, 10, QLatin1Char('0')), hud);
+        // mini attitude: aircraft symbol over a horizon that rolls/pitches
+        const QPointF ac(box.right() + 34, box.center().y());
+        const double rad = 26;
+        p.save();
+        p.setClipRect(QRectF(ac.x() - rad, ac.y() - rad, 2 * rad, 2 * rad));
+        p.translate(ac);
+        p.setPen(QPen(alpha(hud, 0.4), 1));
+        p.setBrush(alpha(kBg, 0.55));
+        p.drawEllipse(QPointF(0, 0), rad, rad);
+        p.rotate(-roll_.value);
+        const double py = std::clamp(pitch_.value, -30.0, 30.0) * rad / 30.0;
+        p.setPen(QPen(hud, 1.4));
+        p.drawLine(QPointF(-rad, py), QPointF(rad, py));
+        p.restore();
+        p.setPen(QPen(kCyan, 2));
+        p.drawLine(ac + QPointF(-14, 0), ac + QPointF(-5, 0));
+        p.drawLine(ac + QPointF(5, 0), ac + QPointF(14, 0));
+        p.drawPoint(ac);
+    }
+
+    // ---- line of sight ------------------------------------------------------------
+    {
+        // bottom right: the top right is where toasts stack
+        const QRectF box(width() - 16 - 196, height() - 250, 196, 111);
+        p.setPen(QPen(alpha(hud, 0.5), 1));
+        p.setBrush(alpha(kBg, 0.55));
+        p.drawRect(box);
+        drawText(p, QRectF(box.left() + 10, box.top() + 5, 176, 16), Qt::AlignLeft | Qt::AlignVCenter,
+                 gimbal_ ? QStringLiteral("GIMBAL · LOS") : QStringLiteral("FIXED MOUNT · LOS"), labelFont(10.5),
+                 gimbal_ ? hud : kAmber);
+        // relative to the platform: the main numbers
+        row(box, 0, QStringLiteral("PAN"), signedDeg(pan_rel_.value), hud);
+        row(box, 1, QStringLiteral("TILT"), signedDeg(tilt_rel_.value), hud);
+        // earth-frame LOS underneath, smaller
+        const QString earth = QStringLiteral("AZ %1°  EL %2")
+                                  .arg(static_cast<int>(std::lround(cam_az_.value)) % 360, 3, 10, QLatin1Char('0'))
+                                  .arg(signedDeg(cam_el_.value));
+        drawText(p, QRectF(box.left() + 10, box.top() + 26 + 2 * 19 + 4, box.width() - 20, 16),
+                 Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("earth"), lf, alpha(hud, 0.5));
+        drawText(p, QRectF(box.left() + 10, box.top() + 26 + 3 * 19 + 2, box.width() - 18, 16),
+                 Qt::AlignRight | Qt::AlignVCenter, earth, monoFont(11), alpha(hud, 0.8));
+    }
 }
 
 void CameraView::paintVerticalTape(QPainter& p, const QRectF& r, double value, double step, bool left,

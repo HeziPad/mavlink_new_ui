@@ -59,11 +59,35 @@ and shows `NO VIDEO`.
 | Key | Button | What it does |
 |-----|--------|--------------|
 | 1 | **Plan / Sync ↑** | First press: edit the mission on the map. Second press: upload it. **Hold**: re-download the vehicle's mission |
-| 2 | **Takeoff / Launch / Auto** | On the ground (**hold 1 s** to confirm): with a mission → AUTO + arm; without → GUIDED + arm + VTOL takeoff, then LOITER on the wing at takeoff altitude. Airborne: resume the loop (AUTO) |
-| 3 | **Guide** | Toggle. Tap the map, or the ground in the camera view, to fly there on the wing (GUIDED) |
-| 4 | **Hold** | Instant. LOITER: circle on the wing. During a landing this is a go-around |
-| 5 | **Land** | **Hold 1 s**. Fly to the planned landing point, spiral down on the wing, land vertically. Locked until the vehicle's mission has a landing point |
+| 2 | **Takeoff / Launch / Auto** | On the ground (**hold 1 s** to confirm): with a mission → AUTO + arm; without → GUIDED + arm + VTOL takeoff, then Hold (circle) on the wing at takeoff altitude. Airborne: resume the loop (AUTO), also after an aborted landing |
+| 3 | **Guide** | Toggle. Tap the map, or the ground in the camera view, to circle there on the wing (GUIDED) |
+| 4 | **Hold** | Instant. Circle where the aircraft is, on the wing (GUIDED). During a landing this is a go-around |
+| 5 | **Land** | **Hold 1 s**. Circle down beside the planned landing point on the wing, leave into the wind, back-transition and land vertically. Locked until the vehicle's mission has a landing point |
 | 6 | **QRTL** | Instant. Return home on the wing and land vertically |
+
+**Hold and Guide circles:** while circling, a panel above the dock sets the
+**altitude** (−10 / −1 / +1 / +10), the **radius** (−50 … +50 m, 40–1000 m)
+and the **direction** (CW / CCW). Changes apply live. The circle starts at the
+vehicle's `WP_LOITER_RAD`. Both use `DO_REPOSITION`, so the vehicle shows
+GUIDED. In AUTO the altitude comes from the plan: edit the waypoint instead.
+The ALT chip shows the commanded altitude as `62→80` while the aircraft climbs
+or descends to it.
+
+**Land vs QRTL:**
+
+| | **Land** | **QRTL** |
+|---|---|---|
+| Where | The landing point you planned (**L**) | Home, or the nearest rally point |
+| Descent | On the wing, on a circle beside L, down to the approach altitude | On the wing at RTL altitude, then on the rotors from about `Q_RTL_ALT` |
+| Approach direction | Into the current wind, with the circle on the side the aircraft comes from | Straight from wherever the aircraft is |
+| Needs | A landing point in the mission | Nothing: always available, so it's the emergency button |
+
+**Bank angle:** how hard the aircraft banks is the autopilot's job.
+`ROLL_LIMIT_DEG` caps it (the SITL quadplane uses 65°, the ArduPlane default is
+45°). `NAVL1_PERIOD` sets how aggressively it turns onto a new leg (lower =
+sharper). A square loop has 90° corners, so the aircraft turns at its limit at
+each one. A bigger `NAVL1_PERIOD`, a lower `ROLL_LIMIT_DEG` or rounder loops
+(more points) soften it.
 
 To swap the map and camera, tap the small picture-in-picture view.
 
@@ -91,7 +115,7 @@ press Hold, Land or QRTL.
 - **Landing point:** tap **+ LANDING** in the plan strip, then tap the map.
   The landing point is optional and separate from the loop. Its altitude
   (default 30 m, editable in the panel) is the **approach altitude**: the
-  aircraft spirals down to it on the wing and only then switches to the lift
+  aircraft circles down to it on the wing and only then switches to the lift
   rotors for the vertical descent.
 - **Mouse extras:** the wheel over a point changes its altitude by 5 m, and
   right-click deletes the point.
@@ -99,21 +123,74 @@ press Hold, Land or QRTL.
 The upload is built as:
 
 ```
-HOME → NAV_VTOL_TAKEOFF (40 m) → WP1 … WPn → DO_JUMP(WP1, forever) [→ NAV_VTOL_LAND at L, fixed-wing spiral approach, z = approach alt]
+HOME → NAV_VTOL_TAKEOFF (40 m) → WP1 … WPn → DO_JUMP(WP1, forever)
+     [→ NAV_LOITER_TO_ALT (approach circle beside L) → NAV_VTOL_LAND at L]
 ```
 
 With a single waypoint, the aircraft circles it (`NAV_LOITER_UNLIM`) instead of
-jumping. The mission never reaches the land item by itself. **Land** jumps to it
-with `MAV_CMD_DO_SET_MISSION_CURRENT`.
+jumping. The mission never reaches the landing by itself.
+
+**The landing approach.** When you press **Land**, the GCS does four things:
+
+1. It holds where the aircraft is.
+2. It recomputes the approach with the **current wind**, then re-uploads the mission.
+3. It jumps to the approach with `MAV_CMD_DO_SET_MISSION_CURRENT`.
+4. It remembers which waypoint to go back to if you abort the landing.
+
+The approach is laid out like this:
+
+- **The straight leg** points into the wind and ends at L. It is
+  `1.3 × 1.5·v²/(2·Q_TRANS_DECEL) + 40 m` long (at least 150 m). ArduPlane only
+  stays on the wing toward a VTOL landing when it's further away than
+  `1.5·v²/(2·Q_TRANS_DECEL)`. Closer than that, it hovers its way in on the
+  rotors.
+- **The circle** sits beside the straight leg, on the side the aircraft is
+  coming from, and has the loiter radius. The aircraft descends on it to the
+  approach altitude, then leaves on the tangent, heading into the wind.
+- **The back-transition** happens on the straight leg. ArduPlane starts it at its
+  own stopping distance, so it doesn't overshoot. The rotors only run for that
+  and the short vertical descent from the approach altitude.
+
+The map draws the circle, the leg and a wind arrow. They are faint while
+circling the loop and bright while landing.
 
 ## Settings
 
 `~/.config/mavlink_gcs_ui/mavlink_gcs_ui.conf` is created on first run.
 You can edit the link and video ports, takeoff, default waypoint and landing approach altitude,
-cruise speed (used for the lap time), camera HFOV and tilt
-(used to turn camera clicks into ground targets), and reduced motion. The map
+cruise speed (used for the lap time), camera HFOV, the fixed-mount tilt used
+when no gimbal reports its angles, and reduced motion. The map
 layer and follow state are remembered automatically. Command-line options
 override the file for one run.
+
+## Camera view
+
+The horizon, elevation ladder and heading tape are drawn from the camera's
+**line of sight (LOS)**, so they overlay the video. The heading tape shows the
+LOS azimuth, with a cyan caret for the aircraft's nose. The LOS comes from the
+gimbal (`GIMBAL_DEVICE_ATTITUDE_STATUS`), or from the fixed-mount tilt when no
+gimbal reports.
+
+Two readouts sit beside it:
+
+- **AIRCRAFT:** roll, pitch and heading, with a small attitude indicator.
+- **GIMBAL · LOS:** pan and tilt **relative to the aircraft**, with the
+  earth-frame azimuth and elevation underneath.
+
+In Guide mode, a tap on the video is cast along the real LOS to find the
+ground point.
+
+**Gimbal angle frame.** The MAVLink spec says a gimbal reports roll and pitch in
+the earth frame. Gimbals with attitude feedback do that. ArduPilot's **servo**
+mount has no feedback, so it reports the body-frame servo angles it commands,
+even though its flags claim the earth frame. For a servo-driven gimbal, set
+`camera/gimbal_body_frame=true` in the settings file. Otherwise the HUD and
+camera-tap targets will be off whenever the aircraft banks or pitches.
+
+Motion is drawn every frame (about 60 fps). It is predicted from each sample's
+rates and timestamp (attitude at about 25 Hz, position at 10 Hz), so
+the horizon, heading tape and aircraft icon move continuously instead of in
+steps.
 
 Map tiles (OpenStreetMap / Esri World Imagery) are cached under
 `~/.cache/mavlink_gcs_ui/tiles`. The map works offline with whatever is

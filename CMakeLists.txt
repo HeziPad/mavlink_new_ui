@@ -55,6 +55,7 @@ add_executable(mavlink_gcs_ui
     src/ui/control_dock.cpp
     src/ui/fx_overlay.cpp
     src/ui/main_window.cpp
+    src/ui/orbit_panel.cpp
     src/ui/map_view.cpp
     src/ui/plan_strip.cpp
     src/ui/telemetry_bar.cpp

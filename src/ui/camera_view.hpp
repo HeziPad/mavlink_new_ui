@@ -11,9 +11,11 @@ namespace gcs::ui {
 class VideoReceiver;
 
 // Video feed (or a synthetic perspective-grid world when there is none) with
-// a fighter-style HUD: horizon + pitch ladder in camera geometry, heading
-// tape, AS/ALT tapes, flight-path marker. In guide mode a click is reported
-// as a pixel so the MainWindow can ray-cast it onto the ground.
+// a fighter-style HUD. The horizon, elevation ladder, LOS heading tape and
+// flight-path marker are drawn in camera geometry (from the gimbal's line of
+// sight, or the fixed mount), so they overlay the video. Separate readouts show
+// the aircraft's own attitude and the LOS relative to the platform. In guide
+// mode a click is reported as a pixel so the MainWindow can ray-cast it.
 class CameraView : public HudView {
     Q_OBJECT
 
@@ -24,6 +26,9 @@ public:
     QColor pipTagColor() const override;
 
     void setState(const VehicleState& s);
+    // predicted every frame: aircraft attitude and camera line of sight
+    void setMotion(const geo::Attitude& aircraft, const CameraLos& los);
+    void setAltitude(double alt_rel) { alt_.set(alt_rel); }
     void setCamera(double hfov_deg, double mount_pitch_deg);
     void setGuideMode(bool on);
     void tick(double dt);
@@ -43,6 +48,7 @@ private:
     void paintSynthetic(QPainter& p);
     void paintHud(QPainter& p);
     void paintHeadingTape(QPainter& p, const QRectF& r);
+    void paintReadouts(QPainter& p);
     void paintVerticalTape(QPainter& p, const QRectF& r, double value, double step, bool left,
                            const QString& label);
 
@@ -54,8 +60,12 @@ private:
     double frame_age_ = 1e9;
 
     VehicleState s_;
-    Tween roll_, pitch_, as_, alt_;
+    Tween roll_, pitch_, as_, alt_;  // aircraft
     AngleTween yaw_;
+    Tween cam_roll_, cam_el_;        // camera LOS, earth frame
+    AngleTween cam_az_;
+    Tween pan_rel_, tilt_rel_;       // LOS relative to the platform
+    bool gimbal_ = false;
     double hfov_ = 70.0;
     double mount_pitch_ = -30.0;
     double travelled_ = 0.0;

@@ -1,5 +1,6 @@
 #include "geo.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 namespace gcs::geo {
@@ -106,11 +107,44 @@ Mat3 cameraToNed(const CameraModel& cam, const Attitude& att) {
     return mul(body_to_ned, cam_to_body);
 }
 
+Mat3 eulerToMat(const Attitude& a) {
+    return mul(mul(rotZ(a.yaw_deg * kDegToRad), rotY(a.pitch_deg * kDegToRad)), rotX(a.roll_deg * kDegToRad));
+}
+
+Mat3 transpose(const Mat3& a) {
+    Mat3 r{};
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            r.m[i][j] = a.m[j][i];
+        }
+    }
+    return r;
+}
+
+Attitude matToEuler(const Mat3& r) {
+    Attitude a;
+    a.pitch_deg = std::asin(std::clamp(-r.m[2][0], -1.0, 1.0)) * kRadToDeg;
+    a.roll_deg = std::atan2(r.m[2][1], r.m[2][2]) * kRadToDeg;
+    a.yaw_deg = std::atan2(r.m[1][0], r.m[0][0]) * kRadToDeg;
+    return a;
+}
+
 double halfTanH(const CameraModel& cam) {
     return std::tan(cam.hfov_deg * 0.5 * kDegToRad);
 }
 
 }  // namespace
+
+Attitude composeMount(const Attitude& body, double mount_yaw_deg, double mount_pitch_deg) {
+    const Mat3 mount = mul(rotZ(mount_yaw_deg * kDegToRad), rotY(mount_pitch_deg * kDegToRad));
+    Attitude a = matToEuler(mul(eulerToMat(body), mount));
+    a.yaw_deg = wrap360(a.yaw_deg);
+    return a;
+}
+
+Attitude relativeTo(const Attitude& body, const Attitude& cam) {
+    return matToEuler(mul(transpose(eulerToMat(body)), eulerToMat(cam)));
+}
 
 Vec3 pixelRayNed(const CameraModel& cam, const Attitude& att, double px, double py) {
     const double th = halfTanH(cam);

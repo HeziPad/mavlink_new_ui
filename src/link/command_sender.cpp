@@ -1,6 +1,7 @@
 #include "command_sender.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 
 namespace gcs::link {
@@ -41,6 +42,22 @@ CommandRequest makeSetMissionCurrent(uint16_t seq) {
     return r;
 }
 
+CommandRequest makeReposition(double lat, double lon, float alt_rel, float radius_m, bool ccw) {
+    CommandRequest r;
+    r.command = MAV_CMD_DO_REPOSITION;
+    r.as_int = true;
+    r.frame = MAV_FRAME_GLOBAL_RELATIVE_ALT_INT;
+    r.params[0] = -1.0f;                                                    // ground speed: default
+    r.params[1] = static_cast<float>(MAV_DO_REPOSITION_FLAGS_CHANGE_MODE);  // -> GUIDED
+    r.params[2] = radius_m;                                                 // loiter radius (planes)
+    r.params[3] = ccw ? 1.0f : 0.0f;                                        // ArduPlane: 0 = clockwise
+    r.x = static_cast<int32_t>(std::llround(lat * 1.0e7));
+    r.y = static_cast<int32_t>(std::llround(lon * 1.0e7));
+    r.z = alt_rel;
+    r.label = "ORBIT";
+    return r;
+}
+
 CommandSender::CommandSender(SendFn send, ResultFn result)
     : send_(std::move(send)), result_(std::move(result)) {}
 
@@ -60,10 +77,16 @@ const char* CommandSender::resultName(uint8_t mav_result) {
 void CommandSender::transmit(Pending& p, Clock::time_point now) {
     mavlink_message_t msg{};
     const auto& q = p.req.params;
-    mavlink_msg_command_long_pack(ids_.own_sys, ids_.own_comp, &msg, ids_.target_sys,
-                                  ids_.target_comp, p.req.command,
-                                  static_cast<uint8_t>(std::min(p.attempts, 255)), q[0], q[1], q[2],
-                                  q[3], q[4], q[5], q[6]);
+    if (p.req.as_int) {
+        mavlink_msg_command_int_pack(ids_.own_sys, ids_.own_comp, &msg, ids_.target_sys, ids_.target_comp,
+                                     p.req.frame, p.req.command, 0, 0, q[0], q[1], q[2], q[3], p.req.x, p.req.y,
+                                     p.req.z);
+    } else {
+        mavlink_msg_command_long_pack(ids_.own_sys, ids_.own_comp, &msg, ids_.target_sys,
+                                      ids_.target_comp, p.req.command,
+                                      static_cast<uint8_t>(std::min(p.attempts, 255)), q[0], q[1], q[2],
+                                      q[3], q[4], q[5], q[6]);
+    }
     p.attempts += 1;
     p.last_tx = now;
     send_(msg);

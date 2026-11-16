@@ -69,7 +69,7 @@ MapView::MapView(TileCache* tiles, QWidget* parent) : HudView(parent), tiles_(ti
     // is ignored so Qt synthesises the mouse click the ViewHost swaps on.
     setAttribute(Qt::WA_AcceptTouchEvents);
     connect(tiles_, &TileCache::tileReady, this, qOverload<>(&QWidget::update));
-    heading_.rate = 10.0;
+    heading_.rate = 25.0;  // light smoothing on top of the per-frame prediction
     updateCursor();
 }
 
@@ -80,10 +80,14 @@ QString MapView::pipTag() const {
 void MapView::setState(const VehicleState& s) {
     s_ = s;
     vehicle_plan_ = s.mission_known ? extractPlan(s.mission) : MissionPlan{};
-    if (s.has_attitude) {
-        heading_.set(geo::wrap360(s.yaw_deg));
-    } else if (s.has_vfr_hud) {
-        heading_.set(s.heading_deg);
+    approach_ = s.mission_known ? extractApproach(s.mission) : std::nullopt;
+    if (!s.has_attitude && s.has_vfr_hud) {
+        heading_.set(s.heading_deg);  // otherwise set per frame from the prediction
+    }
+    if (!s.has_position) {
+        has_ac_ = false;
+    } else if (!has_ac_) {
+        setAircraftPosition(s.lat, s.lon);
     }
     if (!centred_) {
         if (s.has_position && (s.lat != 0.0 || s.lon != 0.0)) {
@@ -243,11 +247,23 @@ void MapView::insertAfter(int index) {
     select(index + 1);
 }
 
-void MapView::setGuidedTarget(bool has, double lat, double lon) {
-    has_target_ = has;
-    target_lat_ = lat;
-    target_lon_ = lon;
+void MapView::setAircraftPosition(double lat, double lon) {
+    has_ac_ = true;
+    ac_lat_ = lat;
+    ac_lon_ = lon;
+}
+
+void MapView::setHeading(double deg) {
+    heading_.set(geo::wrap360(deg));
+}
+
+void MapView::setOrbit(std::optional<OrbitDraw> orbit) {
+    orbit_ = orbit;
     update();
+}
+
+double MapView::metersPerPixel() const {
+    return std::cos(clat_ * geo::kDegToRad) * 2.0 * geo::kPi * geo::kEarthRadius / (kTile * std::exp2(zoom_));
 }
 
 void MapView::ping(double lat, double lon, const QColor& color) {
@@ -278,10 +294,10 @@ void MapView::tick(double dt) {
         }
     }
 
-    if ((follow_ || compact_) && s_.has_position && centred_ && !pressing_) {
+    if ((follow_ || compact_) && has_ac_ && centred_ && !pressing_) {
         const double k = 1.0 - std::exp(-6.0 * dt);
-        clat_ += (s_.lat - clat_) * k;
-        clon_ += (s_.lon - clon_) * k;
+        clat_ += (ac_lat_ - clat_) * k;
+        clon_ += (ac_lon_ - clon_) * k;
     }
 
     for (auto& pg : pings_) {
@@ -639,24 +655,8 @@ void MapView::paintEvent(QPaintEvent*) {
         }
     }
 
-    // guided target
-    if (has_target_) {
-        const QPointF t = toScreen(target_lat_, target_lon_);
-        if (s_.has_position) {
-            QPen dash(alpha(kCyan, 0.6), 1.2, Qt::DashLine);
-            dash.setDashOffset(-time_ * 8.0);
-            p.setPen(dash);
-            p.drawLine(toScreen(s_.lat, s_.lon), t);
-        }
-        p.save();
-        p.translate(t);
-        p.rotate(reducedMotion() ? 45.0 : std::fmod(time_ * 30.0, 90.0));
-        drawBrackets(p, QRectF(-14, -14, 28, 28), 7, kCyan, 2.0);
-        p.restore();
-        p.setPen(Qt::NoPen);
-        p.setBrush(kCyan);
-        p.drawEllipse(t, 2.5, 2.5);
-    }
+    paintApproach(p);
+    paintOrbit(p);
 
     // ping ripples (RTS move order)
     for (const auto& pg : pings_) {
@@ -829,15 +829,108 @@ void MapView::paintRoute(QPainter& p, const MissionPlan& plan, const QColor& c, 
         p.setPen(QPen(alpha(kGreen, 0.45), 1.3, Qt::DashLine));
         p.drawPath(spiral);
         marker(lp, kLandId, QStringLiteral("L"), kGreen,
-               QStringLiteral("LAND · spiral to %1 m").arg(plan.land->alt_rel, 0, 'f', 0));
+               QStringLiteral("LAND · approach %1 m").arg(plan.land->alt_rel, 0, 'f', 0));
+    }
+}
+
+void MapView::paintOrbit(QPainter& p) {
+    if (!orbit_) {
+        return;
+    }
+    const QPointF c = toScreen(orbit_->lat, orbit_->lon);
+    const double rpx = orbit_->radius / metersPerPixel();
+    const QColor col = orbit_->hold ? kCyan : kAmber;
+    // line from the aircraft while it's still on its way to the circle
+    if (has_ac_) {
+        const QPointF a = toScreen(ac_lat_, ac_lon_);
+        if (QLineF(a, c).length() > rpx * 1.3) {
+            QPen dash(alpha(col, 0.5), 1.2, Qt::DashLine);
+            dash.setDashOffset(-time_ * 8.0);
+            p.setPen(dash);
+            p.drawLine(a, c);
+        }
+    }
+    if (rpx > 4.0) {
+        QPen ring(alpha(col, 0.75), compact_ ? 1.2 : 1.8, Qt::CustomDashLine);
+        ring.setDashPattern({6, 5});
+        // the dashes march in the direction of the turn
+        const double phase = reducedMotion() ? 0.0 : std::fmod(time_ * 10.0, 11.0);
+        ring.setDashOffset(orbit_->ccw ? -phase : phase);
+        p.setPen(ring);
+        p.setBrush(alpha(col, 0.05));
+        p.drawEllipse(c, rpx, rpx);
+        if (!compact_) {
+            // direction chevrons at N / E / S / W
+            for (int k = 0; k < 4; ++k) {
+                const double ang = k * geo::kPi / 2.0;  // screen angle from +x
+                const QPointF at = c + QPointF(std::cos(ang) * rpx, std::sin(ang) * rpx);
+                // tangent: clockwise on screen (y down) is +90 deg from the radius
+                const double t = ang + (orbit_->ccw ? -geo::kPi / 2.0 : geo::kPi / 2.0);
+                const QPointF dir(std::cos(t), std::sin(t));
+                const QPointF n(-dir.y(), dir.x());
+                QPolygonF chev({at + dir * 6.0, at - dir * 4.0 + n * 5.0, at - dir * 1.0, at - dir * 4.0 - n * 5.0});
+                p.setPen(Qt::NoPen);
+                p.setBrush(alpha(col, 0.9));
+                p.drawPolygon(chev);
+            }
+        }
+    }
+    p.save();
+    p.translate(c);
+    p.rotate(reducedMotion() ? 45.0 : std::fmod(time_ * 30.0, 90.0));
+    drawBrackets(p, QRectF(-12, -12, 24, 24), 6, col, 2.0);
+    p.restore();
+    p.setPen(Qt::NoPen);
+    p.setBrush(col);
+    p.drawEllipse(c, 2.5, 2.5);
+}
+
+void MapView::paintApproach(QPainter& p) {
+    if (!approach_ || compact_) {
+        return;
+    }
+    const auto& a = *approach_;
+    const int lseq = landSeq(s_.mission);
+    const bool active = lseq >= 0 && s_.mission_current >= lseq;
+    const double op = active ? 1.0 : 0.35;
+    const QPointF c = toScreen(a.c_lat, a.c_lon);
+    const QPointF e = toScreen(a.e_lat, a.e_lon);
+    const QPointF l = toScreen(a.l_lat, a.l_lon);
+    const double rpx = a.radius / metersPerPixel();
+    // descent circle beside L, the tangent exit, and the straight leg into the wind
+    QPen ring(alpha(kGreen, 0.6 * op), 1.4, Qt::DashLine);
+    p.setPen(ring);
+    p.setBrush(Qt::NoBrush);
+    p.drawEllipse(c, rpx, rpx);
+    QPen leg(alpha(kGreen, 0.9 * op), 2.0, Qt::CustomDashLine, Qt::FlatCap);
+    leg.setDashPattern({5, 4});
+    leg.setDashOffset(reducedMotion() ? 0.0 : -std::fmod(time_ * 14.0, 9.0));
+    p.setPen(leg);
+    p.drawLine(e, l);
+    p.setPen(Qt::NoPen);
+    p.setBrush(alpha(kGreen, op));
+    p.drawEllipse(e, 3.5, 3.5);
+    // wind arrow beside L: blows toward the downwind side
+    if (s_.has_wind && s_.wind_speed >= 0.5) {
+        const double to = (s_.wind_from_deg + 180.0) * geo::kDegToRad;  // compass, 0 = up
+        const QPointF dir(std::sin(to), -std::cos(to));
+        const QPointF base = l + QPointF(-dir.y(), dir.x()) * 34.0 - dir * 18.0;
+        const QPointF tip = base + dir * 36.0;
+        p.setPen(QPen(alpha(kText, 0.8 * op + 0.2), 1.8));
+        p.drawLine(base, tip);
+        const QPointF n(-dir.y(), dir.x());
+        p.drawLine(tip, tip - dir * 8.0 + n * 5.0);
+        p.drawLine(tip, tip - dir * 8.0 - n * 5.0);
+        drawText(p, QRectF(base.x() - 30, base.y() - 22, 60, 14), Qt::AlignCenter,
+                 QStringLiteral("%1 m/s").arg(s_.wind_speed, 0, 'f', 1), monoFont(10), alpha(kText, 0.9));
     }
 }
 
 void MapView::paintAircraft(QPainter& p) {
-    if (!s_.has_position) {
+    if (!s_.has_position || !has_ac_) {
         return;
     }
-    const QPointF c = toScreen(s_.lat, s_.lon);
+    const QPointF c = toScreen(ac_lat_, ac_lon_);
     const VtolState v = effectiveVtolState(s_);
     const QColor col = vtolColor(v);
     const double scale = compact_ ? 0.75 : 1.0;
@@ -906,8 +999,7 @@ void MapView::paintOverlayChrome(QPainter& p) {
     double y = height() - 24.0;
 
     // scale bar
-    const double mpp = std::cos(clat_ * geo::kDegToRad) * 2.0 * geo::kPi * geo::kEarthRadius /
-                       (kTile * std::exp2(zoom_));
+    const double mpp = metersPerPixel();
     const double target = mpp * 110.0;
     const double mag = std::pow(10.0, std::floor(std::log10(target)));
     double nice = mag;
@@ -940,8 +1032,10 @@ void MapView::paintOverlayChrome(QPainter& p) {
             parts << QStringLiteral("LAND %1").arg(formatDistance(geo::distance(s_.lat, s_.lon, l.lat, l.lon)));
         }
     }
-    if (has_target_ && s_.has_position) {
-        parts << QStringLiteral("TGT %1").arg(formatDistance(geo::distance(s_.lat, s_.lon, target_lat_, target_lon_)));
+    if (orbit_ && s_.has_position) {
+        parts << QStringLiteral("%1 %2")
+                     .arg(orbit_->hold ? QStringLiteral("HOLD") : QStringLiteral("TGT"))
+                     .arg(formatDistance(geo::distance(s_.lat, s_.lon, orbit_->lat, orbit_->lon)));
     }
     if (!parts.isEmpty()) {
         const QString text = parts.join(QStringLiteral("  ·  "));

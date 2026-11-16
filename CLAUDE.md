@@ -41,15 +41,23 @@ Three layers with a strict dependency direction: `core` ← `link` ← `ui`.
 ## ArduPlane / SITL gotchas (verified against SITL)
 
 - GUIDED takeoff must use `MAV_CMD_NAV_TAKEOFF` (22), not `MAV_CMD_NAV_VTOL_TAKEOFF` (84).
-- Product rule: **the lift rotors are only for takeoff and landing.** Hold is always LOITER, never QLOITER. A GUIDED takeoff ends in a rotor hover (`QPOS_POSITION2`), so `MainWindow::checkTakeoffHandoff` switches to LOITER at about the takeoff altitude. `Q_GUIDED_MODE` must be 0, or GUIDED targets end in a hover. The GCS reads it and alerts. Don't "solve" the rule by disarming in flight: that stops the pusher too.
-- The mission layout (`core/mission.cpp`) is `HOME` → `NAV_VTOL_TAKEOFF` → WPs → `DO_JUMP`(→2, repeat −1) → optional `NAV_VTOL_LAND` with `param1 = 1`, which is the fixed-wing spiral approach. The land item is only reached through `MAV_CMD_DO_SET_MISSION_CURRENT` (Land button).
-  - The land item's `z` is the spiral's target altitude, and it must not be 0. `Location::sanitize` reads a relative alt of 0 as "current altitude", so the aircraft would back-transition at cruise height and descend the whole way on the rotors. This was seen in SITL.
-  - The "VTOL land too short" arming check only fires when a `NAV_WAYPOINT` directly precedes the land item. The `DO_JUMP` in between avoids it.
+- Product rule: **the lift rotors are only for takeoff and landing.** Hold and Guide are GUIDED orbits via `DO_REPOSITION` (COMMAND_INT): `param2` flag CHANGE_MODE, `param3` radius, `param4` 0 = CW. Re-sending with the same centre changes the radius, altitude or direction live, which LOITER can't do (it only uses `WP_LOITER_RAD`). They are never QLOITER. A GUIDED takeoff ends in a rotor hover (`QPOS_POSITION2`), so `MainWindow::checkTakeoffHandoff` calls `hold()` at about the takeoff altitude. `Q_GUIDED_MODE` must be 0, or GUIDED targets end in a hover. The GCS reads it and alerts. Don't "solve" the rule by disarming in flight: that stops the pusher too.
+- The mission layout (`core/mission.cpp`) is `HOME` → `NAV_VTOL_TAKEOFF` → WPs → `DO_JUMP`(→2, repeat −1) → optional `NAV_LOITER_TO_ALT` (the approach circle beside L, ±radius = CW/CCW, `param4` = 1 tangent exit) → `NAV_VTOL_LAND` (`param1` = 0). The landing is only reached through `MAV_CMD_DO_SET_MISSION_CURRENT`. The Land button first re-uploads the approach with the current `WIND`. Auto after an aborted landing sets the current item back to the loop.
+  - ArduPlane only stays on the wing toward a VTOL_LAND beyond `transition_threshold = 1.5·v²/(2·Q_TRANS_DECEL)` (about 234 m at 25 m/s). Closer than that it goes straight to rotor position control. Its built-in spiral option (`param1` = 1) breaks out about one loiter radius from L, which is inside that threshold. In SITL that meant 79 s on the rotors. That's why the GCS builds its own circle and straight leg (`computeLandingApproach`).
+  - `NAV_LOITER_TO_ALT` completes when the altitude is reached *and* the aircraft is heading toward the next item, so it leaves on the tangent.
+  - The circle's `z` is the approach altitude. It must not be 0, because `Location::sanitize` reads a relative 0 as "current altitude".
+  - The VTOL_LAND's `z` must be 0, meaning ground at home level. Without a rangefinder, ArduPlane uses the land item's altitude as the ground for its descent profile (`relative_ground_altitude` → `height_above_target`). With z = approach alt, it thinks it's already down and descends the whole way at `Q_LAND_FINAL_SPD` (0.5 m/s). In SITL that was 61 s instead of about 20 s.
+  - The "VTOL land too short" arming check only fires when a `NAV_WAYPOINT` directly precedes the land item. The `LOITER_TO_ALT` in between avoids it.
   - A one-waypoint loop uses `NAV_LOITER_UNLIM` instead.
 - Q_ASSIST can spin the lift rotors in cruise, and speed assist sends no STATUSTEXT. The LIFT ROTORS indicator therefore reads `SERVO_OUTPUT_RAW` and maps outputs with `SERVOn_FUNCTION` 33–40.
 - QRTL entered in wing-borne flight flies home on the wing, then lands vertically.
+- Gimbal: ArduPilot's `GIMBAL_DEVICE_ATTITUDE_STATUS` gives roll/pitch in the earth frame and yaw in the vehicle frame (flag). `core::cameraLos` turns that, or the fixed tilt setting, into an earth-frame camera attitude plus pan/tilt relative to the platform.
 - ArduPlane reports `vtol_state` as FW while parked on the ground, so don't infer "hovering" from it alone.
 - Don't gate Launch on the prearm-healthy bit. It is evaluated for the *current* mode (e.g. "QRTL mode not armable") and doesn't apply to the mode Launch switches to.
+
+## UI motion
+
+Telemetry arrives at 10–25 Hz. Don't draw the latest sample through a fast exponential tween: it arrives in about 60 ms and then sits still, which looks like a staircase. `MainWindow::frame` pulls every frame and calls `predictAttitude` / `predictPosition` (last sample + rate × age, capped), then views apply light smoothing on top.
 
 ## Qt gotchas
 

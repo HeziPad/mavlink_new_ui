@@ -51,8 +51,7 @@ public:
     void setMode(uint32_t custom_mode, const std::string& tag);
     void uploadMission(std::vector<MissionItem> items);
     void downloadMission();
-    // Switches to GUIDED first when needed, then sends MISSION_ITEM_INT current=2.
-    void guidedGoto(double lat, double lon, float alt_rel);
+
 
 private:
     using Task = std::function<void()>;
@@ -65,10 +64,10 @@ private:
     void decodeTelemetry(const mavlink_message_t& msg);
     void periodic(Clock::time_point now);
     void sendMessage(const mavlink_message_t& msg);
-    void sendGuidedItem();
     void requestStreams(Clock::time_point now);
     void requestParams(Clock::time_point now);
     void handleParamValue(const mavlink_message_t& msg);
+    void decodeGimbal(const mavlink_message_t& msg);
     void publish(LinkEvent ev);
     void wake();
 
@@ -101,15 +100,10 @@ private:
     Clock::time_point last_param_request_{};
     int param_rounds_ = 0;
 
-    struct GuidedTarget {
-        bool pending = false;     // waiting for MISSION_ACK
-        bool armed_send = false;  // waiting for mode change before sending
-        double lat = 0.0;
-        double lon = 0.0;
-        float alt = 0.0f;
-        Clock::time_point sent{};
-        int attempts = 0;
-    } guided_;
+    // message rate measurement (1 s window)
+    Clock::time_point rate_t0_{};
+    int attitude_count_ = 0;
+    int position_count_ = 0;
 };
 
 }  // namespace gcs::link

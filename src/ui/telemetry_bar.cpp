@@ -286,7 +286,7 @@ void TelemetryBar::paintEvent(QPaintEvent*) {
     p.setRenderHint(QPainter::Antialiasing);
 
     // chip widths at scale 1
-    const double kLink = 104, kMode = 128, kVtol = 112, kLift = 104, kArm = 84, kAlt = 92, kSpd = 132,
+    const double kLink = 104, kMode = 128, kVtol = 112, kLift = 104, kArm = 84, kAlt = 116, kSpd = 132,
                  kBat = 156, kGps = 92, kSys = 108;
     const double widths[] = {kLink, kMode, kVtol, kLift, kArm, kAlt, kSpd, kBat, kGps, kSys};
     double total = 0;
@@ -415,7 +415,11 @@ void TelemetryBar::paintEvent(QPaintEvent*) {
     // ---- altitude ----------------------------------------------------------
     {
         const QRectF r = next(kAlt);
-        const QString v = s_.has_position ? QString::number(alt_.value, 'f', 1) : QStringLiteral("—");
+        QString v = s_.has_position ? QString::number(alt_.value, 'f', 0) : QStringLiteral("—");
+        // commanded altitude when the autopilot is navigating to one
+        if (s_.has_position && s_.has_nav && s_.armed && std::abs(s_.nav_alt_error) >= 1.5) {
+            v += QStringLiteral("→%1").arg(s_.alt_rel + s_.nav_alt_error, 0, 'f', 0);
+        }
         chip(p, r, QStringLiteral("Alt m"), v, kText);
     }
 

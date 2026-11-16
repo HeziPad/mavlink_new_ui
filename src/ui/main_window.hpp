@@ -8,6 +8,7 @@
 #include <QWidget>
 
 #include <memory>
+#include <optional>
 #include <string>
 
 class QTimer;
@@ -22,6 +23,7 @@ class CameraView;
 class ControlDock;
 class FxOverlay;
 class MapView;
+class OrbitPanel;
 class PlanStrip;
 class TelemetryBar;
 class TileCache;
@@ -38,6 +40,7 @@ struct AppSettings {
     float land_approach_alt = 30.0f;  // fixed-wing spiral descends to this, then VTOL
     double camera_hfov = 70.0;
     double camera_tilt = -30.0;
+    bool gimbal_body_frame = false;  // ArduPilot servo mounts report body-frame angles
     int map_layer = 0;
     bool follow = true;
     bool reduced_motion = false;
@@ -73,6 +76,8 @@ private:
     void refreshDock();
     void refreshPlanStrip();
     void refreshPanel();
+    void refreshOrbitPanel();
+    void updateMotion();
     void checkTakeoffHandoff();
     void layoutOverlays();
 
@@ -83,6 +88,10 @@ private:
     void syncPlan();
     void setGuide(bool on);
     void sendGuided(double lat, double lon);
+    void sendOrbit();
+    void adjustOrbit(float d_alt, float d_radius, bool flip);
+    double defaultRadius() const;
+    void startLandingApproach();
     void onCameraClick(double px, double py, double w, double h);
     void launchOrAuto();
     void hold();
@@ -102,6 +111,7 @@ private:
     ControlDock* dock_ = nullptr;
     PlanStrip* strip_ = nullptr;
     WaypointPanel* panel_ = nullptr;
+    OrbitPanel* orbit_panel_ = nullptr;
     FxOverlay* fx_ = nullptr;
 
     QTimer* timer_ = nullptr;
@@ -122,6 +132,27 @@ private:
     bool takeoff_handoff_ = false;
     bool handoff_seen_guided_ = false;
     LiftRotors last_lift_ = LiftRotors::Unknown;
+
+    // The circle we commanded in GUIDED (Hold or a Guide target) via
+    // DO_REPOSITION. Edited live from the orbit panel; changes are coalesced
+    // and re-sent at most every kOrbitResendMs.
+    struct Orbit {
+        double lat = 0.0;
+        double lon = 0.0;
+        float alt = 80.0f;
+        float radius = 80.0f;
+        bool ccw = false;
+        bool hold = true;  // false: a Guide target
+    };
+    std::optional<Orbit> orbit_;
+    bool orbit_dirty_ = false;
+    qint64 orbit_sent_ms_ = 0;
+    static constexpr qint64 kOrbitResendMs = 300;
+
+    // Land: the approach is recomputed with the current wind and re-uploaded
+    // first; the jump into it happens when the upload is acknowledged.
+    bool land_pending_ = false;
+    int resume_seq_ = 2;  // loop item to resume after an aborted landing
 };
 
 }  // namespace gcs::ui

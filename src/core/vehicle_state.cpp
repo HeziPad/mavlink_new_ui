@@ -1,5 +1,8 @@
 #include "vehicle_state.hpp"
 
+#include <algorithm>
+#include <cmath>
+
 #include "plane_modes.hpp"
 
 #include <limits>
@@ -161,6 +164,66 @@ const char* liftRotorsName(LiftRotors r) {
     case LiftRotors::Assist: return "ASSIST";
     default: return "--";
     }
+}
+
+namespace {
+double secondsSince(Clock::time_point t, Clock::time_point now) {
+    if (t == Clock::time_point{}) {
+        return 0.0;
+    }
+    return std::chrono::duration<double>(now - t).count();
+}
+}  // namespace
+
+void bodyRatesToEuler(double roll_rad, double pitch_rad, double p, double q, double r, double& roll_rate,
+                      double& pitch_rate, double& yaw_rate) {
+    const double sr = std::sin(roll_rad), cr = std::cos(roll_rad);
+    const double cp = std::max(0.05, std::cos(pitch_rad));  // avoid the gimbal-lock blow-up
+    const double tp = std::sin(pitch_rad) / cp;
+    roll_rate = (p + (q * sr + r * cr) * tp) * geo::kRadToDeg;
+    pitch_rate = (q * cr - r * sr) * geo::kRadToDeg;
+    yaw_rate = ((q * sr + r * cr) / cp) * geo::kRadToDeg;
+}
+
+geo::Attitude predictAttitude(const VehicleState& s, Clock::time_point now) {
+    const double age = std::clamp(secondsSince(s.att_rx, now), 0.0, kMaxPredictAttitude);
+    geo::Attitude a;
+    a.roll_deg = s.roll_deg + s.roll_rate * age;
+    a.pitch_deg = s.pitch_deg + s.pitch_rate * age;
+    a.yaw_deg = geo::wrap360(s.yaw_deg + s.yaw_rate * age);
+    return a;
+}
+
+PredictedPosition predictPosition(const VehicleState& s, Clock::time_point now) {
+    const double age = std::clamp(secondsSince(s.pos_rx, now), 0.0, kMaxPredictPosition);
+    PredictedPosition p;
+    geo::offset(s.lat, s.lon, s.vn * age, s.ve * age, p.lat, p.lon);
+    p.alt_rel = s.alt_rel - s.vd * age;
+    return p;
+}
+
+CameraLos cameraLos(const VehicleState& s, const geo::Attitude& aircraft, double fixed_tilt_deg,
+                    Clock::time_point now, bool gimbal_body_frame) {
+    CameraLos los;
+    if (s.has_gimbal && secondsSince(s.gimbal_rx, now) < kGimbalTimeout && gimbal_body_frame) {
+        los.gimbal = true;
+        los.earth = geo::composeMount(aircraft, s.gimbal_yaw, s.gimbal_pitch);
+        los.pan_rel = s.gimbal_yaw;
+        los.tilt_rel = s.gimbal_pitch;
+    } else if (s.has_gimbal && secondsSince(s.gimbal_rx, now) < kGimbalTimeout) {
+        los.gimbal = true;
+        los.earth.roll_deg = s.gimbal_roll;
+        los.earth.pitch_deg = s.gimbal_pitch;
+        los.earth.yaw_deg = geo::wrap360(s.gimbal_yaw_earth ? s.gimbal_yaw : aircraft.yaw_deg + s.gimbal_yaw);
+        const geo::Attitude rel = geo::relativeTo(aircraft, los.earth);
+        los.pan_rel = rel.yaw_deg;
+        los.tilt_rel = rel.pitch_deg;
+    } else {
+        los.earth = geo::composeMount(aircraft, 0.0, fixed_tilt_deg);
+        los.pan_rel = 0.0;
+        los.tilt_rel = fixed_tilt_deg;
+    }
+    return los;
 }
 
 }  // namespace gcs
