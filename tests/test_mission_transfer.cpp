@@ -56,8 +56,10 @@ struct Harness {
 };
 
 std::vector<MissionItem> sampleMission() {
-    return buildVtolMission(-35.363, 149.165, 584.0,
-                            {{-35.36, 149.16, 80.0f}, {-35.35, 149.17, 80.0f}}, 40.0f);
+    MissionPlan plan;
+    plan.wps = {{-35.36, 149.16, 80.0f}, {-35.35, 149.17, 80.0f}};
+    plan.land = UserWaypoint{-35.362, 149.166, 30.0f};
+    return buildLoopMission(-35.363, 149.165, 584.0, plan, 40.0f);
 }
 
 uint16_t itemSeq(const mavlink_message_t& m) {

@@ -67,6 +67,8 @@ private:
     void sendMessage(const mavlink_message_t& msg);
     void sendGuidedItem();
     void requestStreams(Clock::time_point now);
+    void requestParams(Clock::time_point now);
+    void handleParamValue(const mavlink_message_t& msg);
     void publish(LinkEvent ev);
     void wake();
 
@@ -96,6 +98,8 @@ private:
     Clock::time_point last_home_request_{};
     bool streams_requested_ = false;
     bool initial_download_done_ = false;
+    Clock::time_point last_param_request_{};
+    int param_rounds_ = 0;
 
     struct GuidedTarget {
         bool pending = false;     // waiting for MISSION_ACK

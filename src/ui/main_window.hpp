@@ -27,6 +27,7 @@ class TelemetryBar;
 class TileCache;
 class VideoReceiver;
 class ViewHost;
+class WaypointPanel;
 
 struct AppSettings {
     QString host = QStringLiteral("127.0.0.1");
@@ -34,12 +35,12 @@ struct AppSettings {
     int video_port = 5600;
     float takeoff_alt = 40.0f;
     float waypoint_alt = 80.0f;
+    float land_approach_alt = 30.0f;  // fixed-wing spiral descends to this, then VTOL
     double camera_hfov = 70.0;
     double camera_tilt = -30.0;
     int map_layer = 0;
     bool follow = true;
     bool reduced_motion = false;
-    double min_land_approach = 120.0;
     double cruise_speed = 18.0;
 
     static AppSettings load();
@@ -47,7 +48,7 @@ struct AppSettings {
 };
 
 // Composes the views, HUD and link, and owns the meaning of the six dock
-// slots. Everything runs off one 60 Hz timer: state is pulled from the link
+// slots (Plan, Launch/Auto, Guide, Hold, Land, QRTL). Everything runs off one 60 Hz timer: state is pulled from the link
 // at 30 Hz, animations step every tick.
 class MainWindow : public QWidget {
     Q_OBJECT
@@ -62,7 +63,8 @@ protected:
     bool eventFilter(QObject* obj, QEvent* e) override;
 
 private:
-    enum Slot { kSwap = 0, kPlan = 1, kLaunch = 2, kGuide = 3, kHold = 4, kQrtl = 5 };
+    // Map/camera swap has no slot: tap the picture-in-picture.
+    enum Slot { kPlan = 0, kLaunch = 1, kGuide = 2, kHold = 3, kLand = 4, kQrtl = 5 };
 
     void frame();
     void pullState();
@@ -70,6 +72,8 @@ private:
     void updateAlerts();
     void refreshDock();
     void refreshPlanStrip();
+    void refreshPanel();
+    void checkTakeoffHandoff();
     void layoutOverlays();
 
     void onTriggered(int slot);
@@ -82,6 +86,7 @@ private:
     void onCameraClick(double px, double py, double w, double h);
     void launchOrAuto();
     void hold();
+    void land();
     void qrtl();
     int slotForTag(const std::string& tag) const;
 
@@ -96,6 +101,7 @@ private:
     TelemetryBar* bar_ = nullptr;
     ControlDock* dock_ = nullptr;
     PlanStrip* strip_ = nullptr;
+    WaypointPanel* panel_ = nullptr;
     FxOverlay* fx_ = nullptr;
 
     QTimer* timer_ = nullptr;
@@ -111,6 +117,11 @@ private:
     bool link_was_alive_ = false;
     std::string last_mode_;
     int last_vtol_ = -1;
+    // GUIDED takeoff ends in a rotor hover; hand over to LOITER on the wing
+    // once it reaches altitude (rotors are for takeoff and landing only)
+    bool takeoff_handoff_ = false;
+    bool handoff_seen_guided_ = false;
+    LiftRotors last_lift_ = LiftRotors::Unknown;
 };
 
 }  // namespace gcs::ui

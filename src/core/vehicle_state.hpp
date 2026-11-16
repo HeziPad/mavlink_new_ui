@@ -2,6 +2,7 @@
 
 #include "mission.hpp"
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <string>
@@ -99,6 +100,13 @@ struct VehicleState {
     // ---- VTOL ---------------------------------------------------------------
     bool has_ext_state = false;
     VtolState reported_vtol = VtolState::Unknown;
+    // Wing-borne at least once since the last hover. ArduPlane reports Q_ASSIST
+    // in cruise as TRANSITION_TO_FW, so this separates "assisting" from a real
+    // forward transition after takeoff. Maintained by updateCruiseLatch().
+    bool cruised_since_hover = false;
+    // When wing-borne lift-motor spin started (zero = not spinning). Lets a
+    // spin-down after a transition pass without being called assist.
+    Clock::time_point wingborne_spin_since{};
     LandedState landed = LandedState::Unknown;
 
     // ---- mission ------------------------------------------------------------
@@ -107,6 +115,16 @@ struct VehicleState {
     bool mission_known = false;             // downloaded or uploaded this session
     std::vector<MissionItem> mission;       // what the vehicle holds (incl. home at 0)
     bool mission_transfer_active = false;
+
+    // ---- parameters (read once after connect) -----------------------------------
+    int q_guided_mode = -1;                 // Q_GUIDED_MODE, -1 unknown
+    std::array<int, 16> servo_function{};   // SERVOn_FUNCTION, 0 until read
+    int servo_functions_known = 0;          // how many of the 16 have arrived
+    bool servo_map_final = false;           // all arrived, or gave up waiting
+
+    // ---- outputs ------------------------------------------------------------
+    bool has_servo_raw = false;
+    std::array<uint16_t, 16> servo_raw{};   // SERVO_OUTPUT_RAW, PWM us
 
     // ---- trail --------------------------------------------------------------
     std::vector<TrailPoint> trail;
@@ -124,5 +142,26 @@ bool prearmHealthy(const VehicleState& s);
 bool ekfHealthy(const VehicleState& s);
 bool gpsHealthy(const VehicleState& s);
 const char* vtolStateName(VtolState v);
+
+// Lift (VTOL) rotor activity, from the motor outputs.
+//   Off     lift motors idle (wing-borne or disarmed)
+//   Active  expected use: hover, transition, or armed on the ground
+//   Assist  wing-borne but a lift motor is spinning (Q_ASSIST stall help)
+enum class LiftRotors { Unknown, Off, Active, Assist };
+// SERVOn_FUNCTION 33..40 are Motor1..8, the quadplane lift motors.
+constexpr int kServoFnMotor1 = 33;
+constexpr int kServoFnMotor8 = 40;
+// Above this PWM a lift motor is considered spinning (idle/disarmed output is
+// ~1000 us; Q_M_SPIN_ARM sits around 1100).
+constexpr uint16_t kLiftSpinPwm = 1150;
+// Lift motors still spinning down after a forward transition look like
+// assist for a moment; only call it assist once it lasts this long.
+constexpr auto kAssistDebounce = std::chrono::seconds(2);
+LiftRotors liftRotorState(const VehicleState& s, Clock::time_point now);
+// Call after reported_vtol / landed change.
+void updateCruiseLatch(VehicleState& s);
+// Call after servo outputs or VTOL state change.
+void updateAssistTimer(VehicleState& s, Clock::time_point now);
+const char* liftRotorsName(LiftRotors r);
 
 }  // namespace gcs

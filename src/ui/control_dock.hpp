@@ -11,11 +11,11 @@
 
 namespace gcs::ui {
 
-enum class DockIcon { Swap, Plan, Upload, Launch, Takeoff, Auto, Guide, Hold, Qrtl };
+enum class DockIcon { Plan, Upload, Launch, Takeoff, Auto, Guide, Hold, Land, Qrtl };
 
 struct DockSlotSpec {
     QString label;
-    DockIcon icon = DockIcon::Swap;
+    DockIcon icon = DockIcon::Plan;
     bool enabled = true;
     QString reason;            // tooltip / toast when disabled
     QString hint;              // tooltip when enabled

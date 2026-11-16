@@ -20,6 +20,8 @@ struct CommandRequest {
 CommandRequest makeSetMode(uint32_t custom_mode, const std::string& label);
 CommandRequest makeArm(bool arm);
 CommandRequest makeVtolTakeoff(float alt_rel);
+// MAV_CMD_DO_SET_MISSION_CURRENT: continue the mission from `seq`.
+CommandRequest makeSetMissionCurrent(uint16_t seq);
 
 // COMMAND_LONG sender with COMMAND_ACK tracking and retransmission.
 //

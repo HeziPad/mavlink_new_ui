@@ -62,6 +62,7 @@ add_executable(mavlink_gcs_ui
     src/ui/tile_cache.cpp
     src/ui/video_receiver.cpp
     src/ui/view_host.cpp
+    src/ui/waypoint_panel.cpp
 )
 target_link_libraries(mavlink_gcs_ui PRIVATE gcs_core Qt6::Widgets Qt6::Network)
 gcs_warnings(mavlink_gcs_ui)
@@ -75,7 +76,7 @@ endif()
 
 # ---- tests ----------------------------------------------------------------------
 enable_testing()
-foreach(name geo mission_builder mission_transfer command_sender)
+foreach(name geo mission_builder mission_transfer command_sender lift_rotors)
     add_executable(test_${name} tests/test_${name}.cpp)
     target_link_libraries(test_${name} PRIVATE gcs_core)
     gcs_warnings(test_${name})

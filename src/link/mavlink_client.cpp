@@ -10,9 +10,12 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <utility>
 
 namespace gcs::link {
@@ -624,6 +627,26 @@ void MavlinkClient::decodeTelemetry(const mavlink_message_t& msg) {
         s.has_ext_state = true;
         s.reported_vtol = toVtol(e.vtol_state);
         s.landed = toLanded(e.landed_state);
+        updateCruiseLatch(s);
+        updateAssistTimer(s, now);
+        break;
+    }
+    case MAVLINK_MSG_ID_PARAM_VALUE:
+        handleParamValue(msg);
+        break;
+    case MAVLINK_MSG_ID_SERVO_OUTPUT_RAW: {
+        mavlink_servo_output_raw_t o{};
+        mavlink_msg_servo_output_raw_decode(&msg, &o);
+        if (o.port != 0) {
+            break;  // a second bank would be outputs 17..32; not used
+        }
+        const uint16_t raw[16] = {o.servo1_raw,  o.servo2_raw,  o.servo3_raw,  o.servo4_raw,
+                                  o.servo5_raw,  o.servo6_raw,  o.servo7_raw,  o.servo8_raw,
+                                  o.servo9_raw,  o.servo10_raw, o.servo11_raw, o.servo12_raw,
+                                  o.servo13_raw, o.servo14_raw, o.servo15_raw, o.servo16_raw};
+        std::copy(std::begin(raw), std::end(raw), s.servo_raw.begin());
+        s.has_servo_raw = true;
+        updateAssistTimer(s, now);
         break;
     }
     case MAVLINK_MSG_ID_MISSION_CURRENT: {
@@ -660,8 +683,57 @@ void MavlinkClient::requestStreams(Clock::time_point now) {
     commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_EKF_STATUS_REPORT, 1.0), now);
     commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_MISSION_CURRENT, 1.0), now);
     commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_HOME_POSITION, 0.5), now);
+    commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_SERVO_OUTPUT_RAW, 4.0), now);
     last_stream_request_ = now;
     streams_requested_ = true;
+}
+
+// The few parameters the UI needs: Q_GUIDED_MODE (Guide must stay on the
+// wing) and SERVOn_FUNCTION (which outputs are lift motors). Missing ones are
+// re-requested every 3 s, for a bounded number of rounds.
+void MavlinkClient::requestParams(Clock::time_point now) {
+    last_param_request_ = now;
+    ++param_rounds_;
+    auto request = [&](const std::string& name) {
+        char id[16] = {};
+        std::memcpy(id, name.data(), std::min(name.size(), sizeof(id)));
+        mavlink_message_t msg{};
+        mavlink_msg_param_request_read_pack(ids_.own_sys, ids_.own_comp, &msg, ids_.target_sys,
+                                            ids_.target_comp, id, -1);
+        sendMessage(msg);
+    };
+    if (state_.q_guided_mode < 0) {
+        request("Q_GUIDED_MODE");
+    }
+    for (int i = 0; i < 16; ++i) {
+        if (state_.servo_function[i] == 0) {
+            request("SERVO" + std::to_string(i + 1) + "_FUNCTION");
+        }
+    }
+}
+
+void MavlinkClient::handleParamValue(const mavlink_message_t& msg) {
+    mavlink_param_value_t p{};
+    mavlink_msg_param_value_decode(&msg, &p);
+    const std::string name(p.param_id, strnlen(p.param_id, sizeof(p.param_id)));
+    const int value = static_cast<int>(std::lround(p.param_value));
+    if (name == "Q_GUIDED_MODE") {
+        state_.q_guided_mode = value;
+        return;
+    }
+    // SERVOn_FUNCTION, n = 1..16
+    if (name.size() > 14 && name.compare(0, 5, "SERVO") == 0 &&
+        name.compare(name.size() - 9, 9, "_FUNCTION") == 0) {
+        const int n = std::atoi(name.substr(5, name.size() - 14).c_str());
+        if (n >= 1 && n <= 16) {
+            // 0 doubles as "not read yet", so store "disabled" as -1
+            const int stored = value == 0 ? -1 : value;
+            if (state_.servo_function[n - 1] == 0) {
+                ++state_.servo_functions_known;
+            }
+            state_.servo_function[n - 1] = stored;
+        }
+    }
 }
 
 void MavlinkClient::periodic(Clock::time_point now) {
@@ -684,6 +756,19 @@ void MavlinkClient::periodic(Clock::time_point now) {
         (now - last_stream_request_ >= seconds(10) &&
          (!state_.has_attitude || !state_.has_ext_state || !state_.has_vfr_hud))) {
         requestStreams(now);
+    }
+
+    const bool params_missing = state_.q_guided_mode < 0 || state_.servo_functions_known < 16;
+    if (params_missing && state_.has_heartbeat && param_rounds_ < 10 &&
+        now - last_param_request_ >= seconds(3) && now - last_stream_request_ >= milliseconds(500)) {
+        requestParams(now);
+    }
+    // a board with fewer outputs never answers for the missing SERVOn; go with
+    // what arrived once the retries are used up
+    const bool map_final = state_.servo_functions_known >= 16 || (param_rounds_ >= 10 && now - last_param_request_ >= seconds(3));
+    if (map_final != state_.servo_map_final) {
+        state_.servo_map_final = map_final;
+        state_dirty_ = true;
     }
 
     if (!state_.has_home && now - last_home_request_ >= seconds(5)) {

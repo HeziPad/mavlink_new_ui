@@ -33,6 +33,14 @@ CommandRequest makeVtolTakeoff(float alt_rel) {
     return r;
 }
 
+CommandRequest makeSetMissionCurrent(uint16_t seq) {
+    CommandRequest r;
+    r.command = MAV_CMD_DO_SET_MISSION_CURRENT;
+    r.params[0] = static_cast<float>(seq);
+    r.label = "MISSION " + std::to_string(seq);
+    return r;
+}
+
 CommandSender::CommandSender(SendFn send, ResultFn result)
     : send_(std::move(send)), result_(std::move(result)) {}
 

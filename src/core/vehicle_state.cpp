@@ -97,4 +97,70 @@ const char* vtolStateName(VtolState v) {
     return "\xE2\x80\x94";
 }
 
+namespace {
+
+LiftRotors rawLiftRotorState(const VehicleState& s) {
+    if (!s.has_servo_raw || !s.servo_map_final) {
+        return LiftRotors::Unknown;
+    }
+    bool any_motor = false;
+    bool spinning = false;
+    for (size_t i = 0; i < s.servo_function.size(); ++i) {
+        const int fn = s.servo_function[i];
+        if (fn >= kServoFnMotor1 && fn <= kServoFnMotor8) {
+            any_motor = true;
+            spinning = spinning || s.servo_raw[i] >= kLiftSpinPwm;
+        }
+    }
+    if (!any_motor) {
+        return LiftRotors::Unknown;
+    }
+    if (!spinning) {
+        return LiftRotors::Off;
+    }
+    // Hover, transitions and the ground are where the lift rotors are supposed
+    // to run. Wing-borne flight, or a "transition" after the aircraft already
+    // reached cruise (how ArduPlane reports Q_ASSIST), is assist.
+    const VtolState v = effectiveVtolState(s);
+    const bool wingborne = v == VtolState::Cruise || (v == VtolState::TransitionToCruise && s.cruised_since_hover);
+    return wingborne ? LiftRotors::Assist : LiftRotors::Active;
+}
+
+}  // namespace
+
+LiftRotors liftRotorState(const VehicleState& s, Clock::time_point now) {
+    const LiftRotors raw = rawLiftRotorState(s);
+    if (raw == LiftRotors::Assist &&
+        (s.wingborne_spin_since == Clock::time_point{} || now - s.wingborne_spin_since < kAssistDebounce)) {
+        return LiftRotors::Active;  // probably still spinning down after the transition
+    }
+    return raw;
+}
+
+void updateAssistTimer(VehicleState& s, Clock::time_point now) {
+    if (rawLiftRotorState(s) != LiftRotors::Assist) {
+        s.wingborne_spin_since = {};
+    } else if (s.wingborne_spin_since == Clock::time_point{}) {
+        s.wingborne_spin_since = now;
+    }
+}
+
+void updateCruiseLatch(VehicleState& s) {
+    if (s.landed == LandedState::OnGround || s.reported_vtol == VtolState::Hover ||
+        s.reported_vtol == VtolState::TransitionToHover) {
+        s.cruised_since_hover = false;
+    } else if (s.reported_vtol == VtolState::Cruise) {
+        s.cruised_since_hover = true;
+    }
+}
+
+const char* liftRotorsName(LiftRotors r) {
+    switch (r) {
+    case LiftRotors::Off: return "OFF";
+    case LiftRotors::Active: return "ACTIVE";
+    case LiftRotors::Assist: return "ASSIST";
+    default: return "--";
+    }
+}
+
 }  // namespace gcs

@@ -3,7 +3,7 @@
 A minimalist, game-style ground control station for an ArduPilot **QuadPlane**
 (4 lift rotors + pusher), talking MAVLink v2 over UDP. It has a full-bleed map or
 camera with a swappable picture-in-picture, a compact telemetry strip, and six
-buttons.
+buttons. It is touch-first, with the mouse as an alternative.
 
 C++17 · Qt 6 Widgets · MAVLink `c_library_v2` · GStreamer (optional, for video).
 
@@ -24,7 +24,7 @@ builds, and the camera view shows the synthetic HUD only.
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build
-ctest --test-dir build        # geo, mission builder, mission transfer, command sender
+ctest --test-dir build        # geo, mission builder, mission transfer, command sender, lift rotors
 ```
 
 ## Run
@@ -58,28 +58,59 @@ and shows `NO VIDEO`.
 
 | Key | Button | What it does |
 |-----|--------|--------------|
-| 1 | **Swap** | Swap map ↔ camera (clicking the PiP also swaps) |
-| 2 | **Plan / Sync ↑** | First press: edit the mission on the map. Second press: upload it. **Hold**: re-download the vehicle's mission |
-| 3 | **Takeoff / Launch / Auto** | On the ground (**hold 1 s** to confirm): with a mission → AUTO + arm; without → GUIDED + arm + VTOL takeoff. Airborne: resume AUTO |
-| 4 | **Guide** | Toggle. Click the map, or the ground in the camera view, to fly there (GUIDED) |
-| 5 | **Hold** | Instant. QLOITER when hovering / slow, LOITER when wing-borne |
-| 6 | **QRTL** | Instant. Return home and land vertically |
+| 1 | **Plan / Sync ↑** | First press: edit the mission on the map. Second press: upload it. **Hold**: re-download the vehicle's mission |
+| 2 | **Takeoff / Launch / Auto** | On the ground (**hold 1 s** to confirm): with a mission → AUTO + arm; without → GUIDED + arm + VTOL takeoff, then LOITER on the wing at takeoff altitude. Airborne: resume the loop (AUTO) |
+| 3 | **Guide** | Toggle. Tap the map, or the ground in the camera view, to fly there on the wing (GUIDED) |
+| 4 | **Hold** | Instant. LOITER: circle on the wing. During a landing this is a go-around |
+| 5 | **Land** | **Hold 1 s**. Fly to the planned landing point, spiral down on the wing, land vertically. Locked until the vehicle's mission has a landing point |
+| 6 | **QRTL** | Instant. Return home on the wing and land vertically |
 
-`Esc` leaves Plan/Guide. `Ctrl+Z` undoes a plan edit. Locked buttons show why
-on hover, and say it in the comms log when pressed.
+To swap the map and camera, tap the small picture-in-picture view.
 
-**Planning:** click to add, drag to move, right-click to delete, mouse wheel
-over a point to change its altitude. The upload is built as `HOME` →
-`NAV_VTOL_TAKEOFF` (40 m) → your waypoints → `NAV_VTOL_LAND` at your *last*
-point. ArduPlane won't arm if the final leg into the land point is shorter than
-its back-transition distance (about 120 m with default parameters). The plan
-strip warns when it is.
+Everything is made for touch first, with the mouse as an alternative. Locked
+buttons say why when pressed (and on hover with a mouse). Tap **SYSTEMS** in
+the telemetry bar for the pre-flight checklist. `Esc` deselects or leaves
+Plan/Guide, `Del` deletes the selected point, and `Ctrl+Z` undoes a plan edit.
+
+**The lift rotors are for takeoff and landing only.** Every flight action above
+keeps the aircraft on the wing. The **LIFT ROTORS** chip in the telemetry bar
+shows **OFF**, **ACTIVE** (hover / transition / on the ground) or **ASSIST**.
+ASSIST means the rotors spun up in wing-borne flight to prevent a stall
+(`Q_ASSIST_SPEED` and friends), and it also raises a toast. The aircraft stays
+armed in cruise: disarming would stop the pusher too. The GCS reads
+`Q_GUIDED_MODE` at connect and shows an alert if it is 1, because Guide would
+then end in a rotor hover.
+
+**Planning:** the waypoints form a **loop that is flown forever** until you
+press Hold, Land or QRTL.
+
+- **Map:** tap to add a waypoint, drag to move one, pinch to zoom.
+- **Editing a point:** tap a point to select it. A panel then lets you set
+  its altitude (−10 / −1 / +1 / +10, hold to repeat), insert a point after
+  it, or delete it. Tap empty map to deselect.
+- **Landing point:** tap **+ LANDING** in the plan strip, then tap the map.
+  The landing point is optional and separate from the loop. Its altitude
+  (default 30 m, editable in the panel) is the **approach altitude**: the
+  aircraft spirals down to it on the wing and only then switches to the lift
+  rotors for the vertical descent.
+- **Mouse extras:** the wheel over a point changes its altitude by 5 m, and
+  right-click deletes the point.
+
+The upload is built as:
+
+```
+HOME → NAV_VTOL_TAKEOFF (40 m) → WP1 … WPn → DO_JUMP(WP1, forever) [→ NAV_VTOL_LAND at L, fixed-wing spiral approach, z = approach alt]
+```
+
+With a single waypoint, the aircraft circles it (`NAV_LOITER_UNLIM`) instead of
+jumping. The mission never reaches the land item by itself. **Land** jumps to it
+with `MAV_CMD_DO_SET_MISSION_CURRENT`.
 
 ## Settings
 
 `~/.config/mavlink_gcs_ui/mavlink_gcs_ui.conf` is created on first run.
-You can edit the link and video ports, takeoff and default waypoint altitude,
-cruise speed (used for the ETA), minimum land approach, camera HFOV and tilt
+You can edit the link and video ports, takeoff, default waypoint and landing approach altitude,
+cruise speed (used for the lap time), camera HFOV and tilt
 (used to turn camera clicks into ground targets), and reduced motion. The map
 layer and follow state are remembered automatically. Command-line options
 override the file for one run.

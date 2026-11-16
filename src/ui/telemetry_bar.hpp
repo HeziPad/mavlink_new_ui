@@ -13,8 +13,9 @@ namespace gcs::ui {
 class ChecklistPanel;
 
 // Floating glass strip of segmented telemetry chips. Numbers ease towards new
-// values; mode / VTOL chips flash on change. Hovering SYSTEMS opens a
-// pre-flight checklist panel underneath.
+// values; mode / VTOL chips flash on change. Hovering (or tapping) SYSTEMS
+// opens a pre-flight checklist panel underneath. LIFT ROTORS shows whether
+// the VTOL motors are idle, in expected use, or assisting in cruise.
 class TelemetryBar : public QWidget {
     Q_OBJECT
 
@@ -23,10 +24,11 @@ public:
 
     void setState(const VehicleState& s, Clock::time_point now);
     void tick(double dt);
-    QSize sizeHint() const override { return {1040, 50}; }
+    QSize sizeHint() const override { return {1150, 50}; }
 
 protected:
     void paintEvent(QPaintEvent* e) override;
+    void mousePressEvent(QMouseEvent* e) override;
     void mouseMoveEvent(QMouseEvent* e) override;
     void leaveEvent(QEvent* e) override;
     void hideEvent(QHideEvent* e) override;
@@ -43,6 +45,7 @@ private:
     void showChecklist(bool on);
 
     VehicleState s_;
+    Clock::time_point now_{};
     bool alive_ = false;
     double hb_age_ = 1e9;
     double msg_rate_ = 0.0;

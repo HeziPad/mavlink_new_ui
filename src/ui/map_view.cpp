@@ -7,6 +7,8 @@
 #include <QFontMetricsF>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPointingDevice>
+#include <QTouchEvent>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -21,7 +23,12 @@ namespace {
 constexpr double kTile = 256.0;
 constexpr double kMaxZoom = 19.5;
 constexpr double kMinZoom = 2.0;
-constexpr double kHitRadius = 15.0;
+constexpr double kHitRadiusMouse = 15.0;
+constexpr double kHitRadiusTouch = 28.0;  // a fingertip is ~7 mm; keep points easy to grab
+constexpr double kDragSlopMouse = 4.0;
+constexpr double kDragSlopTouch = 12.0;
+constexpr float kMinAlt = 10.0f;
+constexpr float kMaxAlt = 500.0f;
 constexpr size_t kUndoDepth = 64;
 
 QPointF worldPx(double lat, double lon, double zoom) {
@@ -58,6 +65,9 @@ QColor vtolColor(VtolState v) {
 }  // namespace
 
 MapView::MapView(TileCache* tiles, QWidget* parent) : HudView(parent), tiles_(tiles) {
+    // Touch is handled here (pinch zoom + one-finger tap/drag); in PiP mode it
+    // is ignored so Qt synthesises the mouse click the ViewHost swaps on.
+    setAttribute(Qt::WA_AcceptTouchEvents);
     connect(tiles_, &TileCache::tileReady, this, qOverload<>(&QWidget::update));
     heading_.rate = 10.0;
     updateCursor();
@@ -69,7 +79,7 @@ QString MapView::pipTag() const {
 
 void MapView::setState(const VehicleState& s) {
     s_ = s;
-    vehicle_wps_ = s.mission_known ? extractUserWaypoints(s.mission) : std::vector<UserWaypoint>{};
+    vehicle_plan_ = s.mission_known ? extractPlan(s.mission) : MissionPlan{};
     if (s.has_attitude) {
         heading_.set(geo::wrap360(s.yaw_deg));
     } else if (s.has_vfr_hud) {
@@ -91,7 +101,11 @@ void MapView::setState(const VehicleState& s) {
 
 void MapView::setMode(Mode m) {
     mode_ = m;
-    drag_wp_ = -1;
+    drag_wp_ = kNone;
+    if (m != Mode::Plan) {
+        select(kNone);
+        setAddTool(AddTool::Waypoint);
+    }
     updateCursor();
     update();
 }
@@ -112,9 +126,11 @@ void MapView::setFollow(bool on) {
     }
 }
 
-void MapView::setPlan(std::vector<UserWaypoint> plan) {
+void MapView::setPlan(MissionPlan plan) {
     plan_ = std::move(plan);
     undo_.clear();
+    alt_edit_wp_ = kNone;
+    select(kNone);
     emit planChanged();
     update();
 }
@@ -123,8 +139,9 @@ void MapView::clearPlan() {
     if (plan_.empty()) {
         return;
     }
-    pushUndo();
-    plan_.clear();
+    editPlan();
+    plan_ = MissionPlan{};
+    select(kNone);
     emit planChanged();
     update();
 }
@@ -135,6 +152,10 @@ void MapView::undo() {
     }
     plan_ = std::move(undo_.back());
     undo_.pop_back();
+    alt_edit_wp_ = kNone;
+    if (sel_ >= static_cast<int>(plan_.wps.size()) || (sel_ == kLandId && !plan_.land)) {
+        select(kNone);
+    }
     emit planChanged();
     update();
 }
@@ -144,6 +165,82 @@ void MapView::pushUndo() {
     if (undo_.size() > kUndoDepth) {
         undo_.erase(undo_.begin());
     }
+}
+
+void MapView::editPlan() {
+    pushUndo();
+    alt_edit_wp_ = kNone;
+}
+
+void MapView::setAddTool(AddTool t) {
+    if (tool_ != t) {
+        tool_ = t;
+        emit addToolChanged(t);
+        updateCursor();
+    }
+}
+
+void MapView::select(int id) {
+    if (sel_ != id) {
+        sel_ = id;
+        emit selectionChanged(id);
+        update();
+    }
+}
+
+void MapView::adjustAltitude(int id, float delta) {
+    UserWaypoint* wp = nullptr;
+    if (id == kLandId && plan_.land) {
+        wp = &*plan_.land;
+    } else if (id >= 0 && id < static_cast<int>(plan_.wps.size())) {
+        wp = &plan_.wps[id];
+    } else {
+        return;
+    }
+    if (alt_edit_wp_ != id) {
+        pushUndo();  // a run of +/- presses on one point undoes in one step
+        alt_edit_wp_ = id;
+    }
+    auto& alt = wp->alt_rel;
+    alt = std::clamp(alt + delta, kMinAlt, kMaxAlt);
+    emit planChanged();
+    update();
+}
+
+void MapView::deletePoint(int id) {
+    if (id == kLandId && plan_.land) {
+        editPlan();
+        plan_.land.reset();
+    } else if (id >= 0 && id < static_cast<int>(plan_.wps.size())) {
+        editPlan();
+        plan_.wps.erase(plan_.wps.begin() + id);
+    } else {
+        return;
+    }
+    hover_wp_ = kNone;
+    select(kNone);
+    emit planChanged();
+    update();
+}
+
+void MapView::insertAfter(int index) {
+    const int n = static_cast<int>(plan_.wps.size());
+    if (index < 0 || index >= n) {
+        return;
+    }
+    editPlan();
+    const auto& a = plan_.wps[index];
+    UserWaypoint mid = a;
+    if (n > 1) {
+        const auto& b = plan_.wps[(index + 1) % n];  // the loop closes back to WP1
+        mid = {(a.lat + b.lat) / 2.0, (a.lon + b.lon) / 2.0, (a.alt_rel + b.alt_rel) / 2.0f};
+    } else {
+        geo::offset(a.lat, a.lon, 0.0, 150.0, mid.lat, mid.lon);  // 150 m east
+    }
+    plan_.wps.insert(plan_.wps.begin() + index + 1, mid);
+    ping(mid.lat, mid.lon, kAmber);
+    emit planChanged();
+    select(index + 1);
 }
 
 void MapView::setGuidedTarget(bool has, double lat, double lon) {
@@ -208,20 +305,30 @@ void MapView::toLatLon(const QPointF& pt, double& lat, double& lon) const {
 }
 
 int MapView::planPointAt(const QPointF& pos) const {
-    for (int i = static_cast<int>(plan_.size()) - 1; i >= 0; --i) {
-        const QPointF sp = toScreen(plan_[i].lat, plan_[i].lon);
-        if (QLineF(sp, pos).length() <= kHitRadius) {
-            return i;
+    const double radius = touch_input_ ? kHitRadiusTouch : kHitRadiusMouse;
+    int best = kNone;
+    double best_d = radius;
+    auto consider = [&](int id, const UserWaypoint& wp) {
+        const double d = QLineF(toScreen(wp.lat, wp.lon), pos).length();
+        if (d <= best_d) {  // nearest wins, later points on ties
+            best_d = d;
+            best = id;
         }
+    };
+    for (int i = 0; i < static_cast<int>(plan_.wps.size()); ++i) {
+        consider(i, plan_.wps[i]);
     }
-    return -1;
+    if (plan_.land) {
+        consider(kLandId, *plan_.land);
+    }
+    return best;
 }
 
 void MapView::updateCursor() {
     if (compact_) {
         setCursor(Qt::PointingHandCursor);
     } else if (mode_ == Mode::Plan) {
-        setCursor(hover_wp_ >= 0 ? Qt::SizeAllCursor : Qt::CrossCursor);
+        setCursor(hover_wp_ != kNone ? Qt::SizeAllCursor : Qt::CrossCursor);
     } else if (mode_ == Mode::Guide) {
         setCursor(Qt::CrossCursor);
     } else {
@@ -230,47 +337,105 @@ void MapView::updateCursor() {
 }
 
 // ---- input -----------------------------------------------------------------------
+//
+// Mouse and one-finger touch share pointerPress/Move/Release. Two fingers pinch
+// to zoom (and pan with the midpoint). Mouse-only extras: right-click deletes a
+// point, the wheel over a point changes its altitude.
+
+bool MapView::event(QEvent* e) {
+    switch (e->type()) {
+    case QEvent::TouchBegin:
+    case QEvent::TouchUpdate:
+    case QEvent::TouchEnd:
+    case QEvent::TouchCancel:
+        if (compact_) {
+            e->ignore();  // let Qt synthesise a click for the PiP swap
+            return false;
+        }
+        handleTouch(static_cast<QTouchEvent*>(e));
+        return true;
+    default:
+        return HudView::event(e);
+    }
+}
+
+void MapView::handleTouch(QTouchEvent* e) {
+    touch_input_ = true;
+    const auto& pts = e->points();
+    if (e->type() == QEvent::TouchCancel) {
+        pressing_ = dragged_ = pinching_ = false;
+        drag_wp_ = kNone;
+        update();
+        return;
+    }
+    if (pts.size() >= 2) {
+        const QPointF a = pts[0].position();
+        const QPointF b = pts[1].position();
+        const QPointF mid = (a + b) / 2.0;
+        const double dist = std::max(1.0, QLineF(a, b).length());
+        if (!pinching_) {
+            // a second finger turns whatever the first one started into a pinch
+            if (pressing_ && drag_wp_ != kNone && dragged_) {
+                undo();  // put a half-dragged point back
+            }
+            pressing_ = dragged_ = false;
+            drag_wp_ = kNone;
+            pinching_ = true;
+            pinch_dist0_ = dist;
+            pinch_zoom0_ = zoom_;
+            toLatLon(mid, pinch_lat_, pinch_lon_);
+            setFollow(false);
+        }
+        zoom_ = zoom_target_ = std::clamp(pinch_zoom0_ + std::log2(dist / pinch_dist0_), kMinZoom, kMaxZoom);
+        // keep the point that started under the fingers under them
+        const QPointF w = worldPx(pinch_lat_, pinch_lon_, zoom_) - (mid - QPointF(width() / 2.0, height() / 2.0));
+        worldToLatLon(w, zoom_, clat_, clon_);
+        anchor_valid_ = false;
+        update();
+        if (e->type() == QEvent::TouchEnd) {
+            pinching_ = false;
+        }
+        return;
+    }
+    if (pts.isEmpty()) {
+        return;
+    }
+    const QPointF pos = pts[0].position();
+    if (pinching_) {
+        // one finger left after a pinch: wait for all fingers to lift
+        if (e->type() == QEvent::TouchEnd) {
+            pinching_ = false;
+        }
+        return;
+    }
+    switch (e->type()) {
+    case QEvent::TouchBegin:
+        pointerPress(pos);
+        break;
+    case QEvent::TouchUpdate:
+        pointerMove(pos);
+        break;
+    case QEvent::TouchEnd:
+        pointerRelease(pos);
+        break;
+    default:
+        break;
+    }
+}
 
 void MapView::mousePressEvent(QMouseEvent* e) {
     if (compact_) {
         return;
     }
+    touch_input_ = e->pointingDevice() && e->pointingDevice()->type() == QInputDevice::DeviceType::TouchScreen;
     const QPointF pos = e->position();
-    if (e->button() == Qt::LeftButton) {
-        if (follow_chip_.contains(pos)) {
-            setFollow(!follow_);
-            return;
-        }
-        if (layer_chip_.contains(pos)) {
-            setLayer(layer_ == TileCache::Streets ? TileCache::Satellite : TileCache::Streets);
-            return;
-        }
-    }
     if (mode_ == Mode::Plan && e->button() == Qt::RightButton) {
-        const int i = planPointAt(pos);
-        if (i >= 0) {
-            pushUndo();
-            plan_.erase(plan_.begin() + i);
-            hover_wp_ = -1;
-            emit planChanged();
-            update();
-        }
+        deletePoint(planPointAt(pos));
         return;
     }
-    if (e->button() != Qt::LeftButton) {
-        return;
+    if (e->button() == Qt::LeftButton) {
+        pointerPress(pos);
     }
-    pressing_ = true;
-    dragged_ = false;
-    press_pos_ = last_pos_ = pos;
-    drag_wp_ = -1;
-    if (mode_ == Mode::Plan) {
-        drag_wp_ = planPointAt(pos);
-        if (drag_wp_ >= 0) {
-            pushUndo();
-        }
-    }
-    updateCursor();
 }
 
 void MapView::mouseMoveEvent(QMouseEvent* e) {
@@ -279,26 +444,10 @@ void MapView::mouseMoveEvent(QMouseEvent* e) {
     }
     const QPointF pos = e->position();
     if (pressing_) {
-        if (!dragged_ && QLineF(pos, press_pos_).length() > 4.0) {
-            dragged_ = true;
-            updateCursor();
-        }
-        if (dragged_) {
-            if (drag_wp_ >= 0) {
-                toLatLon(pos, plan_[drag_wp_].lat, plan_[drag_wp_].lon);
-                emit planChanged();
-            } else {
-                const QPointF d = pos - last_pos_;
-                const QPointF w = worldPx(clat_, clon_, zoom_) - d;
-                worldToLatLon(w, zoom_, clat_, clon_);
-                anchor_valid_ = false;
-                setFollow(false);
-            }
-            update();
-        }
-        last_pos_ = pos;
+        pointerMove(pos);
         return;
     }
+    touch_input_ = false;  // hovering only happens with a mouse
     if (mode_ == Mode::Plan) {
         const int h = planPointAt(pos);
         if (h != hover_wp_) {
@@ -310,27 +459,91 @@ void MapView::mouseMoveEvent(QMouseEvent* e) {
 }
 
 void MapView::mouseReleaseEvent(QMouseEvent* e) {
-    if (compact_ || e->button() != Qt::LeftButton || !pressing_) {
+    if (compact_ || e->button() != Qt::LeftButton) {
+        return;
+    }
+    pointerRelease(e->position());
+}
+
+void MapView::pointerPress(const QPointF& pos) {
+    if (follow_chip_.contains(pos)) {
+        setFollow(!follow_);
+        return;
+    }
+    if (layer_chip_.contains(pos)) {
+        setLayer(layer_ == TileCache::Streets ? TileCache::Satellite : TileCache::Streets);
+        return;
+    }
+    pressing_ = true;
+    dragged_ = false;
+    press_pos_ = last_pos_ = pos;
+    drag_wp_ = mode_ == Mode::Plan ? planPointAt(pos) : kNone;
+    updateCursor();
+}
+
+void MapView::pointerMove(const QPointF& pos) {
+    if (!pressing_) {
+        return;
+    }
+    const double slop = touch_input_ ? kDragSlopTouch : kDragSlopMouse;
+    if (!dragged_ && QLineF(pos, press_pos_).length() > slop) {
+        dragged_ = true;
+        if (drag_wp_ != kNone) {
+            editPlan();
+            select(drag_wp_);
+        }
+        updateCursor();
+    }
+    if (dragged_) {
+        if (drag_wp_ != kNone) {
+            UserWaypoint& wp = drag_wp_ == kLandId ? *plan_.land : plan_.wps[drag_wp_];
+            toLatLon(pos, wp.lat, wp.lon);
+            emit planChanged();
+        } else {
+            const QPointF d = pos - last_pos_;
+            const QPointF w = worldPx(clat_, clon_, zoom_) - d;
+            worldToLatLon(w, zoom_, clat_, clon_);
+            anchor_valid_ = false;
+            setFollow(false);
+        }
+        update();
+    }
+    last_pos_ = pos;
+}
+
+void MapView::pointerRelease(const QPointF& pos) {
+    if (!pressing_) {
         return;
     }
     pressing_ = false;
-    const QPointF pos = e->position();
     if (!dragged_) {
         double lat = 0.0, lon = 0.0;
         toLatLon(pos, lat, lon);
-        if (mode_ == Mode::Plan && drag_wp_ < 0) {
-            pushUndo();
-            const float alt = plan_.empty() ? default_alt_ : plan_.back().alt_rel;
-            plan_.push_back({lat, lon, alt});
-            ping(lat, lon, kAmber);
-            emit planChanged();
-        } else if (mode_ == Mode::Plan && drag_wp_ >= 0) {
-            undo_.pop_back();  // a click on a point is not an edit
+        if (mode_ == Mode::Plan) {
+            if (drag_wp_ != kNone) {
+                select(drag_wp_ == sel_ ? kNone : drag_wp_);  // tap a point: select / deselect
+            } else if (tool_ == AddTool::Landing) {
+                editPlan();
+                const float approach = plan_.land ? plan_.land->alt_rel : default_land_alt_;
+                plan_.land = UserWaypoint{lat, lon, approach};
+                ping(lat, lon, kGreen);
+                setAddTool(AddTool::Waypoint);
+                emit planChanged();
+                select(kLandId);
+            } else if (sel_ != kNone) {
+                select(kNone);  // tap empty map: first deselect, next tap adds
+            } else {
+                editPlan();
+                const float alt = plan_.wps.empty() ? default_alt_ : plan_.wps.back().alt_rel;
+                plan_.wps.push_back({lat, lon, alt});
+                ping(lat, lon, kAmber);
+                emit planChanged();
+            }
         } else if (mode_ == Mode::Guide) {
             emit guideClicked(lat, lon);
         }
     }
-    drag_wp_ = -1;
+    drag_wp_ = kNone;
     dragged_ = false;
     updateCursor();
     update();
@@ -340,14 +553,12 @@ void MapView::wheelEvent(QWheelEvent* e) {
     if (compact_) {
         return;
     }
+    touch_input_ = false;
     const double steps = e->angleDelta().y() / 120.0;
     if (mode_ == Mode::Plan) {
         const int i = planPointAt(e->position());
         if (i >= 0) {
-            pushUndo();
-            plan_[i].alt_rel = std::clamp(plan_[i].alt_rel + static_cast<float>(steps * 5.0), 10.0f, 500.0f);
-            emit planChanged();
-            update();
+            adjustAltitude(i, static_cast<float>(steps * 5.0));
             return;
         }
     }
@@ -395,19 +606,20 @@ void MapView::paintEvent(QPaintEvent*) {
     }
 
     // routes: the vehicle's mission underneath, the plan being edited on top
-    int active = -1;
-    if (s_.mission_current >= 2) {
-        active = s_.mission_current - 2;
+    const int land_seq = s_.mission_known ? landSeq(s_.mission) : -1;
+    int active = s_.mission_known ? seqToWaypointIndex(s_.mission, s_.mission_current) : kNone;
+    if (land_seq >= 0 && s_.mission_current == land_seq) {
+        active = kLandId;
     }
     if (mode_ == Mode::Plan) {
-        if (!vehicle_wps_.empty()) {
+        if (!vehicle_plan_.empty()) {
             p.setOpacity(0.35);
-            paintRoute(p, vehicle_wps_, kCyan, false, -1);
+            paintRoute(p, vehicle_plan_, kCyan, false, kNone);
             p.setOpacity(1.0);
         }
-        paintRoute(p, plan_, kAmber, true, -1);
-    } else if (!vehicle_wps_.empty()) {
-        paintRoute(p, vehicle_wps_, kCyan, false, active);
+        paintRoute(p, plan_, kAmber, true, kNone);
+    } else if (!vehicle_plan_.empty()) {
+        paintRoute(p, vehicle_plan_, kCyan, false, active);
     }
 
     // trail: fades along its length
@@ -513,46 +725,61 @@ void MapView::paintTiles(QPainter& p) {
     p.restore();
 }
 
-void MapView::paintRoute(QPainter& p, const std::vector<UserWaypoint>& pts, const QColor& c, bool editable,
-                         int active_index) {
-    if (pts.empty()) {
-        return;
+void MapView::paintRoute(QPainter& p, const MissionPlan& plan, const QColor& c, bool editable, int active_index) {
+    const auto& pts = plan.wps;
+    auto stroke = [&](const QPolygonF& line, double opacity, bool closed) {
+        // glow underlay + marching ants showing the direction of travel
+        p.setBrush(Qt::NoBrush);
+        p.setPen(QPen(alpha(c, 0.22 * opacity), 6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        closed ? p.drawPolygon(line) : p.drawPolyline(line);
+        QPen ants(alpha(c, opacity), 2.0, Qt::CustomDashLine, Qt::FlatCap, Qt::RoundJoin);
+        ants.setDashPattern({5, 4});
+        ants.setDashOffset(reducedMotion() ? 0.0 : -std::fmod(time_ * 14.0, 9.0));
+        p.setPen(ants);
+        closed ? p.drawPolygon(line) : p.drawPolyline(line);
+    };
+
+    // takeoff leg: home -> WP1, fainter (flown once)
+    if (s_.has_home && !pts.empty()) {
+        stroke(QPolygonF{toScreen(s_.home_lat, s_.home_lon), toScreen(pts[0].lat, pts[0].lon)}, 0.45, false);
     }
-    QPolygonF line;
-    if (s_.has_home) {
-        line << toScreen(s_.home_lat, s_.home_lon);
+    // the loop itself, closed back to WP1
+    if (pts.size() > 1) {
+        QPolygonF loop;
+        for (const auto& wp : pts) {
+            loop << toScreen(wp.lat, wp.lon);
+        }
+        stroke(loop, 1.0, true);
+    } else if (pts.size() == 1 && !compact_) {
+        // one point: the aircraft circles it
+        const QPointF sp = toScreen(pts[0].lat, pts[0].lon);
+        QPen ring(alpha(c, 0.7), 1.5, Qt::DashLine);
+        p.setPen(ring);
+        p.setBrush(Qt::NoBrush);
+        p.drawEllipse(sp, 30, 30);
     }
-    for (const auto& wp : pts) {
-        line << toScreen(wp.lat, wp.lon);
-    }
-    // marching ants show direction of travel
-    p.setBrush(Qt::NoBrush);
-    p.setPen(QPen(alpha(c, 0.22), 6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    p.drawPolyline(line);
-    QPen ants(c, 2.0, Qt::CustomDashLine, Qt::FlatCap, Qt::RoundJoin);
-    ants.setDashPattern({5, 4});
-    ants.setDashOffset(reducedMotion() ? 0.0 : -std::fmod(time_ * 14.0, 9.0));
-    p.setPen(ants);
-    p.drawPolyline(line);
 
     if (compact_) {
+        p.setPen(Qt::NoPen);
+        p.setBrush(c);
         for (const auto& wp : pts) {
-            p.setPen(Qt::NoPen);
-            p.setBrush(c);
             p.drawEllipse(toScreen(wp.lat, wp.lon), 3, 3);
+        }
+        if (plan.land) {
+            p.setBrush(kGreen);
+            p.drawEllipse(toScreen(plan.land->lat, plan.land->lon), 3, 3);
         }
         return;
     }
 
     const QFont nf = monoFont(11, true);
     const QFont af = monoFont(10);
-    for (size_t i = 0; i < pts.size(); ++i) {
-        const QPointF sp = toScreen(pts[i].lat, pts[i].lon);
-        const bool last = i + 1 == pts.size();
-        const bool is_active = static_cast<int>(i) == active_index;
-        const bool hot = editable && (static_cast<int>(i) == hover_wp_ || static_cast<int>(i) == drag_wp_);
-        double rad = 12.0 + (hot ? 2.0 : 0.0);
-        QColor mc = c;
+    auto marker = [&](const QPointF& sp, int id, const QString& label, const QColor& base, const QString& caption) {
+        const bool is_active = id == active_index && active_index != kNone;
+        const bool is_sel = editable && id == sel_;
+        const bool hot = editable && (id == hover_wp_ || id == drag_wp_ || is_sel);
+        const double rad = 12.0 + (hot ? 2.0 : 0.0) + (is_sel ? 2.0 : 0.0);
+        QColor mc = base;
         if (is_active) {
             mc = kGreen;
             if (!reducedMotion()) {
@@ -562,17 +789,16 @@ void MapView::paintRoute(QPainter& p, const std::vector<UserWaypoint>& pts, cons
                 p.drawPath(hexPath(sp, rad + 4 + 14 * ph));
             }
         }
+        if (is_sel) {
+            // selection: corner brackets, so it reads at a glance under a finger
+            drawBrackets(p, QRectF(sp.x() - rad - 7, sp.y() - rad - 7, 2 * rad + 14, 2 * rad + 14), 6, kText, 1.6);
+        }
         const QPainterPath hex = hexPath(sp, rad);
         p.setPen(Qt::NoPen);
         p.setBrush(alpha(kBg, 0.85));
         p.drawPath(hex);
         drawGlowPath(p, hex, mc, hot ? 2.0 : 1.4, hot ? 8 : 4);
-        drawText(p, QRectF(sp.x() - 12, sp.y() - 12, 24, 24), Qt::AlignCenter,
-                 last ? QStringLiteral("L") : QString::number(i + 1), nf, mc);
-        QString caption = editable ? QStringLiteral("%1 m").arg(pts[i].alt_rel, 0, 'f', 0) : QString();
-        if (last) {
-            caption = caption.isEmpty() ? QStringLiteral("VTOL LAND") : caption + QStringLiteral(" · LAND");
-        }
+        drawText(p, QRectF(sp.x() - 12, sp.y() - 12, 24, 24), Qt::AlignCenter, label, nf, mc);
         if (!caption.isEmpty()) {
             // beside the marker, so route legs (which leave from the centre) rarely cross it
             const double cw = QFontMetricsF(af).horizontalAdvance(caption) + 10;
@@ -582,6 +808,28 @@ void MapView::paintRoute(QPainter& p, const std::vector<UserWaypoint>& pts, cons
             p.drawRect(cr);
             drawText(p, cr, Qt::AlignCenter, caption, af, alpha(mc, 0.95));
         }
+    };
+
+    for (size_t i = 0; i < pts.size(); ++i) {
+        marker(toScreen(pts[i].lat, pts[i].lon), static_cast<int>(i), QString::number(i + 1), c,
+               QStringLiteral("%1 m").arg(pts[i].alt_rel, 0, 'f', 0));
+    }
+    if (plan.land) {
+        const QPointF lp = toScreen(plan.land->lat, plan.land->lon);
+        // spiral glyph: the approach is flown on the wing, circling down
+        QPainterPath spiral;
+        for (int k = 0; k <= 90; ++k) {
+            const double t = k / 90.0;
+            const double ang = t * 4.0 * geo::kPi + time_ * (reducedMotion() ? 0.0 : 0.6);
+            const double rr = 34.0 - 16.0 * t;
+            const QPointF q = lp + QPointF(std::cos(ang) * rr, std::sin(ang) * rr);
+            k == 0 ? spiral.moveTo(q) : spiral.lineTo(q);
+        }
+        p.setBrush(Qt::NoBrush);
+        p.setPen(QPen(alpha(kGreen, 0.45), 1.3, Qt::DashLine));
+        p.drawPath(spiral);
+        marker(lp, kLandId, QStringLiteral("L"), kGreen,
+               QStringLiteral("LAND · spiral to %1 m").arg(plan.land->alt_rel, 0, 'f', 0));
     }
 }
 
@@ -682,11 +930,14 @@ void MapView::paintOverlayChrome(QPainter& p) {
     if (s_.has_home && s_.has_position) {
         parts << QStringLiteral("HOME %1").arg(formatDistance(geo::distance(s_.lat, s_.lon, s_.home_lat, s_.home_lon)));
     }
-    if (s_.has_position && s_.mission_current >= 2) {
-        const int idx = s_.mission_current - 2;
-        if (idx >= 0 && idx < static_cast<int>(vehicle_wps_.size())) {
-            const auto& wp = vehicle_wps_[idx];
+    if (s_.has_position && s_.mission_known) {
+        const int idx = seqToWaypointIndex(s_.mission, s_.mission_current);
+        if (idx >= 0 && idx < static_cast<int>(vehicle_plan_.wps.size())) {
+            const auto& wp = vehicle_plan_.wps[idx];
             parts << QStringLiteral("WP%1 %2").arg(idx + 1).arg(formatDistance(geo::distance(s_.lat, s_.lon, wp.lat, wp.lon)));
+        } else if (vehicle_plan_.land && s_.mission_current == landSeq(s_.mission)) {
+            const auto& l = *vehicle_plan_.land;
+            parts << QStringLiteral("LAND %1").arg(formatDistance(geo::distance(s_.lat, s_.lon, l.lat, l.lon)));
         }
     }
     if (has_target_ && s_.has_position) {
@@ -704,9 +955,9 @@ void MapView::paintOverlayChrome(QPainter& p) {
 
     // chips: follow / layer
     auto chip = [&](QRectF& out, double x_right, const QString& text, bool on) {
-        const QFont f = labelFont(10.5);
-        const double w = QFontMetricsF(f).horizontalAdvance(text) + 22;
-        out = QRectF(x_right - w, y - 24, w, 24);
+        const QFont f = labelFont(12);
+        const double w = QFontMetricsF(f).horizontalAdvance(text) + 28;
+        out = QRectF(x_right - std::max(w, 72.0), y - 44, std::max(w, 72.0), 44);  // >= 44 px: finger-sized
         drawGlass(p, chamferPath(out, 6), on ? kCyan : kMuted, on ? 0.8 : 0.4, kGlassDeep);
         drawText(p, out, Qt::AlignCenter, text, f, on ? kCyan : kMuted);
         return out.left() - 8;
@@ -717,7 +968,7 @@ void MapView::paintOverlayChrome(QPainter& p) {
 
     // mode hint
     if (mode_ == Mode::Guide) {
-        const QString text = QStringLiteral("GUIDE · click the map to send the aircraft");
+        const QString text = QStringLiteral("GUIDE · tap the map to send the aircraft");
         const QFont f = labelFont(11);
         const double w = QFontMetricsF(f).horizontalAdvance(text) + 30;
         const QRectF box(width() / 2.0 - w / 2.0, 70, w, 26);

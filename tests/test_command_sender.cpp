@@ -145,7 +145,23 @@ static void testBackgroundSilent() {
     CHECK(h.sent.size() == 1);  // acked, so never resent
 }
 
+static void testLandSequence() {
+    Harness h;
+    h.cs.runSequence("land", {makeSetMissionCurrent(6), makeSetMode(plane::AUTO, "AUTO")}, h.now);
+    auto c = h.lastCmd();
+    CHECK(c.command == MAV_CMD_DO_SET_MISSION_CURRENT);
+    CHECK_NEAR(c.param1, 6.0, 1e-6);
+    h.ack(MAV_CMD_DO_SET_MISSION_CURRENT, MAV_RESULT_ACCEPTED);
+    c = h.lastCmd();
+    CHECK(c.command == MAV_CMD_DO_SET_MODE);
+    CHECK_NEAR(c.param2, 10.0, 1e-6);
+    h.ack(MAV_CMD_DO_SET_MODE, MAV_RESULT_ACCEPTED);
+    CHECK(h.results.back().final);
+    CHECK(h.results.back().ok);
+}
+
 int main() {
+    testLandSequence();
     testSequenceHappy();
     testSequenceAbortsOnDenied();
     testOptionalStepTolerated();

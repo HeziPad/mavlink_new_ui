@@ -134,6 +134,7 @@ TelemetryBar::TelemetryBar(QWidget* parent) : QWidget(parent) {
 
 void TelemetryBar::setState(const VehicleState& s, Clock::time_point now) {
     s_ = s;
+    now_ = now;
     hb_age_ = heartbeatAge(s, now);
     alive_ = linkAlive(s, now);
 
@@ -250,7 +251,18 @@ void TelemetryBar::showChecklist(bool on) {
     panel_->show();
 }
 
+void TelemetryBar::mousePressEvent(QMouseEvent* e) {
+    // touch has no hover: a tap on SYSTEMS toggles the checklist
+    if (sys_rect_.contains(e->position())) {
+        sys_hover_ = !panel_->isVisible();
+        showChecklist(sys_hover_);
+    }
+}
+
 void TelemetryBar::mouseMoveEvent(QMouseEvent* e) {
+    if (e->buttons() != Qt::NoButton) {
+        return;  // a finger dragging, not a hover
+    }
     const bool hover = sys_rect_.contains(e->position());
     if (hover != sys_hover_) {
         sys_hover_ = hover;
@@ -274,9 +286,9 @@ void TelemetryBar::paintEvent(QPaintEvent*) {
     p.setRenderHint(QPainter::Antialiasing);
 
     // chip widths at scale 1
-    const double kLink = 104, kMode = 128, kVtol = 112, kArm = 84, kAlt = 92, kSpd = 132, kBat = 156,
-                 kGps = 92, kSys = 108;
-    const double widths[] = {kLink, kMode, kVtol, kArm, kAlt, kSpd, kBat, kGps, kSys};
+    const double kLink = 104, kMode = 128, kVtol = 112, kLift = 104, kArm = 84, kAlt = 92, kSpd = 132,
+                 kBat = 156, kGps = 92, kSys = 108;
+    const double widths[] = {kLink, kMode, kVtol, kLift, kArm, kAlt, kSpd, kBat, kGps, kSys};
     double total = 0;
     for (double w : widths) {
         total += w;
@@ -365,6 +377,23 @@ void TelemetryBar::paintEvent(QPaintEvent*) {
         const VtolState v = effectiveVtolState(s_);
         const double f = vtol_flash_.active() ? 1.0 - vtol_flash_.progress() : 0.0;
         chip(p, r, QStringLiteral("VTOL"), shortVtol(v), vtolColor(v), f);
+    }
+
+    // ---- lift rotors: should only run for takeoff / landing ------------------
+    {
+        const QRectF r = next(kLift);
+        const LiftRotors lr = liftRotorState(s_, now_);
+        QColor c = kMuted;
+        if (lr == LiftRotors::Active) {
+            c = kCyan;
+        } else if (lr == LiftRotors::Assist) {
+            c = kAmber;
+            if (!reducedMotion()) {
+                c = alpha(c, 0.55 + 0.45 * std::abs(std::sin(time_ * 5.0)));
+            }
+        }
+        chip(p, r, QStringLiteral("Lift rotors"), QString::fromLatin1(liftRotorsName(lr)), c,
+             lr == LiftRotors::Assist ? 0.6 : 0.0);
     }
 
     // ---- armed -------------------------------------------------------------

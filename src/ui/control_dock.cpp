@@ -5,6 +5,7 @@
 #include <QFontMetricsF>
 #include <QHelpEvent>
 #include <QMouseEvent>
+#include <QPointingDevice>
 #include <QPainter>
 #include <QToolTip>
 
@@ -209,6 +210,12 @@ void ControlDock::mouseReleaseEvent(QMouseEvent* e) {
     }
     const int i = mouse_slot_;
     mouse_slot_ = -1;
+    if (e->pointingDevice() && e->pointingDevice()->type() == QInputDevice::DeviceType::TouchScreen) {
+        // a finger never "leaves", so don't let the hover glow stick after a tap
+        for (auto& sl : slots_) {
+            sl.hovered = false;
+        }
+    }
     auto& s = slots_[i];
     if (s.down && !s.consumed && !slotRect(i).adjusted(-12, -12, 12, 12).contains(e->position())) {
         // dragged off the slot: cancel rather than fire
@@ -421,18 +428,6 @@ void drawDockIcon(QPainter& p, DockIcon icon, const QRectF& r, const QColor& c) 
     p.setBrush(Qt::NoBrush);
 
     switch (icon) {
-    case DockIcon::Swap: {
-        p.drawRect(QRectF(3, 5, 24, 17));
-        p.setBrush(alpha(c, 0.35));
-        p.drawRect(QRectF(5, 13, 10, 7));
-        p.setBrush(Qt::NoBrush);
-        QPainterPath arrow;
-        arrow.moveTo(18, 25);
-        arrow.cubicTo(24, 27, 27, 24, 27, 22);
-        p.drawPath(arrow);
-        p.drawPolyline(QPolygonF({{24.5, 19.5}, {27, 22.5}, {29, 19.5}}));
-        break;
-    }
     case DockIcon::Plan: {
         p.drawPolyline(QPolygonF({{4, 24}, {12, 10}, {20, 18}, {27, 6}}));
         p.setBrush(theme::kBg);
@@ -502,6 +497,18 @@ void drawDockIcon(QPainter& p, DockIcon icon, const QRectF& r, const QColor& c) 
         p.setBrush(c);
         p.drawRect(QRectF(10.5, 9, 3, 12));
         p.drawRect(QRectF(16.5, 9, 3, 12));
+        break;
+    }
+    case DockIcon::Land: {
+        // circling down on the wing, then straight down onto the pad
+        QPainterPath spiral;
+        spiral.moveTo(15, 4);
+        spiral.cubicTo(27, 4, 27, 13, 15, 13);
+        spiral.cubicTo(7, 13, 7, 7, 13, 7);
+        p.drawPath(spiral);
+        p.drawLine(QPointF(15, 13), QPointF(15, 23));
+        p.drawPolyline(QPolygonF({{11, 19}, {15, 23}, {19, 19}}));
+        p.drawLine(QPointF(5, 27), QPointF(25, 27));
         break;
     }
     case DockIcon::Qrtl: {
