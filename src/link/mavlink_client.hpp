@@ -67,7 +67,7 @@ private:
     void sendMessage(const mavlink_message_t& msg);
     void sendGuidedItem();
     void requestStreams(Clock::time_point now);
-    void emit(LinkEvent ev);
+    void publish(LinkEvent ev);
     void wake();
 
     Config cfg_;

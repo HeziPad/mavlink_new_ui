@@ -110,7 +110,7 @@ MavlinkClient::MavlinkClient(Config cfg) : cfg_(std::move(cfg)) {
                 break;
             }
             state_dirty_ = true;
-            emit(std::move(ev));
+            publish(std::move(ev));
         });
 
     commands_ = std::make_unique<CommandSender>(
@@ -129,7 +129,7 @@ MavlinkClient::MavlinkClient(Config cfg) : cfg_(std::move(cfg)) {
                     ev.type = LinkEvent::Type::GuidedResult;
                     ev.ok = false;
                     ev.text = r.cancelled ? r.text : "GUIDED mode " + r.text;
-                    emit(std::move(ev));
+                    publish(std::move(ev));
                 }
                 return;
             }
@@ -140,7 +140,7 @@ MavlinkClient::MavlinkClient(Config cfg) : cfg_(std::move(cfg)) {
             ev.done = r.step + 1;
             ev.total = r.steps;
             ev.text = r.ok ? r.label : (r.label.empty() ? r.text : r.label + " " + r.text);
-            emit(std::move(ev));
+            publish(std::move(ev));
         });
 }
 
@@ -177,7 +177,7 @@ std::vector<LinkEvent> MavlinkClient::pollEvents() {
     return out;
 }
 
-void MavlinkClient::emit(LinkEvent ev) {
+void MavlinkClient::publish(LinkEvent ev) {
     std::lock_guard<std::mutex> lock(mutex_);
     events_.push_back(std::move(ev));
     while (events_.size() > 256) {
@@ -210,7 +210,7 @@ void MavlinkClient::runSequence(const std::string& tag, std::vector<CommandReque
             ev.tag = tag;
             ev.ok = false;
             ev.text = "no vehicle link";
-            emit(std::move(ev));
+            publish(std::move(ev));
             return;
         }
         commands_->runSequence(tag, std::move(steps), Clock::now());
@@ -228,12 +228,12 @@ void MavlinkClient::uploadMission(std::vector<MissionItem> items) {
         fail.upload = true;
         if (!vehicle_locked_) {
             fail.text = "no vehicle link";
-            emit(std::move(fail));
+            publish(std::move(fail));
             return;
         }
         if (mission_->busy()) {
             fail.text = "a mission transfer is already running";
-            emit(std::move(fail));
+            publish(std::move(fail));
             return;
         }
         guided_.pending = false;
@@ -248,12 +248,12 @@ void MavlinkClient::downloadMission() {
         fail.upload = false;
         if (!vehicle_locked_) {
             fail.text = "no vehicle link";
-            emit(std::move(fail));
+            publish(std::move(fail));
             return;
         }
         if (mission_->busy()) {
             fail.text = "a mission transfer is already running";
-            emit(std::move(fail));
+            publish(std::move(fail));
             return;
         }
         mission_->startDownload(Clock::now());
@@ -267,7 +267,7 @@ void MavlinkClient::guidedGoto(double lat, double lon, float alt_rel) {
             ev.type = LinkEvent::Type::GuidedResult;
             ev.ok = false;
             ev.text = why;
-            emit(std::move(ev));
+            publish(std::move(ev));
         };
         if (!vehicle_locked_) {
             reject("no vehicle link");
@@ -454,7 +454,7 @@ void MavlinkClient::handleMessage(const mavlink_message_t& msg) {
             LinkEvent ev;
             ev.type = LinkEvent::Type::VehicleConnected;
             ev.done = msg.sysid;
-            emit(std::move(ev));
+            publish(std::move(ev));
         }
     }
     if (!vehicle_locked_ || msg.sysid != ids_.target_sys) {
@@ -471,7 +471,7 @@ void MavlinkClient::handleMessage(const mavlink_message_t& msg) {
         ev.type = LinkEvent::Type::StatusText;
         ev.severity = st.severity;
         ev.text.assign(st.text, strnlen(st.text, sizeof(st.text)));
-        emit(std::move(ev));
+        publish(std::move(ev));
         return;
     }
     if (msg.compid != ids_.target_comp) {
@@ -493,7 +493,7 @@ void MavlinkClient::handleMessage(const mavlink_message_t& msg) {
         ev.ok = ack.type == MAV_MISSION_ACCEPTED;
         ev.text = ev.ok ? "target accepted"
                         : std::string("target ") + MissionTransfer::ackName(ack.type);
-        emit(std::move(ev));
+        publish(std::move(ev));
         return;
     }
     decodeTelemetry(msg);
@@ -710,7 +710,7 @@ void MavlinkClient::periodic(Clock::time_point now) {
             ev.type = LinkEvent::Type::GuidedResult;
             ev.ok = false;
             ev.text = "no response to guided target";
-            emit(std::move(ev));
+            publish(std::move(ev));
         }
     }
 
