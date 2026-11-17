@@ -283,7 +283,14 @@ you want that.
    ranges covering the area are read from the 140 GB planet file.
 2. Then elevation and satellite: about 46,000 tiles, about 1 GB.
 
-It resumes where it stopped. **UPDATE COUNTRY** later fetches the newest street map.
+Afterwards the button reads **CHECK & COMPLETE**. It fetches only what's new or missing:
+
+- **The street map:** only if a newer daily build exists than the one installed (recorded in
+  `map.build`). It's a ~1 s check otherwise.
+- **The country's satellite and ground height:** missing tiles only.
+- **Your full-detail areas:** their missing tiles, for example ones that failed before.
+
+Nothing already on disk is downloaded again.
 
 **Full-detail areas.** Settings → OFFLINE → **SELECT AREA ON MAP**:
 
@@ -316,6 +323,7 @@ Settings → OFFLINE → CHANGE at it. Its layout:
 offline/map.pmtiles                     street map (any *.pmtiles with vector tiles is used)
 offline/esri_imagery/{z}/{x}/{y}.jpg    satellite        ({y}.none: no imagery at that zoom)
 offline/elevation/{z}/{x}/{y}.png       ground height    ("terrarium": m = R*256 + G + B/256 - 32768)
+offline/map.build                       which street map build is installed
 offline/areas.json                      the full-detail areas (outlines on the map)
 ```
 

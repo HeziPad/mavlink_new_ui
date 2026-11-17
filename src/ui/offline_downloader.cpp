@@ -15,6 +15,7 @@
 #include <QJsonObject>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QSet>
 
 #include <cmath>
 
@@ -29,6 +30,11 @@ constexpr int kAreaSat0 = 15, kAreaSat1 = 18, kAreaElev = 13;
 
 QString areasFile() {
     return offline::folder() + QStringLiteral("/areas.json");
+}
+
+// which street map build is installed (written next to map.pmtiles)
+QString buildFile() {
+    return offline::folder() + QStringLiteral("/map.build");
 }
 
 bool present(int layer, int z, int x, int y) {
@@ -154,6 +160,52 @@ bool OfflineDownloader::clearAll() {
     return ok;
 }
 
+QString OfflineDownloader::installedBuild() {
+    if (!hasStreetMap()) return {};
+    QFile f(buildFile());
+    return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()).trimmed() : QString();
+}
+
+std::vector<OfflineDownloader::Job> OfflineDownloader::missing() {
+    std::vector<Job> out;
+    QSet<QString> seen;  // overlapping areas: each tile once
+    auto add = [&](const std::vector<Job>& js) {
+        for (const Job& j : js) {
+            const QString k = QStringLiteral("%1/%2/%3/%4").arg(j.layer).arg(j.z).arg(j.x).arg(j.y);
+            if (!seen.contains(k)) {
+                seen.insert(k);
+                out.push_back(j);
+            }
+        }
+    };
+    const Box c = country();
+    add(jobs(c, offline::Elevation, kCountryElev, kCountryElev, true));  // small, and hover needs it: first
+    add(jobs(c, offline::Satellite, kCountrySat0, kCountrySat1, true));
+    for (const Box& a : areas()) {
+        add(jobs(a, offline::Elevation, kAreaElev, kAreaElev, true));
+        add(jobs(a, offline::Satellite, kAreaSat0, kAreaSat1, true));
+    }
+    return out;
+}
+
+OfflineDownloader::Count OfflineDownloader::areasMissing() {
+    Count c;
+    QSet<QString> seen;
+    for (const Box& a : areas()) {
+        for (int layer : {offline::Satellite, offline::Elevation}) {
+            const bool sat = layer == offline::Satellite;
+            for (const Job& j : jobs(a, layer, sat ? kAreaSat0 : kAreaElev, sat ? kAreaSat1 : kAreaElev, true)) {
+                const QString k = QStringLiteral("%1/%2/%3/%4").arg(j.layer).arg(j.z).arg(j.x).arg(j.y);
+                if (seen.contains(k)) continue;
+                seen.insert(k);
+                ++c.fresh;
+                c.bytes += sat ? kSatBytes : kElevBytes;
+            }
+        }
+    }
+    return c;
+}
+
 bool OfflineDownloader::hasStreetMap() {
     return !QDir(offline::folder()).entryList({QStringLiteral("*.pmtiles")}, QDir::Files).isEmpty();
 }
@@ -166,17 +218,22 @@ OfflineDownloader::OfflineDownloader(QObject* parent) : QObject(parent) {
             return;
         }
         if (!ok) {
-            finish(false, QStringLiteral("street map failed: %1 (download again to retry)").arg(msg));
+            finish(false, QStringLiteral("street map failed: %1 (try again)").arg(msg));
             return;
         }
-        emit streetMapInstalled();
-        // then the country's satellite and elevation
-        const Box b = country();
-        auto sat = jobs(b, offline::Satellite, kCountrySat0, kCountrySat1, true);
-        auto elev = jobs(b, offline::Elevation, kCountryElev, kCountryElev, true);
-        queue_.assign(elev.begin(), elev.end());  // elevation first: small, and hover needs it
-        queue_.insert(queue_.end(), sat.begin(), sat.end());
-        startTiles(QStringLiteral("satellite + ground height"));
+        street_msg_ = msg;
+        if (!extract_.upToDate()) {
+            QFile f(buildFile());
+            if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                f.write(extract_.build().toUtf8());
+            }
+            emit streetMapInstalled();
+        }
+        // then whatever is missing: the country's satellite and ground height,
+        // and the tiles of every full-detail area (each tile once)
+        queue_.clear();
+        for (const Job& j : missing()) queue_.push_back(j);
+        startTiles(QStringLiteral("missing satellite + ground height"));
     });
 }
 
@@ -188,9 +245,11 @@ void OfflineDownloader::startCountry() {
     failed_ = 0;
     done_ = total_ = 0;
     bytes_ = 0;
+    street_msg_.clear();
     const Box b = country();
-    // always fetch the street map fresh (it's the latest OSM data)
-    extract_.start({b.min_lon, b.min_lat, b.max_lon, b.max_lat}, 15, offline::folder() + QStringLiteral("/map.pmtiles"));
+    // the street map only when there's a newer build than the installed one
+    extract_.start({b.min_lon, b.min_lat, b.max_lon, b.max_lat}, 15, offline::folder() + QStringLiteral("/map.pmtiles"),
+                   installedBuild());
     emit progress();
 }
 
@@ -296,13 +355,25 @@ void OfflineDownloader::pump() {
             finish(true, QStringLiteral("cancelled · downloading again resumes"));
             return;
         }
-        if (area_ && failed_ == 0) {
+        if (area_) {
+            // recorded even if some tiles failed: CHECK & COMPLETE fetches them later
             // remember the area (outline on the map, listed in Settings)
             QJsonArray arr;
             QFile f(areasFile());
             if (f.open(QIODevice::ReadOnly)) {
                 arr = QJsonDocument::fromJson(f.readAll()).array();
                 f.close();
+            }
+            for (const auto& v : arr) {  // drawing the same area again: keep one entry
+                const QJsonObject e = v.toObject();
+                if (e.value(QStringLiteral("min_lon")).toDouble() == area_box_.min_lon &&
+                    e.value(QStringLiteral("min_lat")).toDouble() == area_box_.min_lat &&
+                    e.value(QStringLiteral("max_lon")).toDouble() == area_box_.max_lon &&
+                    e.value(QStringLiteral("max_lat")).toDouble() == area_box_.max_lat) {
+                    finish(false, failed_ ? QStringLiteral("%1 tiles failed: press CHECK & COMPLETE to retry them").arg(failed_)
+                                          : QStringLiteral("area complete"));
+                    return;
+                }
             }
             QJsonObject o;
             o[QStringLiteral("min_lon")] = area_box_.min_lon;
@@ -316,8 +387,11 @@ void OfflineDownloader::pump() {
                 f.write(QJsonDocument(arr).toJson());
             }
         }
-        finish(false, failed_ ? QStringLiteral("done · %1 tiles failed (download again to retry)").arg(failed_)
-                              : QStringLiteral("done · %1 MB new").arg(bytes_ / 1e6, 0, 'f', 0));
+        QString summary = failed_ ? QStringLiteral("%1 tiles failed: press CHECK & COMPLETE to retry them").arg(failed_)
+                          : total_ == 0 ? QStringLiteral("all tiles were already there")
+                                        : QStringLiteral("%1 MB of tiles fetched").arg(bytes_ / 1e6, 0, 'f', 0);
+        if (!street_msg_.isEmpty()) summary = street_msg_ + QStringLiteral(" · ") + summary;
+        finish(false, summary);
     }
 }
 

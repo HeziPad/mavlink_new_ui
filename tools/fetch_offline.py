@@ -6,6 +6,7 @@ exactly the folder the GCS reads (Settings -> OFFLINE -> FOLDER, default
 ~/.local/share/mavlink_gcs_ui/offline/):
 
     map.pmtiles                          street map: OpenStreetMap vector tiles (Protomaps build, ODbL)
+    map.build                            which daily build that is (re-running skips it while it's the latest)
     esri_imagery/{z}/{x}/{y}.jpg         satellite (Esri World Imagery); {y}.none = no imagery at that zoom
     elevation/{z}/{x}/{y}.png            ground height (AWS Terrain Tiles, "terrarium")
     areas.json                           the full-detail areas downloaded so far
@@ -351,6 +352,7 @@ def main():
     ap.add_argument("--pmtiles", help="Protomaps build URL (default: the latest daily build)")
     ap.add_argument("--delay", type=float, default=0.02, help="pause between raster requests, seconds")
     ap.add_argument("--dry-run", action="store_true", help="only report what would be downloaded")
+    ap.add_argument("--force", action="store_true", help="download the street map even if the installed build is the latest")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
 
@@ -359,6 +361,13 @@ def main():
         parts = [a.only] if a.only else ["vector", "satellite", "elevation"]
         if "vector" in parts:
             url = a.pmtiles or latest_build()
+            build = url.rsplit("/", 1)[-1].replace(".pmtiles", "")
+            build_file = os.path.join(a.out, "map.build")
+            have = open(build_file).read().strip() if os.path.exists(build_file) else ""
+            if have == build and os.path.exists(os.path.join(a.out, "map.pmtiles")) and not a.force:
+                print("street map up to date (%s)" % build)
+                parts = [p for p in parts if p != "vector"]
+        if "vector" in parts:
             print("street map from", url)
             remote = Remote(url)
             prog = lambda what, i, n: print("\r%s %d/%d" % (what, i, n), end="", flush=True)
@@ -369,7 +378,9 @@ def main():
                 write_pmtiles(os.path.join(a.out, "map.pmtiles"), remote, found, bbox, VECTOR_MAX_ZOOM,
                               lambda what, i, n: print("\r%s %.0f/%.0f MB" % (what, i / 1e6, n / 1e6), end="",
                                                        flush=True))
-                print("\nwrote", os.path.join(a.out, "map.pmtiles"))
+                with open(build_file, "w") as f:
+                    f.write(build)
+                print("\nwrote", os.path.join(a.out, "map.pmtiles"), "(build %s)" % build)
         if "satellite" in parts:
             jobs = raster_jobs("esri_imagery", "jpg", COUNTRY_SAT_ZOOMS, bbox, a.out)
             print("satellite z8-14: %d tiles to fetch (~%.0f MB)" % (len(jobs), len(jobs) * 0.02))

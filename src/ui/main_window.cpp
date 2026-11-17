@@ -513,15 +513,21 @@ void MainWindow::refreshOfflineCounts() {
     offline_area_bytes_ = OfflineDownloader::fullDetailUsage();
     offline_areas_ = static_cast<int>(OfflineDownloader::areas().size());
     const auto c = OfflineDownloader::countryCount();
+    const auto a = OfflineDownloader::areasMissing();
     const bool street = OfflineDownloader::hasStreetMap();
-    if (street && c.fresh == 0) {
-        offline_country_ = QStringLiteral("✓ installed · street map + %1 satellite / ground tiles").arg(c.have);
-    } else if (street) {
-        offline_country_ = QStringLiteral("street map ✓ · %1 satellite / ground tiles missing (~%2 MB)")
-                               .arg(c.fresh)
-                               .arg(c.bytes / 1e6, 0, 'f', 0);
-    } else {
+    const QString build = OfflineDownloader::installedBuild();
+    if (!street) {
         offline_country_ = QStringLiteral("not downloaded · about %1 MB").arg(c.bytes / 1e6, 0, 'f', 0);
+    } else {
+        QStringList parts;
+        parts << (build.isEmpty() ? QStringLiteral("street map ✓")
+                                  : QStringLiteral("street map ✓ %1-%2-%3").arg(build.left(4), build.mid(4, 2), build.mid(6, 2)));
+        parts << (c.fresh == 0 ? QStringLiteral("country ✓")
+                               : QStringLiteral("country: %1 tiles missing (~%2 MB)").arg(c.fresh).arg(c.bytes / 1e6, 0, 'f', 0));
+        if (offline_areas_ > 0) {
+            parts << (a.fresh == 0 ? QStringLiteral("areas ✓") : QStringLiteral("areas: %1 tiles missing").arg(a.fresh));
+        }
+        offline_country_ = parts.join(QStringLiteral(" · "));
     }
     refreshOffline();
 }

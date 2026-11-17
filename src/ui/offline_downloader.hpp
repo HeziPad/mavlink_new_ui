@@ -44,9 +44,13 @@ public:
     static bool clearFullDetail();
     static bool clearAll();
     static bool hasStreetMap();
+    static QString installedBuild();  // street map build on disk ("" unknown / none)
+    static Count areasMissing();      // tiles the full-detail areas still lack
 
     explicit OfflineDownloader(QObject* parent = nullptr);
 
+    // street map if a newer build exists (or none is installed), then every
+    // missing country and full-detail-area tile
     void startCountry();
     void startArea(const Box& b);
     void cancel();
@@ -66,6 +70,7 @@ private:
         int layer, z, x, y;
     };
     static std::vector<Job> jobs(const Box& b, int layer, int z0, int z1, bool fresh_only);
+    static std::vector<Job> missing();  // country + every area, each tile once
     void startTiles(const QString& stage);
     void pump();
     void finish(bool cancelled, const QString& summary);
@@ -79,6 +84,7 @@ private:
     bool area_ = false;
     Box area_box_;
     QString stage_;
+    QString street_msg_;  // what happened to the street map in this run
     size_t done_ = 0, total_ = 0, failed_ = 0;
     qint64 bytes_ = 0;
     static constexpr int kParallel = 2;

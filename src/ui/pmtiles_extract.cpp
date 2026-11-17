@@ -29,10 +29,13 @@ std::string_view view(const QByteArray& b) {
 
 PmtilesExtract::PmtilesExtract(QObject* parent) : QObject(parent) {}
 
-void PmtilesExtract::start(const Box& box, int max_zoom, const QString& path) {
+void PmtilesExtract::start(const Box& box, int max_zoom, const QString& path, const QString& installed) {
     if (running_) return;
     running_ = true;
     cancelled_ = false;
+    installed_ = installed;
+    up_to_date_ = false;
+    build_.clear();
     box_ = box;
     max_zoom_ = max_zoom;
     path_ = path;
@@ -92,7 +95,16 @@ void PmtilesExtract::readBuilds() {
             fail(QStringLiteral("no Protomaps build listed"));
             return;
         }
-        url_ = QString::fromLatin1(kBuildUrl).arg(builds.last().toObject().value(QStringLiteral("key")).toString());
+        const QString key = builds.last().toObject().value(QStringLiteral("key")).toString();
+        build_ = QString(key).remove(QStringLiteral(".pmtiles"));
+        if (!installed_.isEmpty() && build_ == installed_ && QFileInfo::exists(path_)) {
+            // what's on disk is the latest: nothing to fetch
+            up_to_date_ = true;
+            running_ = false;
+            emit finished(true, QStringLiteral("street map up to date (%1)").arg(build_));
+            return;
+        }
+        url_ = QString::fromLatin1(kBuildUrl).arg(key);
         readHeader();
     });
 }
@@ -329,7 +341,7 @@ void PmtilesExtract::writeFile() {
         return;
     }
     running_ = false;
-    emit finished(true, QStringLiteral("%1 tiles, %2 MB").arg(found_.size()).arg(data_len_ / 1e6, 0, 'f', 0));
+    emit finished(true, QStringLiteral("street map %1: %2 MB").arg(build_).arg(data_len_ / 1e6, 0, 'f', 0));
 }
 
 }  // namespace gcs::ui

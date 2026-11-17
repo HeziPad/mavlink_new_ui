@@ -28,7 +28,11 @@ public:
     };
     explicit PmtilesExtract(QObject* parent = nullptr);
 
-    void start(const Box& box, int max_zoom, const QString& path);
+    // `installed`: the build already on disk ("" none). When it's still the
+    // latest, nothing is downloaded and finished() reports up_to_date.
+    void start(const Box& box, int max_zoom, const QString& path, const QString& installed = {});
+    bool upToDate() const { return up_to_date_; }
+    QString build() const { return build_; }  // the build checked / installed, e.g. "20261117"
     void cancel();
     bool running() const { return running_; }
     QString stage() const { return stage_; }  // what it is doing, for the progress line
@@ -60,6 +64,9 @@ private:
     int max_zoom_ = 15;
     QString path_;
     QString url_;
+    QString installed_;
+    QString build_;
+    bool up_to_date_ = false;
     pmtiles::Header src_;
     QByteArray metadata_;
     std::vector<pmtiles::Entry> root_;

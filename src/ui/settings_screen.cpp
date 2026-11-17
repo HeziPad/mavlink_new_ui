@@ -328,15 +328,16 @@ void SettingsScreen::paintOffline(QPainter& p, const QRectF& body) {
     double y = body.top();
     // ---- country pack ------------------------------------------------------------------
     paintRow(p, QRectF(body.left(), y, body.width(), 44), QStringLiteral("COUNTRY PACK · ISRAEL + 50 KM"),
-             QStringLiteral("street map (all zooms) · satellite to ~10 m/px · ground height"));
+             QStringLiteral("street map (all zooms) · satellite to ~10 m/px · ground height · "
+                            "the button only fetches what's new or missing"));
     drawText(p, QRectF(body.left(), y + 44, body.width(), 18), Qt::AlignLeft | Qt::AlignVCenter, off_.country,
-             monoFont(11), off_.street_map ? kGreen : kAmber);
+             monoFont(11), off_.street_map && !off_.country.contains(QStringLiteral("missing")) ? kGreen : kAmber);
     y += 70;
     country_rect_ = QRectF(body.left(), y, 250, 50);
     const bool country_running = off_.running;
     paintAction(p, country_rect_,
                 country_running ? QStringLiteral("CANCEL")
-                                : (off_.street_map ? QStringLiteral("⟳ UPDATE COUNTRY") : QStringLiteral("⬇ DOWNLOAD COUNTRY")),
+                                : (off_.street_map ? QStringLiteral("⟳ CHECK & COMPLETE") : QStringLiteral("⬇ DOWNLOAD COUNTRY")),
                 country_running ? kAmber : kCyan, true);
     if (country_running) {
         const QRectF bar(country_rect_.right() + 16, y + 10, body.right() - country_rect_.right() - 16, 10);
