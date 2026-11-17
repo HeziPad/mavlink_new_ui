@@ -14,13 +14,31 @@ namespace gcs::ui {
 
 using namespace theme;
 
+const std::vector<int>& SettingsScreen::trailChoices() {
+    static const std::vector<int> c = {30, 60, 120, 300, 600, 0};
+    return c;
+}
+
 SettingsScreen::SettingsScreen(QWidget* parent) : QWidget(parent) {
+    alt_.labels = {QStringLiteral("METERS"), QStringLiteral("FEET")};
+    trail_on_.labels = {QStringLiteral("OFF"), QStringLiteral("ON")};
+    trail_len_.labels = {QStringLiteral("30 S"), QStringLiteral("1 MIN"), QStringLiteral("2 MIN"),
+                         QStringLiteral("5 MIN"), QStringLiteral("10 MIN"), QStringLiteral("ALL")};
     hide();
 }
 
-void SettingsScreen::open(int alt_unit) {
-    alt_unit_ = alt_unit;
-    alt_knob_ = alt_unit;
+void SettingsScreen::open(const Values& v) {
+    v_ = v;
+    alt_.selected = v.alt_unit;
+    trail_on_.selected = v.trail_on ? 1 : 0;
+    const auto& c = trailChoices();
+    const auto it = std::find(c.begin(), c.end(), v.trail_secs);
+    trail_len_.selected = it != c.end() ? static_cast<int>(it - c.begin()) : 2;
+    for (Segmented* s : {&alt_, &trail_on_, &trail_len_}) {
+        s->knob = s->selected;
+    }
+    trail_len_.enabled = v.trail_on;
+
     // freeze a blurred copy of what's behind: cheap down/up-scale blur
     hide();
     if (parentWidget()) {
@@ -64,15 +82,32 @@ void SettingsScreen::tick(double dt) {
         return;
     }
     const double k = reducedMotion() ? 1.0 : 1.0 - std::exp(-16.0 * dt);
-    alt_knob_ += (alt_unit_ - alt_knob_) * k;
+    for (Segmented* s : {&alt_, &trail_on_, &trail_len_}) {
+        s->knob += (s->selected - s->knob) * k;
+    }
+    cat_knob_ += (category_ - cat_knob_) * k;
     flash_ = std::max(0.0, flash_ - dt * 2.0);
     update();
 }
 
 QRectF SettingsScreen::panelRect() const {
-    const double w = std::min(820.0, width() - 48.0);
-    const double h = std::min(470.0, height() - 120.0);
+    const double w = std::min(860.0, width() - 48.0);
+    const double h = std::min(480.0, height() - 120.0);
     return {(width() - w) / 2.0, (height() - h) / 2.0, w, h};
+}
+
+bool SettingsScreen::pressSegmented(Segmented& seg, const QPointF& pos) {
+    if (!seg.enabled) {
+        return false;
+    }
+    for (int i = 0; i < static_cast<int>(seg.cells.size()); ++i) {
+        if (seg.cells[i].contains(pos) && i != seg.selected) {
+            seg.selected = i;
+            flash_ = 1.0;
+            return true;
+        }
+    }
+    return false;
 }
 
 void SettingsScreen::mousePressEvent(QMouseEvent* e) {
@@ -84,15 +119,59 @@ void SettingsScreen::mousePressEvent(QMouseEvent* e) {
         close();
         return;
     }
-    for (int i = 0; i < static_cast<int>(alt_seg_.size()); ++i) {
-        if (alt_seg_[i].contains(pos) && i != alt_unit_) {
-            alt_unit_ = i;
-            flash_ = 1.0;
-            emit altUnitChanged(i);
+    for (int i = 0; i < static_cast<int>(cat_rects_.size()); ++i) {
+        if (cat_rects_[i].contains(pos)) {
+            category_ = i;
             update();
             return;
         }
     }
+    if (category_ == kUnits) {
+        if (pressSegmented(alt_, pos)) {
+            emit altUnitChanged(alt_.selected);
+        }
+    } else if (category_ == kMap) {
+        bool changed = false;
+        if (pressSegmented(trail_on_, pos)) {
+            trail_len_.enabled = trail_on_.selected == 1;
+            changed = true;
+        } else if (pressSegmented(trail_len_, pos)) {
+            changed = true;
+        }
+        if (changed) {
+            emit trailChanged(trail_on_.selected == 1, trailChoices()[trail_len_.selected]);
+        }
+    }
+    update();
+}
+
+void SettingsScreen::paintSegmented(QPainter& p, const QRectF& track, Segmented& seg) {
+    const int n = static_cast<int>(seg.labels.size());
+    const double a = seg.enabled ? 1.0 : 0.35;
+    p.save();
+    p.setOpacity(p.opacity() * a);
+    drawGlass(p, chamferPath(track, 10), kCyan, 0.5, alpha(kBg, 0.7));
+    const double cw = track.width() / n;
+    seg.cells.clear();
+    for (int i = 0; i < n; ++i) {
+        seg.cells.push_back(QRectF(track.left() + i * cw, track.top(), cw, track.height()));
+    }
+    const QRectF knob(track.left() + 4 + seg.knob * cw, track.top() + 4, cw - 8, track.height() - 8);
+    const QColor kc = mix(kCyan, kText, 0.15 * flash_);
+    drawGlass(p, chamferPath(knob, 8), kc, 1.0, alpha(kCyan, 0.22 + 0.25 * flash_));
+    const QFont f = labelFont(n > 3 ? 12.5 : 15);
+    for (int i = 0; i < n; ++i) {
+        const double sel = 1.0 - std::min(1.0, std::abs(seg.knob - i));
+        drawText(p, seg.cells[i], Qt::AlignCenter, seg.labels[i], f, mix(kMuted, kCyan, sel));
+    }
+    p.restore();
+}
+
+void SettingsScreen::paintRow(QPainter& p, const QRectF& r, const QString& title, const QString& sub) {
+    drawText(p, QRectF(r.left(), r.top(), r.width(), 24), Qt::AlignLeft | Qt::AlignVCenter, title, labelFont(14),
+             kText);
+    drawText(p, QRectF(r.left(), r.top() + 24, r.width(), 18), Qt::AlignLeft | Qt::AlignVCenter, sub,
+             labelFont(10, false), kMuted);
 }
 
 void SettingsScreen::paintEvent(QPaintEvent*) {
@@ -112,7 +191,7 @@ void SettingsScreen::paintEvent(QPaintEvent*) {
         drawScanlines(p, r, 0.5 * e);
     }
 
-    // ---- panel: slides up and un-skews as it opens ------------------------------
+    // ---- panel: slides up as it opens ----------------------------------------------
     const QRectF pr = panelRect();
     p.save();
     p.setOpacity(e);
@@ -123,13 +202,11 @@ void SettingsScreen::paintEvent(QPaintEvent*) {
     p.setPen(QPen(kCyan, 2));
     p.drawLine(QPointF(pr.left() + 1, pr.top() + 22), QPointF(pr.left() + 22, pr.top() + 1));
 
-    // title
     drawText(p, QRectF(pr.left() + 34, pr.top() + 18, 400, 34), Qt::AlignLeft | Qt::AlignVCenter,
              QStringLiteral("SETTINGS"), titleFont(26), kText);
     drawText(p, QRectF(pr.left() + 36, pr.top() + 50, 400, 16), Qt::AlignLeft | Qt::AlignVCenter,
              QStringLiteral("changes apply immediately"), labelFont(10), kMuted);
 
-    // close
     close_rect_ = QRectF(pr.right() - 72, pr.top() + 16, 52, 52);
     drawGlass(p, chamferPath(close_rect_, 8), kCyan, 0.6, kGlassDeep);
     drawText(p, close_rect_, Qt::AlignCenter, QStringLiteral("✕"), monoFont(20, true), kText);
@@ -139,58 +216,41 @@ void SettingsScreen::paintEvent(QPaintEvent*) {
     const QRectF cat_col(pr.left() + 24, top, 190, pr.bottom() - top - 24);
     p.setPen(QPen(alpha(kCyan, 0.18), 1));
     p.drawLine(QPointF(cat_col.right() + 16, cat_col.top()), QPointF(cat_col.right() + 16, cat_col.bottom()));
-    {
-        const QRectF item(cat_col.left(), cat_col.top(), cat_col.width(), 52);
-        drawGlass(p, chamferPath(item, 8), kCyan, 0.9, alpha(kCyan, 0.12));
-        p.setPen(Qt::NoPen);
-        p.setBrush(kCyan);
-        p.drawRect(QRectF(item.left(), item.top() + 10, 3, item.height() - 20));
-        drawText(p, item.adjusted(18, 0, 0, 0), Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("UNITS"),
-                 labelFont(14), kCyan);
+    const char* names[kCategories] = {"UNITS", "MAP"};
+    cat_rects_.clear();
+    for (int i = 0; i < kCategories; ++i) {
+        const QRectF item(cat_col.left(), cat_col.top() + i * 60, cat_col.width(), 52);
+        cat_rects_.push_back(item);
+        const double sel = 1.0 - std::min(1.0, std::abs(cat_knob_ - i));
+        drawGlass(p, chamferPath(item, 8), mix(kMuted, kCyan, sel), 0.4 + 0.5 * sel, alpha(kCyan, 0.12 * sel));
+        if (sel > 0.01) {
+            p.setPen(Qt::NoPen);
+            p.setBrush(alpha(kCyan, sel));
+            p.drawRect(QRectF(item.left(), item.top() + 10, 3, item.height() - 20));
+        }
+        drawText(p, item.adjusted(18, 0, 0, 0), Qt::AlignLeft | Qt::AlignVCenter, QString::fromLatin1(names[i]),
+                 labelFont(14), mix(kMuted, kCyan, sel));
     }
 
-    // ---- rows ----------------------------------------------------------------------
+    // ---- rows of the selected category ----------------------------------------------------
     const QRectF body(cat_col.right() + 40, top, pr.right() - cat_col.right() - 64, cat_col.height());
-    {
-        const QRectF row(body.left(), body.top(), body.width(), 120);
-        drawText(p, QRectF(row.left(), row.top(), row.width(), 24), Qt::AlignLeft | Qt::AlignVCenter,
-                 QStringLiteral("ALTITUDE"), labelFont(14), kText);
-        drawText(p, QRectF(row.left(), row.top() + 24, row.width(), 18), Qt::AlignLeft | Qt::AlignVCenter,
-                 QStringLiteral("HUD tape, telemetry bar, map labels, panels and steppers"), labelFont(10, false),
-                 kMuted);
-
-        // segmented toggle with a sliding highlight
-        const double sw = std::min(row.width(), 360.0);
-        const QRectF track(row.left(), row.top() + 54, sw, 58);
-        drawGlass(p, chamferPath(track, 10), kCyan, 0.5, alpha(kBg, 0.7));
-        const double segw = sw / 2.0;
-        alt_seg_ = {QRectF(track.left(), track.top(), segw, track.height()),
-                    QRectF(track.left() + segw, track.top(), segw, track.height())};
-        const QRectF knob(track.left() + 4 + alt_knob_ * segw, track.top() + 4, segw - 8, track.height() - 8);
-        const QColor kc = mix(kCyan, kText, 0.15 * flash_);
-        drawGlass(p, chamferPath(knob, 8), kc, 1.0, alpha(kCyan, 0.22 + 0.25 * flash_));
-        if (flash_ > 0.0) {
-            p.setPen(QPen(alpha(kCyan, 0.5 * flash_), 6));
-            p.setBrush(Qt::NoBrush);
-            p.drawPath(chamferPath(knob, 8));
-        }
-        const char* names[] = {"METERS", "FEET"};
-        const char* units[] = {"m", "ft"};
-        for (int i = 0; i < 2; ++i) {
-            const double sel = 1.0 - std::min(1.0, std::abs(alt_knob_ - i));
-            const QColor c = mix(kMuted, kCyan, sel);
-            drawText(p, alt_seg_[i].adjusted(0, -8, 0, -8), Qt::AlignCenter, QString::fromLatin1(names[i]),
-                     labelFont(15), c);
-            drawText(p, alt_seg_[i].adjusted(0, 18, 0, 0), Qt::AlignHCenter | Qt::AlignTop,
-                     QString::fromLatin1(units[i]), monoFont(11), alpha(c, 0.8));
-        }
-        // live example
-        const QString example = alt_unit_ == 1 ? QStringLiteral("e.g. ALT 394 ft") : QStringLiteral("e.g. ALT 120 m");
-        drawText(p, QRectF(track.right() + 18, track.top(), std::max(0.0, row.right() - track.right() - 18), track.height()),
-                 Qt::AlignLeft | Qt::AlignVCenter, example, monoFont(12), alpha(kText, 0.7));
+    if (category_ == kUnits) {
+        paintRow(p, body, QStringLiteral("ALTITUDE"),
+                 QStringLiteral("HUD tape, telemetry bar, map labels, panels and steppers"));
+        paintSegmented(p, QRectF(body.left(), body.top() + 54, std::min(body.width(), 360.0), 58), alt_);
+        drawText(p, QRectF(body.left(), body.bottom() - 18, body.width(), 18), Qt::AlignLeft | Qt::AlignVCenter,
+                 QStringLiteral("distances and speeds stay metric"), labelFont(10, false), alpha(kMuted, 0.8));
+    } else {
+        paintRow(p, body, QStringLiteral("FLIGHT TRAIL"), QStringLiteral("the line the aircraft leaves behind on the map"));
+        paintSegmented(p, QRectF(body.left(), body.top() + 54, std::min(body.width(), 220.0), 58), trail_on_);
+        const QRectF lr(body.left(), body.top() + 134, body.width(), 42);
+        drawText(p, QRectF(lr.left(), lr.top(), lr.width(), 18), Qt::AlignLeft | Qt::AlignVCenter,
+                 QStringLiteral("LENGTH"), labelFont(11), trail_len_.enabled ? kText : alpha(kMuted, 0.6));
+        drawText(p, QRectF(lr.left(), lr.top() + 18, lr.width(), 18), Qt::AlignLeft | Qt::AlignVCenter,
+                 QStringLiteral("how far back in time it reaches"), labelFont(10, false),
+                 alpha(kMuted, trail_len_.enabled ? 1.0 : 0.6));
+        paintSegmented(p, QRectF(body.left(), body.top() + 182, body.width(), 58), trail_len_);
     }
-    drawText(p, QRectF(body.left(), body.bottom() - 18, body.width(), 18), Qt::AlignLeft | Qt::AlignVCenter,
-             QStringLiteral("distances and speeds stay metric"), labelFont(10, false), alpha(kMuted, 0.8));
     p.restore();
 }
 

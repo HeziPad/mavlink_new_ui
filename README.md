@@ -59,7 +59,7 @@ and shows `NO VIDEO`.
 | Key | Button | What it does |
 |-----|--------|--------------|
 | 1 | **Plan / Sync ↑** | First press: edit the mission on the map. Second press: upload it. **Hold**: re-download the vehicle's mission |
-| 2 | **Takeoff / Launch / Auto / Resume** | On the ground (**hold 1 s** to confirm): with a mission → AUTO + arm; without → GUIDED + arm + VTOL takeoff, then Hold (circle) on the wing at takeoff altitude. Airborne: resume the loop (AUTO), also after an aborted landing. During a landing it reads **Resume**: abort the landing and go back to the loop |
+| 2 | **Takeoff / Launch / Resume Plan** | On the ground (**hold 1 s** to confirm): with a mission → AUTO + arm; without → GUIDED + arm + VTOL takeoff, then Hold (circle) on the wing at takeoff altitude. Locked while the safety switch is on. Airborne: **Resume Plan** goes back to the planned loop on the wing (AUTO), also mid-landing (aborts it). If the vehicle's current item isn't a loop waypoint (still the VTOL takeoff after a Hold during the climb, or the landing), it is reset to the loop first, so AUTO never re-runs a rotor takeoff. While flying the loop it reads **On Plan** |
 | 3 | **Guide** | Toggle. Tap the map, or the ground in the camera view, to circle there on the wing (GUIDED) |
 | 4 | **Hold** | Instant. Circle where the aircraft is, on the wing (GUIDED). During a landing this is a go-around |
 | 5 | **Land** | **Hold 1 s**. Circle down beside the planned landing point on the wing, leave into the wind, back-transition and land vertically. Locked until the vehicle's mission has a landing point |
@@ -76,7 +76,8 @@ radius by EAS2TAS² (about +7 % at 700 m above sea level, more at higher fields,
 with `NAVL1_LIM_BANK` = 0), and the L1 loop overshoots small circles (SITL: 80 m
 flew as 91 m). The GCS measures each lap and trims the radius it sends, so the
 flown circle matches the dotted one. The panel shows `≈ flown 91` while it
-trims and `✓ flown 80` once it matches. Both use `DO_REPOSITION`, so the vehicle shows
+trims and `✓ flown 80` once it matches. The readout is live (the last lap's
+worth of samples, from a quarter lap on); the trim itself acts on full laps. Both use `DO_REPOSITION`, so the vehicle shows
 GUIDED. In AUTO the altitude comes from the plan: edit the waypoint instead.
 The ALT chip shows the commanded altitude as `62→80` while the aircraft climbs
 or descends to it.
@@ -112,8 +113,18 @@ messages in plain language. PreArm cards stay while ArduPilot keeps repeating
 them (every 30 s) and clear when the vehicle arms. The panel only explains: it
 never changes the vehicle.
 
-The **⚙** at the end of the bar opens **Settings** (for now: altitude in metres
-or feet). `Esc` deselects or leaves
+The **⚙** at the end of the bar opens **Settings**: altitude in metres or feet,
+and the flight trail (on/off, last 30 s / 1 / 2 / 5 / 10 min / all).
+
+**SAFETY** in the bar is the hardware safety switch: `SAFE` (amber, motor
+outputs cut, Launch locked) or `LIVE` (red). Hold it for 1 s to switch, in either
+direction (`MAV_CMD_DO_SET_SAFETY_SWITCH_STATE`). It's locked while armed:
+engaging safety in flight would cut the pusher and servos too. The GCS never
+changes it on its own.
+
+After a QRTL (or RTL / QLAND) landing the vehicle sits in a mode ArduPlane can't
+arm in, so its pre-arm check fails. SYSTEMS shows that as an info card, not a
+fault: Launch switches mode before arming. `Esc` deselects or leaves
 Plan/Guide, `Del` deletes the selected point, and `Ctrl+Z` undoes a plan edit.
 
 **The lift rotors are for takeoff and landing only.** Every flight action above
@@ -231,7 +242,10 @@ On the map, a translucent green **camera footprint** shows the ground the
 camera sees: the image border is cast onto flat ground at home level. Edges
 that run past the horizon are dashed, and a dashed line of sight leads to the
 boresight crosshair, labelled with its range. An **attitude ball** sits at the
-top left (tap it to shrink it to a small puck).
+top left, with a **wind gauge** under it: north-up, the arrow shows where the
+wind blows to, with the direction it comes from, its speed, and the head/cross
+components for the current heading (tap either to shrink both). The camera HUD
+has the same gauge relative to the nose.
 
 Map tiles (OpenStreetMap / Esri World Imagery) are cached under
 `~/.cache/mavlink_gcs_ui/tiles`. The map works offline with whatever is

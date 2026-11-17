@@ -151,6 +151,26 @@ void TelemetryBar::tick(double dt) {
     moving |= batt_.step(dt);
     moving |= mode_flash_.step(dt);
     moving |= vtol_flash_.step(dt);
+    if (safety_down_) {
+        safety_hold_ += dt;
+        if (safety_hold_ >= kSafetyHold) {
+            safety_down_ = false;
+            safety_hold_ = 0.0;
+            safety_flash_ = 1.0;
+            safety_pending_ = 3.0;
+            safety_sent_from_ = safetyState(s_);
+            emit safetyToggleRequested(safety_sent_from_ == SafetyState::Live);
+        }
+        moving = true;
+    }
+    if (safety_pending_ > 0.0) {
+        safety_pending_ = safetyState(s_) != safety_sent_from_ ? 0.0 : std::max(0.0, safety_pending_ - dt);
+        moving = true;
+    }
+    if (safety_flash_ > 0.0) {
+        safety_flash_ = std::max(0.0, safety_flash_ - dt * 2.0);
+        moving = true;
+    }
     if (gear_spin_ > 0.0) {
         gear_spin_ = std::max(0.0, gear_spin_ - dt * 2.5);
         moving = true;
@@ -160,7 +180,40 @@ void TelemetryBar::tick(double dt) {
     }
 }
 
+QString TelemetryBar::safetyLockReason() const {
+    if (!alive_) {
+        return QStringLiteral("No vehicle link");
+    }
+    if (safetyState(s_) == SafetyState::Unknown) {
+        return QStringLiteral("The vehicle doesn't report a safety switch");
+    }
+    if (s_.armed) {
+        return QStringLiteral("Can't change safety while armed: it would cut the pusher and servos too");
+    }
+    return {};
+}
+
+void TelemetryBar::mouseReleaseEvent(QMouseEvent*) {
+    if (safety_down_ && safety_hold_ < kSafetyHold) {
+        // released early: nothing happens (a hint, like the dock's hold buttons)
+        emit safetyBlocked(QStringLiteral("Hold SAFETY for 1 s to change it"));
+    }
+    safety_down_ = false;
+    safety_hold_ = 0.0;
+    update();
+}
+
 void TelemetryBar::mousePressEvent(QMouseEvent* e) {
+    if (safety_rect_.contains(e->position())) {
+        const QString reason = safetyLockReason();
+        if (!reason.isEmpty()) {
+            emit safetyBlocked(reason);
+            return;
+        }
+        safety_down_ = true;
+        safety_hold_ = 0.0;
+        return;
+    }
     if (gear_rect_.contains(e->position())) {
         gear_spin_ = 1.0;
         emit settingsRequested();
@@ -176,9 +229,9 @@ void TelemetryBar::paintEvent(QPaintEvent*) {
     p.setRenderHint(QPainter::Antialiasing);
 
     // chip widths at scale 1
-    const double kLink = 104, kMode = 128, kVtol = 112, kLift = 104, kArm = 84, kAlt = 116, kSpd = 132,
+    const double kLink = 104, kMode = 128, kVtol = 112, kLift = 104, kArm = 100, kSafe = 104, kAlt = 116, kSpd = 132,
                  kBat = 156, kGps = 92, kSys = 108, kGear = 60;
-    const double widths[] = {kLink, kMode, kVtol, kLift, kArm, kAlt, kSpd, kBat, kGps, kSys, kGear};
+    const double widths[] = {kLink, kMode, kVtol, kLift, kArm, kSafe, kAlt, kSpd, kBat, kGps, kSys, kGear};
     double total = 0;
     for (double w : widths) {
         total += w;
@@ -298,8 +351,54 @@ void TelemetryBar::paintEvent(QPaintEvent*) {
             p.drawRect(box);
             drawText(p, box, Qt::AlignCenter, QStringLiteral("ARMED"), labelFont(12.5), kRed);
         } else {
-            chip(p, r, QStringLiteral("State"), QStringLiteral("SAFE"), kGreen);
+            chip(p, r, QStringLiteral("State"), QStringLiteral("DISARMED"), kGreen);
         }
+    }
+
+    // ---- safety switch (hold 1 s to toggle) ------------------------------------
+    {
+        const QRectF r = next(kSafe);
+        safety_rect_ = p.transform().mapRect(r);
+        const SafetyState st = safetyState(s_);
+        QString text = QStringLiteral("—");
+        QColor c = kMuted;
+        if (alive_ && st == SafetyState::Safe) {
+            text = QStringLiteral("SAFE");
+            c = kAmber;
+        } else if (alive_ && st == SafetyState::Live) {
+            text = QStringLiteral("LIVE");
+            c = kRed;
+        }
+        if (safety_pending_ > 0.0) {
+            text = QStringLiteral("…");
+        }
+        const QRectF box = r.adjusted(8, 5, -8, -5);
+        p.setPen(QPen(alpha(c, 0.6 + 0.4 * safety_flash_), 1));
+        p.setBrush(alpha(c, 0.08 + 0.2 * safety_flash_));
+        p.drawRect(box);
+        // charge bar while held
+        if (safety_down_) {
+            const double f = std::clamp(safety_hold_ / kSafetyHold, 0.0, 1.0);
+            p.setPen(Qt::NoPen);
+            p.setBrush(alpha(c == kMuted ? kCyan : (st == SafetyState::Live ? kAmber : kRed), 0.45));
+            p.drawRect(QRectF(box.left(), box.bottom() - 4, box.width() * f, 4));
+        }
+        drawText(p, QRectF(box.left(), box.top() + 1, box.width(), 13), Qt::AlignHCenter | Qt::AlignVCenter,
+                 QStringLiteral("Safety"), labelFont(9.5), kMuted);
+        // padlock: closed when safe
+        const QPointF lc(box.left() + 18, box.top() + 25);
+        p.setPen(QPen(c, 1.6));
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(QRectF(lc.x() - 6, lc.y() - 2, 12, 9));
+        QPainterPath shackle;
+        const bool closed = st != SafetyState::Live;
+        shackle.moveTo(lc.x() - 4, lc.y() - 2);
+        shackle.lineTo(lc.x() - 4, lc.y() - 6);
+        shackle.arcTo(QRectF(lc.x() - 4, lc.y() - 10, 8, 8), 180, -180);
+        shackle.lineTo(lc.x() + 4, closed ? lc.y() - 2 : lc.y() - 5);
+        p.drawPath(shackle);
+        drawText(p, QRectF(box.left() + 28, box.top() + 14, box.width() - 30, 22), Qt::AlignLeft | Qt::AlignVCenter,
+                 text, labelFont(13), c);
     }
 
     // ---- altitude ----------------------------------------------------------

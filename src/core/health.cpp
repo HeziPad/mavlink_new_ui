@@ -1,5 +1,7 @@
 #include "health.hpp"
 
+#include "plane_modes.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -394,6 +396,11 @@ const std::vector<Pattern>& patterns() {
          "A waypoint right before the VTOL landing is too close to it for the transition.",
          {"Re-sync the plan from this GCS: it puts an approach circle before the landing",
           "Or move the last waypoint further from the landing point"}},
+        {{"missing takeoff", "not in vtol takeoff", "in landing sequence"}, "txt.mission_start", Severity::Caution,
+         "Mission isn't at its takeoff",
+         "AUTO only arms when the mission's current item is the VTOL takeoff; after a landing it still points at "
+         "the landing (\"in landing sequence\", \"missing takeoff waypoint\").",
+         {"Launch resets the mission to its takeoff before arming, so you're ready"}, true},
         {{"not armable"}, "txt.mode_not_armable", Severity::Caution, "Can't arm in this mode",
          "The autopilot doesn't allow arming in the current mode.",
          {"Launch switches to AUTO/GUIDED first, so this usually doesn't matter",
@@ -578,6 +585,51 @@ std::vector<Advisory> AdvisoryBook::current() const {
         out.push_back(e.adv);
     }
     return out;
+}
+
+bool modeCantArm(uint32_t m) {
+    return m == plane::RTL || m == plane::QRTL || m == plane::QLAND || m == plane::LOITER_ALT_QLAND;
+}
+
+void reconcileLandedMode(std::vector<Advisory>& list, const VehicleState& s) {
+    if (s.armed) {
+        return;
+    }
+    // AUTO after a landing: the mission still points at the land item
+    const bool auto_after_land = s.custom_mode == plane::AUTO && s.mission_known && s.mission_current > 1;
+    if (!modeCantArm(s.custom_mode) && !auto_after_land) {
+        return;
+    }
+    auto benign = [](const std::string& id) {
+        return id == "prearm.txt.mode_not_armable" || id == "prearm.txt.mission_start";
+    };
+    for (const auto& a : list) {
+        if (a.id.rfind("prearm.", 0) == 0 && !benign(a.id)) {
+            return;  // a real pre-arm problem: keep the fault
+        }
+    }
+    const bool had = std::any_of(list.begin(), list.end(), [&](const Advisory& a) { return a.id == "prearm" || benign(a.id); });
+    if (!had) {
+        return;
+    }
+    list.erase(std::remove_if(list.begin(), list.end(),
+                              [&](const Advisory& a) { return a.id == "prearm" || benign(a.id); }),
+               list.end());
+    const std::string mode = s.mode_name.empty() ? std::string("this mode") : s.mode_name;
+    if (auto_after_land) {
+        list.push_back(make("prearm.mode", Severity::Info, "Mission finished (that's fine)",
+                            "After the landing the mission still points at its landing item, and AUTO only arms at "
+                            "the takeoff, so the pre-arm check reports a failure. Nothing is wrong with the aircraft.",
+                            {"Launch resets the mission to its takeoff before arming, so you're ready to go"},
+                            "PreArm: Mode AUTO: missing takeoff waypoint"));
+    } else {
+        list.push_back(make("prearm.mode", Severity::Info, "Can't arm in " + mode + " (that's fine)",
+                            "The vehicle is still in " + mode +
+                                ", which ArduPlane doesn't allow arming in, so its pre-arm check reports a failure. "
+                                "Nothing is wrong with the aircraft.",
+                            {"Launch switches to AUTO or GUIDED before arming, so you're ready to go"},
+                            "PreArm: " + mode + " mode not armable"));
+    }
 }
 
 std::vector<Advisory> mergeAdvisories(std::vector<Advisory> a, const std::vector<Advisory>& b) {

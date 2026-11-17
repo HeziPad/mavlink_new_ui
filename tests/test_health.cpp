@@ -1,5 +1,6 @@
 #include "check.hpp"
 #include "core/health.hpp"
+#include "core/plane_modes.hpp"
 
 #include <algorithm>
 #include <string>
@@ -175,9 +176,52 @@ void testBook() {
     CHECK(merged.size() == 1);
 }
 
+void testLandedModeIsInfo() {
+    VehicleState s = healthy();
+    s.sensors_health &= ~0x10000000u;  // pre-arm failing
+    s.custom_mode = plane::QRTL;
+    s.mode_name = "QRTL";
+    AdvisoryBook book;
+    book.onStatusText("PreArm: QRTL mode not armable", 2, T0);
+    auto list = mergeAdvisories(assess(s, T0, true), book.current());
+    reconcileLandedMode(list, s);
+    CHECK(!find(list, "prearm"));
+    CHECK(!find(list, "prearm.txt.mode_not_armable"));
+    CHECK(find(list, "prearm.mode") && find(list, "prearm.mode")->severity == Severity::Info);
+
+    // a real reason on top: keep the fault
+    book.onStatusText("PreArm: Compass not calibrated", 2, T0);
+    list = mergeAdvisories(assess(s, T0, true), book.current());
+    reconcileLandedMode(list, s);
+    CHECK(find(list, "prearm"));
+    CHECK(!find(list, "prearm.mode"));
+
+    // AUTO after a landing (mission at the land item): info too
+    s.custom_mode = plane::AUTO;
+    s.mode_name = "AUTO";
+    s.mission_known = true;
+    s.mission_current = 7;
+    AdvisoryBook landed;
+    // the exact texts SITL sends after a VTOL landing in AUTO
+    landed.onStatusText("PreArm: Mode AUTO: missing takeoff waypoint", 2, T0);
+    landed.onStatusText("PreArm: In landing sequence", 2, T0);
+    list = mergeAdvisories(assess(s, T0, true), landed.current());
+    reconcileLandedMode(list, s);
+    CHECK(!find(list, "prearm"));
+    CHECK(find(list, "prearm.mode") && find(list, "prearm.mode")->severity == Severity::Info);
+
+    // in AUTO at the takeoff a pre-arm failure is a real fault
+    s.mission_current = 1;
+    AdvisoryBook clean;
+    list = mergeAdvisories(assess(s, T0, true), clean.current());
+    reconcileLandedMode(list, s);
+    CHECK(find(list, "prearm"));
+}
+
 }  // namespace
 
 int main() {
+    testLandedModeIsInfo();
     testHealthyIsQuiet();
     testLink();
     testEkfFlags();

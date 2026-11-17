@@ -23,6 +23,14 @@ CommandRequest makeArm(bool arm) {
     return r;
 }
 
+CommandRequest makeSetSafety(bool safe) {
+    CommandRequest r;
+    r.command = MAV_CMD_DO_SET_SAFETY_SWITCH_STATE;
+    r.params[0] = safe ? static_cast<float>(SAFETY_SWITCH_STATE_SAFE) : static_cast<float>(SAFETY_SWITCH_STATE_DANGEROUS);
+    r.label = safe ? "SAFETY ON" : "SAFETY OFF";
+    return r;
+}
+
 CommandRequest makeVtolTakeoff(float alt_rel) {
     // ArduPlane runs a GUIDED quadplane takeoff from MAV_CMD_NAV_TAKEOFF
     // (quadplane.do_user_takeoff); NAV_VTOL_TAKEOFF (84) is only a mission item
@@ -34,10 +42,11 @@ CommandRequest makeVtolTakeoff(float alt_rel) {
     return r;
 }
 
-CommandRequest makeSetMissionCurrent(uint16_t seq) {
+CommandRequest makeSetMissionCurrent(uint16_t seq, bool reset) {
     CommandRequest r;
     r.command = MAV_CMD_DO_SET_MISSION_CURRENT;
     r.params[0] = static_cast<float>(seq);
+    r.params[1] = reset ? 1.0f : 0.0f;
     r.label = "MISSION " + std::to_string(seq);
     return r;
 }

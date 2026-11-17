@@ -1,8 +1,10 @@
 #pragma once
 
 #include <QPixmap>
+#include <QStringList>
 #include <QWidget>
 
+#include <map>
 #include <vector>
 
 namespace gcs::ui {
@@ -16,15 +18,24 @@ class SettingsScreen : public QWidget {
     Q_OBJECT
 
 public:
+    struct Values {
+        int alt_unit = 0;     // units::Alt
+        bool trail_on = true;
+        int trail_secs = 120; // 0 = everything kept
+    };
+    // the trail lengths offered (seconds, 0 = all)
+    static const std::vector<int>& trailChoices();
+
     explicit SettingsScreen(QWidget* parent);
 
-    void open(int alt_unit);  // units::Alt
+    void open(const Values& v);
     void close();
     bool isOpen() const { return open_target_ > 0.5; }
     void tick(double dt);
 
 signals:
     void altUnitChanged(int unit);
+    void trailChanged(bool on, int secs);
     void closed();
 
 protected:
@@ -32,18 +43,36 @@ protected:
     void mousePressEvent(QMouseEvent* e) override;
 
 private:
+    enum Category { kUnits = 0, kMap = 1, kCategories };
+    // a segmented control: one finger-sized cell per option, sliding highlight
+    struct Segmented {
+        QStringList labels;
+        int selected = 0;
+        double knob = 0.0;  // animated position, in cells
+        bool enabled = true;
+        std::vector<QRectF> cells;
+    };
+
     QRectF panelRect() const;
+    void paintSegmented(QPainter& p, const QRectF& r, Segmented& seg);
+    void paintRow(QPainter& p, const QRectF& r, const QString& title, const QString& sub);
+    bool pressSegmented(Segmented& seg, const QPointF& pos);
 
     QPixmap backdrop_;
-    double open_ = 0.0;         // 0 hidden .. 1 shown
+    double open_ = 0.0;  // 0 hidden .. 1 shown
     double open_target_ = 0.0;
     double time_ = 0.0;
-    int alt_unit_ = 0;
-    double alt_knob_ = 0.0;     // segmented toggle highlight, animated
-    double flash_ = 0.0;        // brief glow on change
+    double flash_ = 0.0;  // brief glow on change
+    int category_ = kUnits;
+    double cat_knob_ = 0.0;
+
+    Values v_;
+    Segmented alt_;
+    Segmented trail_on_;
+    Segmented trail_len_;
 
     QRectF close_rect_;
-    std::vector<QRectF> alt_seg_;  // [meters, feet]
+    std::vector<QRectF> cat_rects_;
 };
 
 }  // namespace gcs::ui

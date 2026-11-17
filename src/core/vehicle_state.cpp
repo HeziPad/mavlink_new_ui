@@ -64,6 +64,17 @@ bool hasFlyableMission(const VehicleState& s) {
     return s.mission_known && s.mission.size() > 1;
 }
 
+SafetyState safetyState(const VehicleState& s) {
+    if (!s.has_sys_status || !(s.sensors_present & kSensorMotorOutputs)) {
+        return SafetyState::Unknown;
+    }
+    return (s.sensors_enabled & kSensorMotorOutputs) ? SafetyState::Live : SafetyState::Safe;
+}
+
+bool resumeNeedsReset(const VehicleState& s) {
+    return s.mission_known && hasFlyableMission(s) && seqToWaypointIndex(s.mission, s.mission_current) < 0;
+}
+
 bool isLandingInMission(const VehicleState& s) {
     if (s.custom_mode != plane::AUTO || !s.mission_known) {
         return false;

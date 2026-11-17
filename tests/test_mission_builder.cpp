@@ -244,6 +244,17 @@ static void testLandingInMission() {
     s.custom_mode = plane::AUTO;
     s.mission_known = false;
     CHECK(!isLandingInMission(s));
+
+    // resuming AUTO must start on a loop waypoint
+    s.mission_known = true;
+    s.mission_current = 1;  // VTOL takeoff: AUTO would hover again
+    CHECK(resumeNeedsReset(s));
+    s.mission_current = 0;
+    CHECK(resumeNeedsReset(s));
+    s.mission_current = lseq;  // approach circle
+    CHECK(resumeNeedsReset(s));
+    s.mission_current = 3;  // second loop waypoint
+    CHECK(!resumeNeedsReset(s));
 }
 
 int main() {

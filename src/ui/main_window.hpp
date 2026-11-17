@@ -53,6 +53,8 @@ struct AppSettings {
     int alt_unit = 0;            // units::Alt
     int hud_reference = 0;       // CameraView::HudRef
     bool ball_collapsed = false; // map attitude ball
+    bool trail_on = true;
+    int trail_secs = 120;        // 0 = all
 
     static AppSettings load();
     void save() const;

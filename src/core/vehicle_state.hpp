@@ -20,6 +20,7 @@ struct TrailPoint {
     double lat = 0.0;
     double lon = 0.0;
     float alt_rel = 0.0f;
+    std::chrono::steady_clock::time_point t{};  // when it was recorded
 };
 
 // Plain-value snapshot of everything the UI needs. Copied under a mutex by
@@ -177,6 +178,10 @@ bool isAirborne(const VehicleState& s);
 bool hasFlyableMission(const VehicleState& s);
 // AUTO and on the approach circle or the land item (not on the loop)
 bool isLandingInMission(const VehicleState& s);
+// Resuming AUTO from here would not continue the loop: the current item is
+// home, the VTOL takeoff (it would hover and climb on the rotors again) or the
+// landing. Set the current item to a loop waypoint first.
+bool resumeNeedsReset(const VehicleState& s);
 bool prearmHealthy(const VehicleState& s);
 bool ekfHealthy(const VehicleState& s);
 bool gpsHealthy(const VehicleState& s);
@@ -234,5 +239,13 @@ void updateCruiseLatch(VehicleState& s);
 // Call after servo outputs or VTOL state change.
 void updateAssistTimer(VehicleState& s, Clock::time_point now);
 const char* liftRotorsName(LiftRotors r);
+
+// Hardware safety switch, from SYS_STATUS: ArduPilot always reports
+// MOTOR_OUTPUTS present, and *enabled* unless the safety switch is engaged.
+//   Safe  outputs cut (motors can't spin, arming is refused)
+//   Live  outputs flow (no switch fitted, or safety turned off)
+enum class SafetyState { Unknown, Safe, Live };
+constexpr uint32_t kSensorMotorOutputs = 0x8000;
+SafetyState safetyState(const VehicleState& s);
 
 }  // namespace gcs

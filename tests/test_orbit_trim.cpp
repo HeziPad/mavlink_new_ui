@@ -77,9 +77,34 @@ void testFlyInIsIgnoredAndBounds() {
     CHECK(t.commandRadius() >= OrbitTrim::kMinCommand);
 }
 
+void testLiveEstimate() {
+    OrbitTrim t;
+    t.setRequested(300.0);
+    const double r = 321.0;  // flown, before any correction
+    double a = 0.0;
+    int samples = 0;
+    // nothing to show before a quarter lap
+    while (a < OrbitTrim::kLiveMinTurn - 0.1) {
+        a += 0.05;
+        t.addSample(r * std::cos(a), r * std::sin(a));
+        ++samples;
+        CHECK(t.liveRadius() < 0.0 || a >= OrbitTrim::kLiveMinTurn);
+    }
+    for (int i = 0; i < 6; ++i) {
+        a += 0.05;
+        t.addSample(r * std::cos(a), r * std::sin(a));
+    }
+    CHECK_NEAR(t.liveRadius(), r, 0.5);  // available after ~90 deg, long before a full lap
+    CHECK(!t.liveMatched());
+    CHECK(t.flownRadius() < 0.0);        // the trim's own lap isn't done yet
+    t.setRequested(150.0);
+    CHECK(t.liveRadius() < 0.0);         // a new request starts over
+}
+
 }  // namespace
 
 int main() {
+    testLiveEstimate();
     testConvergesToRequested();
     testSmallCircleOvershoot();
     testRatioCarriesOverToNewRadius();

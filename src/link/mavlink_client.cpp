@@ -22,8 +22,9 @@ namespace gcs::link {
 
 namespace {
 
-constexpr size_t kTrailMax = 2000;
-constexpr double kTrailSpacing = 2.0;  // metres
+constexpr size_t kTrailMax = 10000;      // ~40 km: the map's "ALL" trail
+constexpr size_t kTrailTrim = 500;       // erase in chunks, not per point
+constexpr double kTrailSpacing = 4.0;  // metres
 
 VtolState toVtol(uint8_t v) {
     switch (v) {
@@ -494,8 +495,8 @@ void MavlinkClient::decodeTelemetry(const mavlink_message_t& msg) {
         ++position_count_;
         if (s.trail.empty() ||
             geo::distance(s.trail.back().lat, s.trail.back().lon, s.lat, s.lon) >= kTrailSpacing) {
-            s.trail.push_back({s.lat, s.lon, static_cast<float>(s.alt_rel)});
-            if (s.trail.size() > kTrailMax) {
+            s.trail.push_back({s.lat, s.lon, static_cast<float>(s.alt_rel), now});
+            if (s.trail.size() > kTrailMax + kTrailTrim) {
                 s.trail.erase(s.trail.begin(), s.trail.begin() + (s.trail.size() - kTrailMax));
             }
         }

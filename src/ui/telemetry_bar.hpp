@@ -24,15 +24,19 @@ public:
     void setAdvisories(const std::vector<Advisory>& list);
     void setSystemsOpen(bool open);
     void tick(double dt);
-    QSize sizeHint() const override { return {1210, 50}; }
+    QSize sizeHint() const override { return {1330, 50}; }
 
 signals:
     void settingsRequested();
     void systemsTapped();
+    // SAFETY held for kSafetyHold: toggle it (`make_safe` = engage)
+    void safetyToggleRequested(bool make_safe);
+    void safetyBlocked(const QString& reason);
 
 protected:
     void paintEvent(QPaintEvent* e) override;
     void mousePressEvent(QMouseEvent* e) override;
+    void mouseReleaseEvent(QMouseEvent* e) override;
 
 private:
     VehicleState s_;
@@ -51,6 +55,14 @@ private:
 
     QRectF sys_rect_;
     QRectF gear_rect_;
+    QRectF safety_rect_;
+    static constexpr double kSafetyHold = 1.0;  // s, both directions
+    bool safety_down_ = false;
+    double safety_hold_ = 0.0;     // s held
+    double safety_flash_ = 0.0;
+    double safety_pending_ = 0.0;  // s left waiting for the state to change
+    SafetyState safety_sent_from_ = SafetyState::Unknown;
+    QString safetyLockReason() const;
     double gear_spin_ = 0.0;
     bool sys_open_ = false;
     int adv_bad_ = 0;   // Warning + Critical

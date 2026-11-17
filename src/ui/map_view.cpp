@@ -1,6 +1,7 @@
 #include "map_view.hpp"
 
 #include "attitude_ball.hpp"
+#include "wind_gauge.hpp"
 #include "core/geo.hpp"
 #include "theme.hpp"
 #include "tile_cache.hpp"
@@ -278,6 +279,12 @@ void MapView::setBallCollapsed(bool on) {
     if (reducedMotion()) {
         ball_open_ = on ? 0.0 : 1.0;
     }
+    update();
+}
+
+void MapView::setTrail(bool on, int secs) {
+    trail_on_ = on;
+    trail_secs_ = std::max(0, secs);
     update();
 }
 
@@ -673,17 +680,26 @@ void MapView::paintEvent(QPaintEvent*) {
         paintRoute(p, vehicle_plan_, kCyan, false, active);
     }
 
-    // trail: fades along its length
-    if (s_.trail.size() > 1) {
+    // trail: the chosen time window, fading toward its oldest end
+    if (trail_on_ && s_.trail.size() > 1) {
         const size_t n = s_.trail.size();
+        size_t first = 0;
+        if (trail_secs_ > 0) {
+            const auto cutoff = Clock::now() - std::chrono::seconds(trail_secs_);
+            first = static_cast<size_t>(
+                std::lower_bound(s_.trail.begin(), s_.trail.end(), cutoff,
+                                 [](const TrailPoint& tp, Clock::time_point c) { return tp.t < c; }) -
+                s_.trail.begin());
+        }
+        const size_t span = n - first;
         const size_t chunk = 12;
-        for (size_t i = 1; i < n; i += chunk) {
+        for (size_t i = first + 1; span > 1 && i < n; i += chunk) {
             QPolygonF poly;
             const size_t end = std::min(n, i + chunk);
             for (size_t k = i - 1; k < end; ++k) {
                 poly << toScreen(s_.trail[k].lat, s_.trail[k].lon);
             }
-            const double a = 0.08 + 0.75 * static_cast<double>(end) / n;
+            const double a = 0.08 + 0.75 * static_cast<double>(end - first) / span;
             p.setPen(QPen(alpha(kCyan, a), compact_ ? 1.5 : 2.2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
             p.setBrush(Qt::NoBrush);
             p.drawPolyline(poly);
@@ -1225,6 +1241,21 @@ void MapView::paintBall(QPainter& p) {
         drawText(p, QRectF(box.left() + 10, box.top() + 4, 80, 14), Qt::AlignLeft | Qt::AlignVCenter,
                  QStringLiteral("ATTITUDE"), labelFont(9), alpha(kMuted, e));
     }
+
+    // wind, under the ball (north-up like the map); collapses with it
+    WindInfo w;
+    w.valid = s_.has_wind;
+    w.from_deg = s_.wind_from_deg;
+    w.speed = s_.wind_speed;
+    const double wh = lerp(box.width(), 132.0, e);
+    const QRectF wbox(box.left(), box.bottom() + 8, box.width(), wh);
+    drawGlass(p, chamferPath(wbox, 10), kCyan, 0.45, alpha(kGlassDeep, 0.85));
+    if (e > 0.5) {
+        drawText(p, QRectF(wbox.left() + 10, wbox.top() + 4, 80, 14), Qt::AlignLeft | Qt::AlignVCenter,
+                 QStringLiteral("WIND"), labelFont(9), alpha(kMuted, e));
+    }
+    paintWindGauge(p, wbox.adjusted(8, e > 0.5 ? 20 : 6, -8, -6), w, heading_.value, time_, true, e < 0.5);
+    ball_rect_ = ball_rect_.united(wbox.adjusted(-4, -4, 4, 4));
 }
 
 }  // namespace gcs::ui

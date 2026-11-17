@@ -28,7 +28,10 @@ CommandRequest makeSetMode(uint32_t custom_mode, const std::string& label);
 CommandRequest makeArm(bool arm);
 CommandRequest makeVtolTakeoff(float alt_rel);
 // MAV_CMD_DO_SET_MISSION_CURRENT: continue the mission from `seq`.
-CommandRequest makeSetMissionCurrent(uint16_t seq);
+// reset: also restart the mission (jump counters, completed -> active)
+CommandRequest makeSetMissionCurrent(uint16_t seq, bool reset = false);
+// Hardware safety switch: safe = outputs cut. ArduPilot: MAV_CMD_DO_SET_SAFETY_SWITCH_STATE.
+CommandRequest makeSetSafety(bool safe);
 // MAV_CMD_DO_REPOSITION (COMMAND_INT): switch to GUIDED and circle (lat, lon)
 // at alt_rel with the given radius and direction. Re-sending with the same
 // centre changes radius / altitude / direction in place.

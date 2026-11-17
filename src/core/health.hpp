@@ -67,6 +67,13 @@ private:
 // Merge, de-duplicate by id and sort worst first.
 std::vector<Advisory> mergeAdvisories(std::vector<Advisory> a, const std::vector<Advisory>& b);
 
+// After a landing in RTL / QRTL / QLAND the vehicle sits disarmed in a mode
+// ArduPlane can't arm in ("mode not armable"), so the pre-arm bit fails even
+// though nothing is wrong: Launch switches mode first. When that is the only
+// pre-arm reason, replace the fault with an info card. Call on the merged list.
+void reconcileLandedMode(std::vector<Advisory>& list, const VehicleState& s);
+bool modeCantArm(uint32_t custom_mode);
+
 const char* severityName(Severity s);
 
 }  // namespace gcs

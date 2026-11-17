@@ -70,6 +70,7 @@ add_executable(mavlink_gcs_ui
     src/ui/view_host.cpp
     src/ui/units.cpp
     src/ui/waypoint_panel.cpp
+    src/ui/wind_gauge.cpp
 )
 target_link_libraries(mavlink_gcs_ui PRIVATE gcs_core Qt6::Widgets Qt6::Network)
 gcs_warnings(mavlink_gcs_ui)

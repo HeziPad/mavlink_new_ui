@@ -69,6 +69,8 @@ public:
     };
     void setFootprint(std::optional<FootprintDraw> fp);
     void setBallCollapsed(bool on);
+    // flight trail: off, or the last `secs` seconds (0 = everything kept)
+    void setTrail(bool on, int secs);
 
     // ---- the circle commanded in GUIDED (Hold / Guide) --------------------------
     struct OrbitDraw {
@@ -180,6 +182,8 @@ private:
     Tween roll_, pitch_;
     bool has_att_ = false;
     bool ball_collapsed_ = false;
+    bool trail_on_ = true;
+    int trail_secs_ = 120;
     double ball_open_ = 1.0;  // 0 collapsed .. 1 open, animated
 
     AngleTween heading_;

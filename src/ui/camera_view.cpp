@@ -1,6 +1,7 @@
 #include "camera_view.hpp"
 
 #include "attitude_ball.hpp"
+#include "wind_gauge.hpp"
 #include "core/geo.hpp"
 #include "theme.hpp"
 #include "units.hpp"
@@ -400,6 +401,20 @@ void CameraView::paintHud(QPainter& p) {
     paintHeadingTape(p, QRectF(c.x() - r.width() * 0.22, 66, r.width() * 0.44, 38));
     paintReadouts(p);
     paintRefChip(p);
+    {
+        // wind relative to the nose, under the HUD chip (left of the airspeed tape)
+        WindInfo w;
+        w.valid = s_.has_wind;
+        w.from_deg = s_.wind_from_deg;
+        w.speed = s_.wind_speed;
+        const QRectF wb(16, 306, 108, 118);
+        p.setPen(QPen(alpha(hud, 0.5), 1));
+        p.setBrush(alpha(kBg, 0.55));
+        p.drawRect(wb);
+        drawText(p, QRectF(wb.left() + 8, wb.top() + 3, 60, 14), Qt::AlignLeft | Qt::AlignVCenter,
+                 QStringLiteral("WIND"), labelFont(9), alpha(hud, 0.8));
+        paintWindGauge(p, wb.adjusted(4, 16, -4, -4), w, yaw_.value, time_, false, false);
+    }
     const double tape_h = std::min(r.height() * 0.46, 360.0);
     paintVerticalTape(p, QRectF(c.x() - r.width() * 0.36 - 70, c.y() - tape_h / 2, 70, tape_h), as_.value, 2.0, true,
                       QStringLiteral("AS"));

@@ -15,6 +15,22 @@ void OrbitTrim::setRequested(double radius_m) {
     requested_ = radius_m;
     sent_ = commandRadius();
     restart();
+    clearLive();
+}
+
+void OrbitTrim::clearLive() {
+    live_.clear();
+    live_turn_ = 0.0;
+    live_wdist_ = 0.0;
+}
+
+double OrbitTrim::liveRadius() const {
+    return live_turn_ >= kLiveMinTurn ? live_wdist_ / live_turn_ : -1.0;
+}
+
+bool OrbitTrim::liveMatched() const {
+    const double r = liveRadius();
+    return r > 0.0 && std::abs(r - requested_) <= std::max(3.0, 0.03 * requested_);
 }
 
 double OrbitTrim::commandRadius() const {
@@ -39,6 +55,7 @@ bool OrbitTrim::addSample(double north, double east) {
     const double dist = std::hypot(north, east);
     if (dist < 0.5 * sent_ || dist > 2.0 * sent_) {
         restart();  // still flying in (or thrown off): not on the circle
+        clearLive();
         return false;
     }
     const double angle = std::atan2(east, north);
@@ -55,6 +72,14 @@ bool OrbitTrim::addSample(double north, double east) {
         return false;
     }
     turned_ += d;
+    live_.push_back({d, dist});
+    live_turn_ += d;
+    live_wdist_ += d * dist;
+    while (!live_.empty() && live_turn_ - live_.front().dtheta >= kTwoPi) {
+        live_turn_ -= live_.front().dtheta;
+        live_wdist_ -= live_.front().dtheta * live_.front().dist;
+        live_.pop_front();
+    }
     if (phase_ == Phase::Settling) {
         if (turned_ >= kSettleTurn) {
             phase_ = Phase::Measuring;
@@ -76,6 +101,7 @@ bool OrbitTrim::addSample(double north, double east) {
     if (std::abs(next - sent_) > std::max(1.5, 0.01 * requested_)) {
         sent_ = next;
         phase_ = Phase::Settling;  // let it settle on the new circle first
+        clearLive();               // the old circle no longer says anything
         return true;
     }
     return false;  // close enough: keep watching lap by lap

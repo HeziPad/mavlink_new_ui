@@ -1,5 +1,7 @@
 #pragma once
 
+#include <deque>
+
 namespace gcs {
 
 // Makes the circle ArduPlane flies match the one the GCS asked for.
@@ -31,6 +33,12 @@ public:
     bool measuring() const { return phase_ == Phase::Measuring; }
     bool converged() const;
 
+    // For display: updated every sample, angle-weighted over the last lap
+    // (at least kLiveMinTurn of arc since the last command change). < 0 until then.
+    static constexpr double kLiveMinTurn = 1.5707963267948966;  // 90 deg
+    double liveRadius() const;
+    bool liveMatched() const;  // the live flown radius matches the request
+
 private:
     enum class Phase { Settling, Measuring };
     void restart();
@@ -44,6 +52,15 @@ private:
     double last_angle_ = 0.0;
     double turned_ = 0.0;  // rad since the phase started
     double wdist_ = 0.0;   // sum of dist * dtheta over the measuring lap
+
+    struct Arc {
+        double dtheta;
+        double dist;
+    };
+    std::deque<Arc> live_;  // sliding window, at most one lap
+    double live_turn_ = 0.0;
+    double live_wdist_ = 0.0;
+    void clearLive();
 };
 
 }  // namespace gcs

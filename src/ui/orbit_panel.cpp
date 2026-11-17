@@ -20,7 +20,7 @@ using namespace theme;
 
 namespace {
 
-constexpr int kTouch = 52;
+constexpr int kTouch = 48;  // finger-sized (>= 44-48 px), compact enough to fit beside the PiP
 
 QPushButton* makeButton(const QString& text) {
     auto* b = new QPushButton(text);
@@ -41,7 +41,7 @@ QWidget* OrbitPanel::column(const QString& name, QLabel*& value, const std::init
     auto* w = new QWidget;
     auto* h = new QHBoxLayout(w);
     h->setContentsMargins(0, 0, 0, 0);
-    h->setSpacing(6);
+    h->setSpacing(5);
     auto* info = new QVBoxLayout;
     info->setSpacing(0);
     auto* label = new QLabel(name);
@@ -124,20 +124,19 @@ void OrbitPanel::unitsChanged() {
 
 OrbitPanel::OrbitPanel(QWidget* parent) : QWidget(parent) {
     auto* outer = new QHBoxLayout(this);
-    outer->setContentsMargins(18, 10, 12, 10);
-    outer->setSpacing(14);
+    outer->setContentsMargins(14, 10, 10, 10);
+    outer->setSpacing(10);
 
     title_ = new QLabel;
     title_->setObjectName(QStringLiteral("orbTitle"));
     outer->addWidget(title_);
-    outer->addWidget(column(QStringLiteral("ALT"), alt_, {-10, -1, 1, 10}, true, &OrbitPanel::altitudeDelta));
-    alt_now_ = new QLabel;
-    alt_now_->setObjectName(QStringLiteral("orbNow"));
-    outer->addWidget(alt_now_);
+    // the current altitude sits under the target, like "flown" under the radius
+    outer->addWidget(column(QStringLiteral("ALT"), alt_, {-10, -1, 1, 10}, true, &OrbitPanel::altitudeDelta,
+                            &alt_now_));
     outer->addWidget(column(QStringLiteral("RADIUS"), radius_, {-50, -10, 10, 50}, false, &OrbitPanel::radiusDelta,
                              &radius_flown_));
     dir_ = makeButton(QStringLiteral("↻ CW"));
-    dir_->setMinimumWidth(84);
+    dir_->setMinimumWidth(76);
     connect(dir_, &QPushButton::clicked, this, &OrbitPanel::directionToggled);
     outer->addWidget(dir_);
 
@@ -145,7 +144,7 @@ OrbitPanel::OrbitPanel(QWidget* parent) : QWidget(parent) {
         QLabel { background: transparent; color: #e6f1f8; }
         QLabel#orbTitle { color: #3fe0ff; font: bold 12px "DejaVu Sans"; }
         QLabel#orbName { color: #7d93a6; font: bold 11px "DejaVu Sans"; }
-        QLabel#orbValue { font: bold 20px "DejaVu Sans Mono"; min-width: 76px; }
+        QLabel#orbValue { font: bold 20px "DejaVu Sans Mono"; min-width: 96px; }
         QLabel#orbNow { color: #7d93a6; font: 11px "DejaVu Sans Mono"; }
         QLabel#orbNote { color: #7d93a6; font: 10px "DejaVu Sans Mono"; }
         QPushButton {
@@ -184,7 +183,7 @@ void OrbitPanel::setValues(const QString& title, float alt, float radius, bool c
     }
     alt_->setText(units::altText(alt));
     radius_->setText(QStringLiteral("%1 m").arg(radius, 0, 'f', 0));
-    alt_now_->setText(current_alt >= 0.0 ? QStringLiteral("now\n%1").arg(units::altText(current_alt)) : QString());
+    alt_now_->setText(current_alt >= 0.0 ? QStringLiteral("now %1").arg(units::altText(current_alt)) : QString());
     dir_->setText(ccw ? QStringLiteral("↺ CCW") : QStringLiteral("↻ CW"));
     layout()->invalidate();
     layout()->activate();

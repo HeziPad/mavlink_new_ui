@@ -54,6 +54,8 @@ AppSettings AppSettings::load() {
     s.alt_unit = q.value(QStringLiteral("ui/alt_unit"), s.alt_unit).toInt();
     s.hud_reference = q.value(QStringLiteral("camera/hud_reference"), s.hud_reference).toInt();
     s.ball_collapsed = q.value(QStringLiteral("map/ball_collapsed"), s.ball_collapsed).toBool();
+    s.trail_on = q.value(QStringLiteral("map/trail_on"), s.trail_on).toBool();
+    s.trail_secs = q.value(QStringLiteral("map/trail_secs"), s.trail_secs).toInt();
 
     // seed missing keys so the settings file is discoverable and hand-editable
     const std::pair<const char*, QVariant> defaults[] = {
@@ -81,6 +83,8 @@ void AppSettings::save() const {
     q.setValue(QStringLiteral("ui/alt_unit"), alt_unit);
     q.setValue(QStringLiteral("camera/hud_reference"), hud_reference);
     q.setValue(QStringLiteral("map/ball_collapsed"), ball_collapsed);
+    q.setValue(QStringLiteral("map/trail_on"), trail_on);
+    q.setValue(QStringLiteral("map/trail_secs"), trail_secs);
 }
 
 // ---- construction ---------------------------------------------------------------
@@ -109,6 +113,7 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
     map_->setDefaultAltitude(settings_.waypoint_alt);
     map_->setDefaultLandAltitude(settings_.land_approach_alt);
     map_->setBallCollapsed(settings_.ball_collapsed);
+    map_->setTrail(settings_.trail_on, settings_.trail_secs);
     camera_ = new CameraView(video_.get());
     camera_->setCamera(settings_.camera_hfov, settings_.camera_tilt);
     camera_->setHudReference(settings_.hud_reference == 1 ? CameraView::HudRef::Body : CameraView::HudRef::Los);
@@ -129,12 +134,29 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
 
     connect(bar_, &TelemetryBar::systemsTapped, this, [this] { showAlerts(!alerts_->isVisible()); });
     connect(alerts_, &AlertsPanel::closeRequested, this, [this] { showAlerts(false); });
+    connect(bar_, &TelemetryBar::safetyBlocked, this,
+            [this](const QString& reason) { fx_->toast(reason, kMuted, QStringLiteral("Safety")); });
+    connect(bar_, &TelemetryBar::safetyToggleRequested, this, [this](bool make_safe) {
+        client_->runSequence("safety", {link::makeSetSafety(make_safe)});
+        fx_->toast(make_safe ? QStringLiteral("Safety ON: motor outputs cut") : QStringLiteral("Safety OFF: motors live"),
+                   make_safe ? kAmber : kRed, QStringLiteral("Safety"));
+    });
 
     connect(bar_, &TelemetryBar::settingsRequested, this, [this] {
         showAlerts(false);
-        settings_screen_->open(settings_.alt_unit);
+        SettingsScreen::Values v;
+        v.alt_unit = settings_.alt_unit;
+        v.trail_on = settings_.trail_on;
+        v.trail_secs = settings_.trail_secs;
+        settings_screen_->open(v);
     });
     connect(settings_screen_, &SettingsScreen::altUnitChanged, this, &MainWindow::applyAltUnit);
+    connect(settings_screen_, &SettingsScreen::trailChanged, this, [this](bool on, int secs) {
+        settings_.trail_on = on;
+        settings_.trail_secs = secs;
+        settings_.save();
+        map_->setTrail(on, secs);
+    });
 
     connect(dock_, &ControlDock::triggered, this, &MainWindow::onTriggered);
     connect(dock_, &ControlDock::longPressed, this, &MainWindow::onLongPressed);
@@ -416,6 +438,7 @@ void MainWindow::updateAlerts() {
     book_.update(s_, now);
     const std::vector<Advisory> state = assess(s_, now, ever_connected_);
     advisories_ = mergeAdvisories(state, book_.current());
+    reconcileLandedMode(advisories_, s_);
     bar_->setAdvisories(advisories_);
     if (alerts_->isVisible()) {
         alerts_->setAdvisories(advisories_, alive);
@@ -651,6 +674,9 @@ void MainWindow::refreshDock() {
             if (!alive) {
                 spec.enabled = false;
                 spec.reason = no_link;
+            } else if (safetyState(s_) == SafetyState::Safe) {
+                spec.enabled = false;
+                spec.reason = QStringLiteral("Safety on: motors cut. Hold SAFETY in the top bar for 1 s to make them live");
             } else if (!gpsHealthy(s_) || !s_.has_home) {
                 spec.enabled = false;
                 spec.reason = QStringLiteral("Waiting for GPS fix and home position");
@@ -665,11 +691,11 @@ void MainWindow::refreshDock() {
             // during a landing the vehicle is in AUTO too, but on the land
             // items: Auto then aborts it and resumes the loop
             const bool landing = isLandingInMission(s_);
-            spec.label = landing ? QStringLiteral("Resume") : QStringLiteral("Auto");
-            spec.icon = DockIcon::Auto;
             spec.active = s_.custom_mode == plane::AUTO && !landing;
-            spec.hint = landing ? QStringLiteral("Abort the landing and go back to the loop")
-                                : QStringLiteral("Resume the loop (AUTO)");
+            spec.label = spec.active ? QStringLiteral("On Plan") : QStringLiteral("Resume Plan");
+            spec.icon = DockIcon::Auto;
+            spec.hint = landing ? QStringLiteral("Abort the landing and go back to the planned loop (AUTO)")
+                                : QStringLiteral("Go back to the planned loop on the wing (AUTO)");
             if (!alive) {
                 spec.enabled = false;
                 spec.reason = no_link;
@@ -678,7 +704,7 @@ void MainWindow::refreshDock() {
                 spec.reason = QStringLiteral("No mission on the vehicle");
             } else if (spec.active) {
                 spec.enabled = false;
-                spec.reason = QStringLiteral("Already flying the mission");
+                spec.reason = QStringLiteral("Already flying the plan");
             }
         }
         dock_->setSlot(kLaunch, spec);
@@ -961,8 +987,8 @@ void MainWindow::sendOrbit() {
 
 MapView::OrbitDraw MainWindow::orbitDraw() const {
     MapView::OrbitDraw d{orbit_->lat, orbit_->lon, orbit_->radius, orbit_->ccw, orbit_->hold};
-    d.flown = trim_.flownRadius();
-    d.trimmed = trim_.converged();
+    d.flown = trim_.liveRadius() > 0.0 ? trim_.liveRadius() : trim_.flownRadius();
+    d.trimmed = trim_.liveRadius() > 0.0 ? trim_.liveMatched() : trim_.converged();
     return d;
 }
 
@@ -973,15 +999,12 @@ void MainWindow::updateOrbitTrim() {
     }
     trim_pos_rx_ = s_.pos_rx;  // one sample per telemetry position, not per frame
     const geo::NE d = geo::delta(orbit_->lat, orbit_->lon, s_.lat, s_.lon);
-    const double before = trim_.flownRadius();
     if (trim_.addSample(d.north, d.east)) {
         orbit_trim_only_ = !orbit_dirty_;  // a user edit already pending stays loud
         orbit_dirty_ = true;  // re-sent (same centre = live change) from frame()
     }
-    if (trim_.flownRadius() != before) {
-        map_->setOrbit(orbitDraw());  // a lap completed: show what was flown
-        refreshOrbitPanel();
-    }
+    map_->setOrbit(orbitDraw());  // the live flown radius changes every sample
+    refreshOrbitPanel();
 }
 
 void MainWindow::adjustOrbit(float d_alt, float d_radius, bool flip) {
@@ -1012,7 +1035,7 @@ void MainWindow::refreshOrbitPanel() {
         return;
     }
     orbit_panel_->setValues(orbit_->hold ? QStringLiteral("HOLD") : QStringLiteral("GUIDE"), orbit_->alt,
-                            orbit_->radius, orbit_->ccw, s_.alt_rel, trim_.flownRadius(), trim_.converged());
+                            orbit_->radius, orbit_->ccw, s_.alt_rel, orbitDraw().flown, orbitDraw().trimmed);
     const QSize ds = dock_->sizeHint();
     orbit_panel_->move(orbitPanelX(), height() - ds.height() - 18 - orbit_panel_->height());
     if (!orbit_panel_->isVisible()) {
@@ -1050,11 +1073,12 @@ void MainWindow::onCameraClick(double px, double py, double w, double h) {
 void MainWindow::launchOrAuto() {
     setGuide(false);
     if (isAirborne(s_)) {
-        // after an aborted landing the vehicle's current item is still the
-        // approach: put it back on the loop before resuming
-        const int lseq = s_.mission_known ? landSeq(s_.mission) : -1;
-        if (lseq >= 0 && s_.mission_current >= lseq) {
-            client_->runSequence("auto", {link::makeSetMissionCurrent(static_cast<uint16_t>(resume_seq_)),
+        // The current item must be a loop waypoint: after an aborted landing
+        // it is still the approach, and after a Hold during the takeoff climb
+        // it is the VTOL takeoff, which AUTO would re-run on the rotors.
+        if (resumeNeedsReset(s_)) {
+            const int seq = seqToWaypointIndex(s_.mission, resume_seq_) >= 0 ? resume_seq_ : 2;
+            client_->runSequence("auto", {link::makeSetMissionCurrent(static_cast<uint16_t>(seq)),
                                           link::makeSetMode(plane::AUTO, "AUTO")});
         } else {
             client_->setMode(plane::AUTO, "auto");
@@ -1064,8 +1088,10 @@ void MainWindow::launchOrAuto() {
     }
     std::vector<link::CommandRequest> steps;
     if (hasFlyableMission(s_)) {
-        // ArduPlane starts the mission when it arms in AUTO
-        steps = {link::makeSetMode(plane::AUTO, "AUTO"), link::makeArm(true)};
+        // ArduPlane starts the mission when it arms in AUTO, from its *current*
+        // item: after a landing that is still the land item, and AUTO refuses
+        // to arm ("missing takeoff waypoint"). Point it back at the takeoff.
+        steps = {link::makeSetMissionCurrent(1, true), link::makeSetMode(plane::AUTO, "AUTO"), link::makeArm(true)};
     } else {
         steps = {link::makeSetMode(plane::GUIDED, "GUIDED"), link::makeArm(true),
                  link::makeVtolTakeoff(settings_.takeoff_alt)};
