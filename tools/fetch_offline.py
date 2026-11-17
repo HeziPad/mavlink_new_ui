@@ -3,7 +3,7 @@
 
 Works on any computer with Python 3 (standard library only). It writes
 exactly the folder the GCS reads (Settings -> OFFLINE -> FOLDER, default
-~/.local/share/mavlink_gcs_ui/offline/):
+~/.local/share/mavlink_gcs_ui/mavlink_gcs_ui/offline/ -- the app name twice):
 
     map.pmtiles                          street map: OpenStreetMap vector tiles (Protomaps build, ODbL)
     map.build                            which daily build that is (re-running skips it while it's the latest)

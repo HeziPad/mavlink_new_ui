@@ -8,7 +8,7 @@ namespace gcs::ui::offline {
 // Where map and elevation tiles live, and where they come from.
 //
 // Offline folder (Settings → OFFLINE; default <AppData>/offline, i.e.
-// ~/.local/share/mavlink_gcs_ui/offline). It is read before the download
+// ~/.local/share/mavlink_gcs_ui/mavlink_gcs_ui/offline). It is read before the download
 // cache and the network, and has a plain slippy-tile layout so it can be
 // filled by hand (tools/fetch_offline.py, or any tile exporter):
 //

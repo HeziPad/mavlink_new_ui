@@ -256,7 +256,7 @@ Tests that move or spin anything need a 1 s hold, have a **STOP ALL** button,
 and have vehicle-side timeouts as well. A pass stays valid until the autopilot
 reboots, the battery is swapped, a parameter is changed elsewhere, an hour
 passes, or it flies; after a flight a short **turnaround** preflight is offered.
-Every run is saved as JSON under `~/.local/share/mavlink_gcs_ui/preflight/`.
+Every run is saved as JSON under `~/.local/share/mavlink_gcs_ui/mavlink_gcs_ui/preflight/`.
 
 ## Offline maps
 
@@ -316,7 +316,7 @@ The street map can also be cut with the official PMTiles tool:
 `pmtiles extract https://build.protomaps.com/<YYYYMMDD>.pmtiles map.pmtiles --bbox=33.7,29.0,36.5,33.8`
 (the dates are listed at `https://build-metadata.protomaps.dev/builds.json`).
 
-Copy the folder to `~/.local/share/mavlink_gcs_ui/offline/` on the field computer, or point
+Copy the folder to `~/.local/share/mavlink_gcs_ui/mavlink_gcs_ui/offline/` (the app name appears twice) on the field computer, or point
 Settings → OFFLINE → CHANGE at it. Its layout:
 
 ```
