@@ -3,6 +3,10 @@
 BRD_SAFETY_DEFLT 1
 # a battery monitor, so the power checks have voltage and current
 BATT_MONITOR 4
+# a pack for ~2 h of flight: cruise draws ~12.6 A in SITL (measured), so 30 Ah
+# lasts ~2 h of cruise to ~15 % left (the takeoff uses ~0.6 Ah)
+SIM_BATT_CAP_AH 30
+BATT_CAPACITY 30000
 # failsafes fly the same landing as the Land button
 RTL_AUTOLAND 2
 Q_RTL_MODE 0

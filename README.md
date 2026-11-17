@@ -51,7 +51,8 @@ tools/sitl.sh                 # ArduPlane quadplane SITL at your location, outpu
 
 `tools/sitl.sh` starts `sim_vehicle.py` (checkout in `$ARDUPILOT`, default
 `~/ardupilot`) with `tools/sitl_extra.parm`. That file sets safety ON at boot,
-a battery monitor, and the failsafe settings below. The start location comes from:
+a 30 Ah simulated battery (about 2 h of flight: cruise draws ~12.6 A), a
+battery monitor, and the failsafe settings below. The start location comes from:
 
 1. `GCS_SITL_LOCATION=lat,lon,alt,heading`, if set;
 2. otherwise your public IP's approximate location (ipinfo.io, falling back to
@@ -259,54 +260,71 @@ Every run is saved as JSON under `~/.local/share/mavlink_gcs_ui/preflight/`.
 
 ## Offline maps
 
-The map imagery and the ground height can work with no internet.
+The map works **offline only** by default: nothing is fetched while you
+browse. You choose what to download in Settings ⚙ → **OFFLINE**. Settings →
+OFFLINE → **ONLINE TILES: ON** fetches missing satellite while browsing, if
+you want that.
 
-**In the app:** open Settings ⚙ → **OFFLINE**.
+| Layer | Where it comes from | Coverage |
+|---|---|---|
+| **Map** (streets) | OpenStreetMap vector data (Protomaps daily build, ODbL), drawn by the app in the HUD's style | the **country pack**: Israel + ~50 km, every zoom, sharp to the deepest |
+| **Sat** | Esri World Imagery | **country pack**: zoom 8–14 (≈10 m/px); **full-detail areas** you draw: zoom 15–18 (≈0.5 m/px) |
+| Ground height (hover) | AWS Terrain Tiles (SRTM) | country: zoom 12 (≈30 m); full-detail areas: zoom 13 |
 
-1. Pick a radius (10 / 25 / 50 km) around the aircraft, or around the map
-   centre when there's no aircraft.
-2. Check the tile count and size estimate.
-3. Press **DOWNLOAD AREA**. Coarse zooms come first, so a cancelled download
-   is still useful. Downloading again resumes and only fetches what is missing.
+- **Missing satellite is filled in.** Where there's no satellite imagery (outside your areas, or deeper
+  than Esri has, which Esri answers with a grey "Map data not yet available" tile), the map shows the
+  nearest coarser imagery enlarged, or the street map. The no-data answer is remembered (`{y}.none`),
+  so it isn't fetched again.
+- **Street labels:** Hebrew or English, under Settings → MAP → MAP LABELS.
 
-**DELETE ALL** removes the downloaded tiles. **CHANGE** picks another folder,
-for example a USB stick.
+**Country pack.** Settings → OFFLINE → **DOWNLOAD COUNTRY**:
 
-| Radius | Map zooms | Elevation zoom | About |
-|---|---|---|---|
-| 10 km | 8–16 (≈2 m/px) | 13 | 4 200 tiles, ~100 MB |
-| 25 km | 8–15 (≈4 m/px) | 13 | 6 900 tiles, ~170 MB |
-| 50 km | 8–14 (≈8 m/px) | 12 | 6 800 tiles, ~170 MB |
+1. The street map: about 175,000 tiles, about 235 MB, about a minute. Only the index pieces and tile
+   ranges covering the area are read from the 140 GB planet file.
+2. Then elevation and satellite: about 46,000 tiles, about 1 GB.
 
-Sizes vary with the terrain: city satellite tiles are bigger than desert ones.
+It resumes where it stopped. **UPDATE COUNTRY** later fetches the newest street map.
 
-**Without the app** (another computer, or preparing the data in advance), use
-`tools/fetch_offline.py`. It needs only Python 3, nothing else:
+**Full-detail areas.** Settings → OFFLINE → **SELECT AREA ON MAP**:
+
+- Drag a rectangle with a finger or the mouse, and drag a corner to adjust it.
+- The panel shows its size, the **new tiles** and the tiles **already on disk** before you press
+  **DOWNLOAD**. Areas you already have show as dashed outlines.
+- Each tile is stored once, by its position, so overlapping areas share tiles and only the missing ones
+  are downloaded.
+- **CLEAR FULL DETAIL** removes all full-detail satellite and ground height after an "are you sure?".
+  The country pack and the street map stay. **DELETE ALL** asks the same way.
+
+**Without the app** (another computer, or preparing in advance), `tools/fetch_offline.py` does the same
+and needs only Python 3:
 
 ```sh
-tools/fetch_offline.py --lat 32.0853 --lon 34.7818 --radius-km 25 --out ./offline   # add --dry-run for the estimate
+tools/fetch_offline.py --country israel --out ./offline              # street map + country satellite + ground height
+tools/fetch_offline.py --country israel --only vector --out ./offline
+tools/fetch_offline.py --bbox 34.75,32.05,34.82,32.12 --out ./offline  # a full-detail area (min_lon,min_lat,max_lon,max_lat)
+tools/fetch_offline.py --country israel --out ./offline --dry-run    # sizes only
 ```
 
-Copy the resulting folder to `~/.local/share/mavlink_gcs_ui/offline/` on the
-field computer, or point Settings → OFFLINE → CHANGE at it. The folder is a
-plain slippy-tile tree, read before the download cache and the network:
+The street map can also be cut with the official PMTiles tool:
+`pmtiles extract https://build.protomaps.com/<YYYYMMDD>.pmtiles map.pmtiles --bbox=33.7,29.0,36.5,33.8`
+(the dates are listed at `https://build-metadata.protomaps.dev/builds.json`).
+
+Copy the folder to `~/.local/share/mavlink_gcs_ui/offline/` on the field computer, or point
+Settings → OFFLINE → CHANGE at it. Its layout:
 
 ```
-offline/osm/{z}/{x}/{y}.png            streets      tile.openstreetmap.org/{z}/{x}/{y}.png
-offline/esri_imagery/{z}/{x}/{y}.jpg   satellite    server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}
-offline/elevation/{z}/{x}/{y}.png      elevation    s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png
+offline/map.pmtiles                     street map (any *.pmtiles with vector tiles is used)
+offline/esri_imagery/{z}/{x}/{y}.jpg    satellite        ({y}.none: no imagery at that zoom)
+offline/elevation/{z}/{x}/{y}.png       ground height    ("terrarium": m = R*256 + G + B/256 - 32768)
+offline/areas.json                      the full-detail areas (outlines on the map)
 ```
 
-- **Any tile source in this layout works,** for example tiles exported from
-  QGIS or MOBAC. Each layer accepts `.png`, `.jpg`, `.jpeg`, `.webp` or `.img`.
-- **Elevation tiles are "terrarium" PNGs:** height in metres =
-  `R·256 + G + B/256 − 32768`. The lookup uses zoom 13 and falls back to zooms
-  12 … 9 when 13 isn't there.
-- **Tile providers have terms.** OpenStreetMap's tile policy forbids heavy bulk
-  downloading, and Esri imagery has its own terms. Keep areas modest, or use a
-  provider you have rights to: set `map/streets_url`, `map/satellite_url` or
-  `map/elevation_url` in the settings file (templates with `{z}` `{x}` `{y}`).
-  `fetch_offline.py` takes the same as `--streets-url` etc.
+- **Other sources work too.** Any slippy-tile source in that layout works for satellite (e.g. tiles
+  exported from QGIS or MOBAC). Each layer accepts `.png`, `.jpg`, `.jpeg`, `.webp` or `.img`.
+- **Tile providers have terms.** Esri imagery and others have their own terms; OpenStreetMap's tile
+  server refuses bulk downloads, which is why the street map comes from the vector data instead.
+- **Online URLs are configurable.** `map/satellite_url`, `map/elevation_url` and `map/streets_url`
+  (`{z}` `{x}` `{y}` templates) in the settings file change where online tiles come from.
 
 ## Settings
 

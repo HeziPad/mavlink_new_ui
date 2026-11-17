@@ -22,23 +22,23 @@ public:
         int alt_unit = 0;     // units::Alt
         bool trail_on = true;
         int trail_secs = 120; // 0 = everything kept
+        bool labels_english = false;
     };
     // the trail lengths offered (seconds, 0 = all)
     static const std::vector<int>& trailChoices();
-    // offline area radii offered (km)
-    static const std::vector<int>& offlineRadii();
-
     // what the OFFLINE page shows; MainWindow keeps it current
     struct Offline {
-        QString center;         // "around the aircraft" / "around the map centre"
-        int radius_idx = 1;
-        size_t tiles = 0;       // estimate for the selected radius
-        qint64 bytes = 0;
+        bool street_map = false;  // the vector street map is installed
+        QString country;          // country pack status line
+        int areas = 0;            // full-detail areas downloaded
+        qint64 area_bytes = 0;
         bool running = false;
-        size_t done = 0, total = 0, failed = 0;
-        qint64 disk_bytes = -1; // in the folder now (-1 unknown)
+        QString stage;            // what the download is doing
+        double fraction = 0.0;
+        qint64 disk_bytes = -1;   // the whole offline folder (-1 unknown)
         QString folder;
-        QString status;         // last result line
+        QString status;           // last result line
+        bool online = false;      // online tiles while browsing
     };
     void setOffline(const Offline& o);
 
@@ -52,11 +52,14 @@ public:
 signals:
     void altUnitChanged(int unit);
     void trailChanged(bool on, int secs);
-    void offlineRadiusChanged(int km);
-    void offlineDownload();
+    void offlineCountry();       // download / update the country pack
     void offlineCancel();
-    void offlineDelete();
+    void offlineSelectArea();    // close and draw a full-detail area on the map
+    void offlineClearDetail();   // confirmed
+    void offlineDeleteAll();     // confirmed
     void offlineChooseFolder();
+    void onlineChanged(bool on);
+    void labelsEnglishChanged(bool english);
     void closed();
 
 protected:
@@ -93,10 +96,14 @@ private:
     Segmented alt_;
     Segmented trail_on_;
     Segmented trail_len_;
-    Segmented radius_;
+    Segmented labels_;
+    Segmented online_;
     Offline off_;
-    QRectF dl_rect_, del_rect_, folder_rect_;
-    bool del_armed_ = false;  // DELETE asks once more
+    QRectF country_rect_, area_rect_, clear_rect_, delete_rect_, folder_rect_;
+    // "are you sure?" over the panel
+    enum class Confirm { None, ClearDetail, DeleteAll } confirm_ = Confirm::None;
+    QRectF confirm_yes_, confirm_no_;
+    void paintConfirm(QPainter& p, const QRectF& panel);
 
     QRectF close_rect_;
     std::vector<QRectF> cat_rects_;

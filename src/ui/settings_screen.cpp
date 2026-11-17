@@ -19,11 +19,6 @@ const std::vector<int>& SettingsScreen::trailChoices() {
     return c;
 }
 
-const std::vector<int>& SettingsScreen::offlineRadii() {
-    static const std::vector<int> r = {10, 25, 50};
-    return r;
-}
-
 namespace {
 QString sizeText(qint64 b) {
     if (b < 0) {
@@ -40,8 +35,8 @@ QString sizeText(qint64 b) {
 }  // namespace
 
 SettingsScreen::SettingsScreen(QWidget* parent) : QWidget(parent) {
-    radius_.labels = {QStringLiteral("10 KM"), QStringLiteral("25 KM"), QStringLiteral("50 KM")};
-    radius_.selected = 1;
+    labels_.labels = {QStringLiteral("עברית"), QStringLiteral("ENGLISH")};
+    online_.labels = {QStringLiteral("OFF"), QStringLiteral("ON")};
     alt_.labels = {QStringLiteral("METERS"), QStringLiteral("FEET")};
     trail_on_.labels = {QStringLiteral("OFF"), QStringLiteral("ON")};
     trail_len_.labels = {QStringLiteral("30 S"), QStringLiteral("1 MIN"), QStringLiteral("2 MIN"),
@@ -56,11 +51,12 @@ void SettingsScreen::open(const Values& v) {
     const auto& c = trailChoices();
     const auto it = std::find(c.begin(), c.end(), v.trail_secs);
     trail_len_.selected = it != c.end() ? static_cast<int>(it - c.begin()) : 2;
-    radius_.selected = off_.radius_idx;
-    for (Segmented* s : {&alt_, &trail_on_, &trail_len_, &radius_}) {
+    labels_.selected = v.labels_english ? 1 : 0;
+    online_.selected = off_.online ? 1 : 0;
+    for (Segmented* s : {&alt_, &trail_on_, &trail_len_, &labels_, &online_}) {
         s->knob = s->selected;
     }
-    del_armed_ = false;
+    confirm_ = Confirm::None;
     trail_len_.enabled = v.trail_on;
 
     // freeze a blurred copy of what's behind: cheap down/up-scale blur
@@ -106,7 +102,7 @@ void SettingsScreen::tick(double dt) {
         return;
     }
     const double k = reducedMotion() ? 1.0 : 1.0 - std::exp(-16.0 * dt);
-    for (Segmented* s : {&alt_, &trail_on_, &trail_len_, &radius_}) {
+    for (Segmented* s : {&alt_, &trail_on_, &trail_len_, &labels_, &online_}) {
         s->knob += (s->selected - s->knob) * k;
     }
     cat_knob_ += (category_ - cat_knob_) * k;
@@ -116,7 +112,7 @@ void SettingsScreen::tick(double dt) {
 
 QRectF SettingsScreen::panelRect() const {
     const double w = std::min(860.0, width() - 48.0);
-    const double h = std::min(480.0, height() - 120.0);
+    const double h = std::min(category_ == kOffline ? 560.0 : 480.0, height() - 80.0);
     return {(width() - w) / 2.0, (height() - h) / 2.0, w, h};
 }
 
@@ -139,6 +135,17 @@ void SettingsScreen::mousePressEvent(QMouseEvent* e) {
     if (open_target_ < 0.5) {
         return;
     }
+    if (confirm_ != Confirm::None) {
+        // the modal owns every tap until it's answered
+        if (confirm_yes_.contains(pos)) {
+            confirm_ == Confirm::ClearDetail ? emit offlineClearDetail() : emit offlineDeleteAll();
+            confirm_ = Confirm::None;
+        } else if (confirm_no_.contains(pos)) {
+            confirm_ = Confirm::None;
+        }
+        update();
+        return;
+    }
     if (close_rect_.contains(pos) || !panelRect().contains(pos)) {
         close();
         return;
@@ -155,27 +162,19 @@ void SettingsScreen::mousePressEvent(QMouseEvent* e) {
             emit altUnitChanged(alt_.selected);
         }
     } else if (category_ == kOffline) {
-        if (dl_rect_.contains(pos)) {
-            if (off_.running) {
-                emit offlineCancel();
-            } else {
-                emit offlineDownload();
-            }
-        } else if (del_rect_.contains(pos) && !off_.running) {
-            if (del_armed_) {
-                del_armed_ = false;
-                emit offlineDelete();
-            } else {
-                del_armed_ = true;
-            }
+        if (country_rect_.contains(pos)) {
+            off_.running ? emit offlineCancel() : emit offlineCountry();
+        } else if (area_rect_.contains(pos) && !off_.running) {
+            emit offlineSelectArea();
+        } else if (clear_rect_.contains(pos) && !off_.running && off_.area_bytes > 0) {
+            confirm_ = Confirm::ClearDetail;
+        } else if (delete_rect_.contains(pos) && !off_.running && off_.disk_bytes > 0) {
+            confirm_ = Confirm::DeleteAll;
         } else if (folder_rect_.contains(pos) && !off_.running) {
             emit offlineChooseFolder();
-        } else if (!off_.running && pressSegmented(radius_, pos)) {
-            off_.radius_idx = radius_.selected;
-            emit offlineRadiusChanged(offlineRadii()[radius_.selected]);
-        }
-        if (!del_rect_.contains(pos)) {
-            del_armed_ = false;
+        } else if (pressSegmented(online_, pos)) {
+            off_.online = online_.selected == 1;
+            emit onlineChanged(off_.online);
         }
     } else if (category_ == kMap) {
         bool changed = false;
@@ -187,6 +186,8 @@ void SettingsScreen::mousePressEvent(QMouseEvent* e) {
         }
         if (changed) {
             emit trailChanged(trail_on_.selected == 1, trailChoices()[trail_len_.selected]);
+        } else if (pressSegmented(labels_, pos)) {
+            emit labelsEnglishChanged(labels_.selected == 1);
         }
     }
     update();
@@ -299,17 +300,19 @@ void SettingsScreen::paintEvent(QPaintEvent*) {
                  QStringLiteral("how far back in time it reaches"), labelFont(10, false),
                  alpha(kMuted, trail_len_.enabled ? 1.0 : 0.6));
         paintSegmented(p, QRectF(body.left(), body.top() + 182, body.width(), 58), trail_len_);
+        drawText(p, QRectF(body.left(), body.top() + 258, body.width(), 18), Qt::AlignLeft | Qt::AlignVCenter,
+                 QStringLiteral("MAP LABELS"), labelFont(11), kText);
+        drawText(p, QRectF(body.left(), body.top() + 276, body.width(), 18), Qt::AlignLeft | Qt::AlignVCenter,
+                 QStringLiteral("place and street names on the offline street map"), labelFont(10, false), kMuted);
+        paintSegmented(p, QRectF(body.left(), body.top() + 300, std::min(body.width(), 300.0), 52), labels_);
     }
+    paintConfirm(p, pr);
     p.restore();
 }
 
 void SettingsScreen::setOffline(const Offline& o) {
-    const bool was_running = off_.running;
     off_ = o;
-    if (!o.running && !was_running) {
-        radius_.selected = o.radius_idx;
-    }
-    radius_.enabled = !o.running;
+    online_.selected = o.online ? 1 : 0;
     update();
 }
 
@@ -317,66 +320,99 @@ void SettingsScreen::paintAction(QPainter& p, const QRectF& r, const QString& la
     p.save();
     p.setOpacity(p.opacity() * (enabled ? 1.0 : 0.35));
     drawGlass(p, chamferPath(r, 9), c, 0.85, alpha(c, 0.16));
-    drawText(p, r, Qt::AlignCenter, label, labelFont(13.5), c);
+    drawText(p, r, Qt::AlignCenter, label, labelFont(13), c);
     p.restore();
 }
 
 void SettingsScreen::paintOffline(QPainter& p, const QRectF& body) {
-    paintRow(p, body, QStringLiteral("OFFLINE MAP + GROUND HEIGHT"),
-             QStringLiteral("download the area %1 for flying without internet").arg(off_.center));
-    paintSegmented(p, QRectF(body.left(), body.top() + 50, std::min(body.width(), 330.0), 52), radius_);
-
-    // estimate, or progress
-    const QRectF info(body.left(), body.top() + 112, body.width(), 40);
-    if (off_.running && off_.total > 0) {
-        const double f = static_cast<double>(off_.done) / off_.total;
-        const QRectF bar(info.left(), info.top() + 4, info.width(), 12);
+    double y = body.top();
+    // ---- country pack ------------------------------------------------------------------
+    paintRow(p, QRectF(body.left(), y, body.width(), 44), QStringLiteral("COUNTRY PACK · ISRAEL + 50 KM"),
+             QStringLiteral("street map (all zooms) · satellite to ~10 m/px · ground height"));
+    drawText(p, QRectF(body.left(), y + 44, body.width(), 18), Qt::AlignLeft | Qt::AlignVCenter, off_.country,
+             monoFont(11), off_.street_map ? kGreen : kAmber);
+    y += 70;
+    country_rect_ = QRectF(body.left(), y, 250, 50);
+    const bool country_running = off_.running;
+    paintAction(p, country_rect_,
+                country_running ? QStringLiteral("CANCEL")
+                                : (off_.street_map ? QStringLiteral("⟳ UPDATE COUNTRY") : QStringLiteral("⬇ DOWNLOAD COUNTRY")),
+                country_running ? kAmber : kCyan, true);
+    if (country_running) {
+        const QRectF bar(country_rect_.right() + 16, y + 10, body.right() - country_rect_.right() - 16, 10);
         p.setPen(QPen(alpha(kCyan, 0.5), 1));
         p.setBrush(alpha(kBg, 0.6));
         p.drawRect(bar);
         p.setPen(Qt::NoPen);
         p.setBrush(kCyan);
-        p.drawRect(QRectF(bar.left(), bar.top(), bar.width() * f, bar.height()));
-        drawText(p, QRectF(info.left(), info.top() + 20, info.width(), 18), Qt::AlignLeft | Qt::AlignVCenter,
-                 QStringLiteral("%1 / %2 tiles · %3%")
-                     .arg(off_.done)
-                     .arg(off_.total)
-                     .arg(static_cast<int>(f * 100))
-                     .append(off_.failed ? QStringLiteral(" · %1 failed").arg(off_.failed) : QString()),
-                 monoFont(11.5), kText);
-    } else {
-        drawText(p, QRectF(info.left(), info.top(), info.width(), 18), Qt::AlignLeft | Qt::AlignVCenter,
-                 QStringLiteral("streets + satellite + elevation · about %1 tiles · ~%2")
-                     .arg(off_.tiles)
-                     .arg(sizeText(off_.bytes)),
-                 monoFont(11.5), kText);
-        drawText(p, QRectF(info.left(), info.top() + 20, info.width(), 18), Qt::AlignLeft | Qt::AlignVCenter,
-                 off_.status, labelFont(10, false), kMuted);
+        p.drawRect(QRectF(bar.left(), bar.top(), bar.width() * std::clamp(off_.fraction, 0.0, 1.0), bar.height()));
+        drawText(p, QRectF(bar.left(), bar.bottom() + 4, bar.width(), 18), Qt::AlignLeft | Qt::AlignVCenter,
+                 QStringLiteral("%1 · %2%").arg(off_.stage).arg(static_cast<int>(off_.fraction * 100)), monoFont(10.5),
+                 kText);
+    } else if (!off_.status.isEmpty()) {
+        drawText(p, QRectF(country_rect_.right() + 16, y, body.right() - country_rect_.right() - 16, 50),
+                 Qt::AlignLeft | Qt::AlignVCenter | Qt::TextWordWrap, off_.status, labelFont(10, false), kMuted);
     }
-
-    // actions
-    const double by = body.top() + 164;
-    dl_rect_ = QRectF(body.left(), by, 220, 54);
-    paintAction(p, dl_rect_, off_.running ? QStringLiteral("CANCEL") : QStringLiteral("⬇ DOWNLOAD AREA"),
-                off_.running ? kAmber : kCyan, true);
-    del_rect_ = QRectF(dl_rect_.right() + 12, by, 170, 54);
-    paintAction(p, del_rect_, del_armed_ ? QStringLiteral("TAP TO CONFIRM") : QStringLiteral("DELETE ALL"), kRed,
-                !off_.running && off_.disk_bytes > 0);
-
-    // folder
-    const double fy = by + 72;
-    drawText(p, QRectF(body.left(), fy, body.width(), 18), Qt::AlignLeft | Qt::AlignVCenter,
-             QStringLiteral("FOLDER · %1 on disk").arg(sizeText(off_.disk_bytes)), labelFont(11), kText);
-    folder_rect_ = QRectF(body.left(), fy + 22, body.width(), 44);
+    y += 74;
+    // ---- full-detail areas -------------------------------------------------------------------
+    paintRow(p, QRectF(body.left(), y, body.width(), 44), QStringLiteral("FULL-DETAIL AREAS"),
+             off_.areas > 0 ? QStringLiteral("%1 area%2 · %3 · overlapping areas share their tiles")
+                                  .arg(off_.areas)
+                                  .arg(off_.areas == 1 ? "" : "s")
+                                  .arg(sizeText(off_.area_bytes))
+                            : QStringLiteral("draw a rectangle on the map: satellite to ~0.5 m/px there"));
+    y += 52;
+    area_rect_ = QRectF(body.left(), y, 250, 50);
+    paintAction(p, area_rect_, QStringLiteral("▭ SELECT AREA ON MAP"), kCyan, !off_.running);
+    clear_rect_ = QRectF(area_rect_.right() + 12, y, 220, 50);
+    paintAction(p, clear_rect_, QStringLiteral("CLEAR FULL DETAIL"), kRed, !off_.running && off_.area_bytes > 0);
+    y += 76;
+    // ---- online + folder ----------------------------------------------------------------------
+    drawText(p, QRectF(body.left(), y, 260, 18), Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("ONLINE TILES"),
+             labelFont(11), kText);
+    drawText(p, QRectF(body.left(), y + 18, 300, 16), Qt::AlignLeft | Qt::AlignVCenter,
+             QStringLiteral("fetch missing satellite while browsing"), labelFont(10, false), kMuted);
+    paintSegmented(p, QRectF(body.left(), y + 38, 200, 46), online_);
+    delete_rect_ = QRectF(body.right() - 170, y + 38, 170, 46);
+    paintAction(p, delete_rect_, QStringLiteral("DELETE ALL"), kRed, !off_.running && off_.disk_bytes > 0);
+    y += 100;
+    drawText(p, QRectF(body.left(), y, body.width(), 18), Qt::AlignLeft | Qt::AlignVCenter,
+             QStringLiteral("FOLDER · %1 on disk · copy it to use the maps on another computer")
+                 .arg(sizeText(off_.disk_bytes)),
+             labelFont(11), kText);
+    folder_rect_ = QRectF(body.left(), y + 22, body.width(), 44);
     drawGlass(p, chamferPath(folder_rect_, 7), kMuted, 0.4, alpha(kBg, 0.6));
     const QFont ff = monoFont(10.5);
     drawText(p, folder_rect_.adjusted(12, 0, -90, 0), Qt::AlignLeft | Qt::AlignVCenter,
              QFontMetricsF(ff).elidedText(off_.folder, Qt::ElideMiddle, folder_rect_.width() - 110), ff, kMuted);
     drawText(p, folder_rect_.adjusted(0, 0, -12, 0), Qt::AlignRight | Qt::AlignVCenter, QStringLiteral("CHANGE"),
              labelFont(11), off_.running ? alpha(kMuted, 0.4) : kCyan);
-    drawText(p, QRectF(body.left(), body.bottom() - 18, body.width(), 18), Qt::AlignLeft | Qt::AlignVCenter,
-             QStringLiteral("copy this folder to another computer to use it there (README: Offline maps)"),
-             labelFont(10, false), alpha(kMuted, 0.8));
+}
+
+void SettingsScreen::paintConfirm(QPainter& p, const QRectF& panel) {
+    if (confirm_ == Confirm::None) {
+        confirm_yes_ = confirm_no_ = QRectF();
+        return;
+    }
+    p.fillRect(panel, alpha(kBg, 0.75));
+    const QRectF box(panel.center().x() - 260, panel.center().y() - 110, 520, 220);
+    drawGlass(p, chamferPath(box, 14), kRed, 0.9, alpha(kGlassDeep, 0.98));
+    drawText(p, QRectF(box.left() + 28, box.top() + 20, box.width() - 56, 30), Qt::AlignLeft | Qt::AlignVCenter,
+             QStringLiteral("ARE YOU SURE?"), titleFont(20), kRed);
+    const QString text =
+        confirm_ == Confirm::ClearDetail
+            ? QStringLiteral("Delete all full-detail satellite and ground height (%1)? The country map, the street map "
+                             "and the country satellite stay.")
+                  .arg(sizeText(off_.area_bytes))
+            : QStringLiteral("Delete everything in the offline folder (%1): the street map, all satellite and ground "
+                             "height? Without internet the map will be empty until you download again.")
+                  .arg(sizeText(off_.disk_bytes));
+    drawText(p, QRectF(box.left() + 28, box.top() + 58, box.width() - 56, 70), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
+             text, labelFont(11.5, false), kText);
+    confirm_no_ = QRectF(box.left() + 28, box.bottom() - 74, 200, 52);
+    confirm_yes_ = QRectF(box.right() - 228, box.bottom() - 74, 200, 52);
+    paintAction(p, confirm_no_, QStringLiteral("CANCEL"), kCyan, true);
+    paintAction(p, confirm_yes_, QStringLiteral("DELETE"), kRed, true);
 }
 
 }  // namespace gcs::ui

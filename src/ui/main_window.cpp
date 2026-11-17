@@ -13,6 +13,7 @@
 #include "offline_downloader.hpp"
 #include "offline_store.hpp"
 #include "plan_strip.hpp"
+#include "vector_map.hpp"
 #include "preflight_runner.hpp"
 #include "preflight_screen.hpp"
 #include "settings_screen.hpp"
@@ -115,6 +116,9 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
     client_ = std::make_unique<link::MavlinkClient>(cfg);
     video_ = std::make_unique<VideoReceiver>(settings_.video_port);
     tiles_ = new TileCache(this);
+    vector_map_ = new VectorMap(this);
+    vector_map_->setEnglish(QSettings().value(QStringLiteral("map/labels_english"), false).toBool());
+    tiles_->setVectorMap(vector_map_);
     elev_ = new ElevationCache(this);
     offline_ = new OfflineDownloader(this);
 
@@ -173,51 +177,120 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
         v.alt_unit = settings_.alt_unit;
         v.trail_on = settings_.trail_on;
         v.trail_secs = settings_.trail_secs;
-        offline_disk_ = OfflineDownloader::diskUsage();
-        refreshOffline();
+        v.labels_english = vector_map_->english();
+        refreshOfflineCounts();
         settings_screen_->open(v);
     });
-    // ---- offline area ------------------------------------------------------------
-    offline_radius_km_ = QSettings().value(QStringLiteral("map/offline_radius_km"), 25).toInt();
-    connect(settings_screen_, &SettingsScreen::offlineRadiusChanged, this, [this](int km) {
-        offline_radius_km_ = km;
-        QSettings().setValue(QStringLiteral("map/offline_radius_km"), km);
-        refreshOffline();
-    });
-    connect(settings_screen_, &SettingsScreen::offlineDownload, this, [this] {
-        OfflineDownloader::Area a;
-        a.lat = s_.has_position ? s_.lat : map_->centerLat();
-        a.lon = s_.has_position ? s_.lon : map_->centerLon();
-        a.radius_km = offline_radius_km_;
+    // ---- offline map data ------------------------------------------------------------
+    connect(settings_screen_, &SettingsScreen::offlineCountry, this, [this] {
         offline_status_.clear();
-        offline_->start(a);
+        offline_->startCountry();
     });
     connect(settings_screen_, &SettingsScreen::offlineCancel, offline_, &OfflineDownloader::cancel);
-    connect(settings_screen_, &SettingsScreen::offlineDelete, this, [this] {
-        offline_status_ = OfflineDownloader::clear() ? QStringLiteral("deleted") : QStringLiteral("could not delete everything");
-        offline_disk_ = OfflineDownloader::diskUsage();
-        refreshOffline();
+    connect(settings_screen_, &SettingsScreen::offlineSelectArea, this, [this] {
+        settings_screen_->close();
+        if (planning_) exitPlan();
+        setGuide(false);
+        if (host_->mainView() != map_) host_->swap();
+        std::vector<MapView::GeoBox> boxes;
+        for (const auto& b : OfflineDownloader::areas()) boxes.push_back({b.min_lon, b.min_lat, b.max_lon, b.max_lat});
+        map_->setAreas(boxes);
+        map_->clearAreaSelection();
+        map_->setMode(MapView::Mode::Area);
+    });
+    connect(map_, &MapView::areaChanged, this, [this](MapView::GeoBox g, bool final) {
+        if (!g.max_lat && !g.min_lat) return;
+        const OfflineDownloader::Box b{g.min_lon, g.min_lat, g.max_lon, g.max_lat};
+        const QString dims = QStringLiteral("%1 × %2 km").arg(b.widthKm(), 0, 'f', 1).arg(b.heightKm(), 0, 'f', 1);
+        // the full count checks the disk for every tile: only when the finger lifts
+        const double km2 = b.widthKm() * b.heightKm();
+        const double tiles_guess = km2 * 75.0;  // z15-18 at ~31 N
+        if (tiles_guess > 90000) {
+            map_->setAreaInfo(dims + QStringLiteral(" · too big for full detail"),
+                              QStringLiteral("about %1 tiles (~%2 GB). Draw a smaller area (up to ~1000 km²), or several.")
+                                  .arg(static_cast<long long>(tiles_guess))
+                                  .arg(tiles_guess * 22000 / 1e9, 0, 'f', 1),
+                              false, true);
+            return;
+        }
+        if (!final) {
+            map_->setAreaInfo(dims, QStringLiteral("lift to count the tiles…"), false, false);
+            return;
+        }
+        const auto c = OfflineDownloader::areaCount(b);
+        map_->setAreaInfo(
+            dims + QStringLiteral(" · ~%1 MB new").arg(c.bytes / 1e6, 0, 'f', 0),
+            c.fresh == 0 ? QStringLiteral("all %1 tiles already on disk: nothing to download").arg(c.have)
+                         : QStringLiteral("satellite to ~0.5 m/px + ground height · %1 new tiles · %2 already on disk "
+                                          "(shared with areas you have)")
+                               .arg(c.fresh)
+                               .arg(c.have),
+            c.fresh > 0 && !offline_->running(), false);
+    });
+    connect(map_, &MapView::areaCancel, this, [this] { map_->setMode(MapView::Mode::Normal); });
+    connect(map_, &MapView::areaDownload, this, [this] {
+        const auto g = map_->areaSelection();
+        if (!g) return;
+        offline_status_.clear();
+        offline_->startArea({g->min_lon, g->min_lat, g->max_lon, g->max_lat});
+        map_->setMode(MapView::Mode::Normal);
+        fx_->toast(QStringLiteral("Downloading the full-detail area"), kCyan, QStringLiteral("Offline"));
+    });
+    connect(settings_screen_, &SettingsScreen::offlineClearDetail, this, [this] {
+        offline_status_ = OfflineDownloader::clearFullDetail() ? QStringLiteral("full detail cleared")
+                                                               : QStringLiteral("could not delete everything");
+        tiles_->clearMemory();
+        map_->tileSourcesChanged();
+        refreshOfflineCounts();
+    });
+    connect(settings_screen_, &SettingsScreen::offlineDeleteAll, this, [this] {
+        offline_status_ = OfflineDownloader::clearAll() ? QStringLiteral("everything deleted")
+                                                        : QStringLiteral("could not delete everything");
+        vector_map_->reopen();
+        tiles_->vectorChanged();
+        tiles_->clearMemory();
+        map_->tileSourcesChanged();
+        refreshOfflineCounts();
     });
     connect(settings_screen_, &SettingsScreen::offlineChooseFolder, this, [this] {
         const QString dir = QFileDialog::getExistingDirectory(this, QStringLiteral("Offline map folder"),
                                                               offline::folder());
         if (!dir.isEmpty()) {
             offline::setFolder(dir);
-            offline_disk_ = OfflineDownloader::diskUsage();
             offline_status_ = QStringLiteral("folder changed");
-            refreshOffline();
-            map_->update();
+            vector_map_->reopen();
+            tiles_->vectorChanged();
+            tiles_->clearMemory();
+            map_->tileSourcesChanged();
+            refreshOfflineCounts();
         }
     });
-    connect(offline_, &OfflineDownloader::progress, this, &MainWindow::refreshOffline);
-    connect(offline_, &OfflineDownloader::finished, this, [this](bool cancelled) {
-        offline_disk_ = OfflineDownloader::diskUsage();
-        offline_status_ = cancelled ? QStringLiteral("cancelled · downloading again resumes")
-                          : offline_->failed() ? QStringLiteral("done · %1 tiles failed (download again to retry)").arg(offline_->failed())
-                                               : QStringLiteral("done · this area works offline");
+    connect(settings_screen_, &SettingsScreen::onlineChanged, this, [this](bool on) {
+        offline::setOnline(on);
+        map_->tileSourcesChanged();
         refreshOffline();
-        map_->update();
-        fx_->toast(offline_status_, cancelled || offline_->failed() ? kAmber : kGreen, QStringLiteral("Offline"));
+    });
+    connect(settings_screen_, &SettingsScreen::labelsEnglishChanged, this, [this](bool en) {
+        QSettings().setValue(QStringLiteral("map/labels_english"), en);
+        vector_map_->setEnglish(en);
+        tiles_->vectorChanged();
+    });
+    connect(offline_, &OfflineDownloader::progress, this, [this] {
+        refreshOffline();
+        map_->setDownloadStatus(QStringLiteral("⬇ %1 · %2%").arg(offline_->stage()).arg(static_cast<int>(offline_->fraction() * 100)));
+    });
+    connect(offline_, &OfflineDownloader::streetMapInstalled, this, [this] {
+        vector_map_->reopen();
+        tiles_->vectorChanged();
+        fx_->toast(QStringLiteral("Street map installed"), kGreen, QStringLiteral("Offline"));
+    });
+    connect(offline_, &OfflineDownloader::finished, this, [this](bool cancelled, const QString& summary) {
+        offline_status_ = summary;
+        map_->setDownloadStatus(QString());
+        tiles_->clearMemory();
+        map_->tileSourcesChanged();
+        refreshOfflineCounts();
+        fx_->toast(summary, cancelled || offline_->failed() ? kAmber : kGreen, QStringLiteral("Offline"));
     });
     connect(settings_screen_, &SettingsScreen::altUnitChanged, this, &MainWindow::applyAltUnit);
     connect(settings_screen_, &SettingsScreen::trailChanged, this, [this](bool on, int secs) {
@@ -434,26 +507,38 @@ QRect MainWindow::alertsArea() const {
     return QRect(8, top, width() - 16, std::max(160, bottom - top));
 }
 
+void MainWindow::refreshOfflineCounts() {
+    // disk walks: only when Settings opens or a download / delete finishes
+    offline_disk_ = OfflineDownloader::diskUsage();
+    offline_area_bytes_ = OfflineDownloader::fullDetailUsage();
+    offline_areas_ = static_cast<int>(OfflineDownloader::areas().size());
+    const auto c = OfflineDownloader::countryCount();
+    const bool street = OfflineDownloader::hasStreetMap();
+    if (street && c.fresh == 0) {
+        offline_country_ = QStringLiteral("✓ installed · street map + %1 satellite / ground tiles").arg(c.have);
+    } else if (street) {
+        offline_country_ = QStringLiteral("street map ✓ · %1 satellite / ground tiles missing (~%2 MB)")
+                               .arg(c.fresh)
+                               .arg(c.bytes / 1e6, 0, 'f', 0);
+    } else {
+        offline_country_ = QStringLiteral("not downloaded · about %1 MB").arg(c.bytes / 1e6, 0, 'f', 0);
+    }
+    refreshOffline();
+}
+
 void MainWindow::refreshOffline() {
     SettingsScreen::Offline o;
-    OfflineDownloader::Area a;
-    a.lat = s_.has_position ? s_.lat : map_->centerLat();
-    a.lon = s_.has_position ? s_.lon : map_->centerLon();
-    a.radius_km = offline_radius_km_;
-    const auto e = OfflineDownloader::estimate(a);
-    const auto& radii = SettingsScreen::offlineRadii();
-    const auto it = std::find(radii.begin(), radii.end(), offline_radius_km_);
-    o.radius_idx = it != radii.end() ? static_cast<int>(it - radii.begin()) : 1;
-    o.center = s_.has_position ? QStringLiteral("around the aircraft") : QStringLiteral("around the map centre");
-    o.tiles = e.total;
-    o.bytes = e.bytes;
+    o.street_map = OfflineDownloader::hasStreetMap();
+    o.country = offline_country_;
+    o.areas = offline_areas_;
+    o.area_bytes = offline_area_bytes_;
     o.running = offline_->running();
-    o.done = offline_->done();
-    o.total = offline_->total();
-    o.failed = offline_->failed();
+    o.stage = offline_->stage();
+    o.fraction = offline_->fraction();
     o.disk_bytes = offline_disk_;
     o.folder = offline::folder();
     o.status = offline_status_;
+    o.online = offline::online();
     settings_screen_->setOffline(o);
 }
 
@@ -1498,6 +1583,8 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* e) {
         if (key == Qt::Key_Escape && e->type() == QEvent::KeyPress) {
             if (alerts_->isVisible()) {
                 showAlerts(false);
+            } else if (map_->mode() == MapView::Mode::Area) {
+                map_->setMode(MapView::Mode::Normal);
             } else if (planning_ && map_->selected() != MapView::kNone) {
                 map_->select(MapView::kNone);
             } else if (planning_) {

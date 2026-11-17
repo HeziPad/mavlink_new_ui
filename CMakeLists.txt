@@ -11,6 +11,7 @@ set(CMAKE_AUTOMOC ON)
 option(GCS_WITH_GSTREAMER "Build the UDP H.264 video receiver (needs GStreamer dev packages)" ON)
 
 find_package(Threads REQUIRED)
+find_package(ZLIB REQUIRED)
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network)
 find_package(PkgConfig)
 if(GCS_WITH_GSTREAMER AND PkgConfig_FOUND)
@@ -34,10 +35,13 @@ set(GCS_LINK_SOURCES
 add_library(gcs_core STATIC
     src/core/frame_layout.cpp
     src/core/geo.cpp
+    src/core/gzip.cpp
     src/core/health.cpp
     src/core/mission.cpp
+    src/core/mvt.cpp
     src/core/orbit_trim.cpp
     src/core/plane_modes.cpp
+    src/core/pmtiles.cpp
     src/core/preflight.cpp
     src/core/tiles.cpp
     src/core/vehicle_state.cpp
@@ -46,7 +50,7 @@ add_library(gcs_core STATIC
 target_include_directories(gcs_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 # SYSTEM: the generated MAVLink headers are not ours to keep -Wpedantic clean.
 target_include_directories(gcs_core SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include/c_library_v2)
-target_link_libraries(gcs_core PUBLIC Threads::Threads)
+target_link_libraries(gcs_core PUBLIC Threads::Threads ZLIB::ZLIB)
 gcs_warnings(gcs_core)
 if(NOT MSVC)
     set_source_files_properties(${GCS_LINK_SOURCES} PROPERTIES
@@ -69,6 +73,7 @@ add_executable(mavlink_gcs_ui
     src/ui/offline_downloader.cpp
     src/ui/offline_store.cpp
     src/ui/plan_strip.cpp
+    src/ui/pmtiles_extract.cpp
     src/ui/preflight_art.cpp
     src/ui/preflight_runner.cpp
     src/ui/preflight_screen.cpp
@@ -76,6 +81,7 @@ add_executable(mavlink_gcs_ui
     src/ui/theme.cpp
     src/ui/settings_screen.cpp
     src/ui/tile_cache.cpp
+    src/ui/vector_map.cpp
     src/ui/video_receiver.cpp
     src/ui/view_host.cpp
     src/ui/units.cpp
@@ -94,7 +100,7 @@ endif()
 
 # ---- tests ----------------------------------------------------------------------
 enable_testing()
-foreach(name geo mission_builder mission_transfer command_sender lift_rotors health orbit_trim preflight)
+foreach(name geo mission_builder mission_transfer command_sender lift_rotors health orbit_trim preflight offline_map)
     add_executable(test_${name} tests/test_${name}.cpp)
     target_link_libraries(test_${name} PRIVATE gcs_core)
     gcs_warnings(test_${name})

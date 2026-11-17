@@ -25,6 +25,7 @@ namespace gcs::ui {
 
 class AlertsPanel;
 class ElevationCache;
+class VectorMap;
 class OfflineDownloader;
 class CameraView;
 class ControlDock;
@@ -126,11 +127,15 @@ private:
     std::unique_ptr<VideoReceiver> video_;
     TileCache* tiles_ = nullptr;
     ElevationCache* elev_ = nullptr;
+    VectorMap* vector_map_ = nullptr;
     OfflineDownloader* offline_ = nullptr;
-    int offline_radius_km_ = 25;
     qint64 offline_disk_ = -1;
+    qint64 offline_area_bytes_ = 0;
+    int offline_areas_ = 0;
+    QString offline_country_;
     QString offline_status_;
     void refreshOffline();
+    void refreshOfflineCounts();
 
     MapView* map_ = nullptr;
     CameraView* camera_ = nullptr;

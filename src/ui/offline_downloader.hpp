@@ -1,68 +1,84 @@
 #pragma once
 
+#include "pmtiles_extract.hpp"
+
 #include <QNetworkAccessManager>
 #include <QObject>
 #include <QString>
 
-#include <array>
 #include <deque>
 #include <vector>
 
 namespace gcs::ui {
 
-// Downloads the map imagery and elevation around a point into the offline
-// folder (offline_store.hpp), so the map, the hover ground height and the
-// approach all work without internet. Polite: two requests at a time, files
-// already on disk are skipped (a cancelled download resumes).
+// Fills the offline folder (offline_store.hpp):
+//  - the country pack: the street map (a vector extract, map.pmtiles),
+//    satellite z8-14 and elevation z12 for Israel + ~50 km;
+//  - full-detail areas the user draws on the map: satellite z15-18 and
+//    elevation z13, listed in areas.json.
+// Every tile lives at one path by z/x/y, and files already present (or
+// marked as having no imagery) are skipped, so overlapping areas share tiles
+// and an interrupted download resumes. Two requests at a time.
 class OfflineDownloader : public QObject {
     Q_OBJECT
 
 public:
-    struct Area {
-        double lat = 0.0, lon = 0.0;
-        double radius_km = 25.0;
-        std::array<bool, 3> layers{true, true, true};  // offline::Layer
+    struct Box {
+        double min_lon = 0, min_lat = 0, max_lon = 0, max_lat = 0;
+        bool valid() const { return max_lon > min_lon && max_lat > min_lat; }
+        double widthKm() const;
+        double heightKm() const;
     };
-    struct Estimate {
-        std::array<size_t, 3> tiles{};  // per layer
-        size_t total = 0;
-        qint64 bytes = 0;               // rough
-        int map_max_zoom = 0, elev_zoom = 0;
+    struct Count {
+        size_t fresh = 0;     // to download
+        size_t have = 0;      // already on disk (shared with other areas / the country)
+        qint64 bytes = 0;     // rough size of the fresh ones
     };
-    // map imagery to a zoom that keeps ~3000 tiles per layer; elevation at one zoom
-    static int mapMaxZoom(double radius_km);
-    static int elevationZoom(double radius_km);
-    static Estimate estimate(const Area& a);
-    // bytes in the offline folder's tile layers
-    static qint64 diskUsage();
-    // removes osm/, esri_imagery/ and elevation/ from the offline folder (nothing else)
-    static bool clear();
+
+    static Box country();  // Israel + ~50 km
+    static Count countryCount();
+    static Count areaCount(const Box& b);
+    static std::vector<Box> areas();  // full-detail areas downloaded so far
+    static qint64 diskUsage();        // everything in the offline folder
+    static qint64 fullDetailUsage();  // satellite z15+ and elevation z13
+    static bool clearFullDetail();
+    static bool clearAll();
+    static bool hasStreetMap();
 
     explicit OfflineDownloader(QObject* parent = nullptr);
 
-    void start(const Area& a);
+    void startCountry();
+    void startArea(const Box& b);
     void cancel();
     bool running() const { return running_; }
-    size_t done() const { return done_; }
-    size_t total() const { return total_; }
+    // progress line: what it is doing, and how far
+    QString stage() const;
+    double fraction() const;
     size_t failed() const { return failed_; }
-    qint64 bytes() const { return bytes_; }
 
 signals:
     void progress();
-    void finished(bool cancelled);
+    void streetMapInstalled();
+    void finished(bool cancelled, const QString& summary);
 
 private:
     struct Job {
         int layer, z, x, y;
     };
+    static std::vector<Job> jobs(const Box& b, int layer, int z0, int z1, bool fresh_only);
+    void startTiles(const QString& stage);
     void pump();
-    void finish(bool cancelled);
+    void finish(bool cancelled, const QString& summary);
 
     QNetworkAccessManager nam_;
+    PmtilesExtract extract_;
     std::deque<Job> queue_;
     int in_flight_ = 0;
     bool running_ = false;
+    bool cancelled_ = false;
+    bool area_ = false;
+    Box area_box_;
+    QString stage_;
     size_t done_ = 0, total_ = 0, failed_ = 0;
     qint64 bytes_ = 0;
     static constexpr int kParallel = 2;

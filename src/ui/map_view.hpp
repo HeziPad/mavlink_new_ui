@@ -7,6 +7,7 @@
 
 #include <QColor>
 
+#include <array>
 #include <optional>
 #include <vector>
 
@@ -23,7 +24,7 @@ class MapView : public HudView {
     Q_OBJECT
 
 public:
-    enum class Mode { Normal, Plan, Guide };
+    enum class Mode { Normal, Plan, Guide, Area };
     enum class AddTool { Waypoint, Landing };
     // selection ids: >= 0 a loop waypoint index, kLandId the landing point
     static constexpr int kNone = -1;
@@ -75,6 +76,19 @@ public:
     void setTrail(bool on, int secs);
     // ground height for the mouse readout (lat, lon, ground, distance from the aircraft)
     void setElevation(ElevationCache* elev);
+
+    // ---- full-detail area selection (Mode::Area) ----------------------------------
+    struct GeoBox {
+        double min_lon = 0, min_lat = 0, max_lon = 0, max_lat = 0;
+    };
+    void setAreas(std::vector<GeoBox> areas);  // already downloaded (outlines)
+    std::optional<GeoBox> areaSelection() const { return area_sel_; }
+    void clearAreaSelection();
+    // the panel under the selection: two lines and whether DOWNLOAD is allowed
+    void setAreaInfo(const QString& line1, const QString& line2, bool can_download, bool warn);
+    // a chip while an offline download runs ("" hides it)
+    void setDownloadStatus(const QString& text);
+    void tileSourcesChanged();  // offline data changed: redraw the backdrop
     double centerLat() const { return clat_; }
     double centerLon() const { return clon_; }
 
@@ -101,6 +115,9 @@ signals:
     void followChanged(bool on);
     void layerChanged(int layer);
     void ballCollapsedChanged(bool collapsed);
+    void areaChanged(GeoBox box, bool final);  // final: the finger / button was released
+    void areaDownload();
+    void areaCancel();
 
 protected:
     bool event(QEvent* e) override;
@@ -144,6 +161,9 @@ private:
     void paintBall(QPainter& p);
     double metersPerPixel() const;
     void paintOverlayChrome(QPainter& p);
+    void paintArea(QPainter& p);
+    bool areaPress(const QPointF& pos);  // true: handled
+    std::array<QPointF, 4> areaCorners() const;  // NW NE SE SW on screen
     void paintHover(QPainter& p, double right, double bottom);
 
     TileCache* tiles_;
@@ -223,6 +243,7 @@ private:
         int layer = -1;
         quint64 tiles_gen = 0;
         int missing = 0;           // tiles not available when it was drawn
+        int drawn = 0;             // tiles (or enlarged parents) drawn
         qint64 built_ms = 0;
         size_t trail_n = 0;        // trail points baked in
         size_t trail_first = 0;
@@ -230,6 +251,16 @@ private:
         int trail_secs = -1;
     } bd_;
     quint64 tiles_gen_ = 0;        // bumped when a tile arrives
+    // area selection
+    std::vector<GeoBox> areas_;
+    std::optional<GeoBox> area_sel_;
+    int area_handle_ = -1;         // corner being dragged (0 NW 1 NE 2 SE 3 SW)
+    double area_anchor_lat_ = 0, area_anchor_lon_ = 0;  // the fixed corner while drawing a new one
+    bool area_new_ = false;
+    QString area_info1_, area_info2_;
+    bool area_can_dl_ = false, area_warn_ = false;
+    QRectF area_dl_rect_, area_cancel_rect_;
+    QString dl_status_;
     static constexpr int kBackdropMargin = 320;
 };
 

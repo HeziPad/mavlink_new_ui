@@ -1,6 +1,7 @@
 #include "tile_cache.hpp"
 
 #include "offline_store.hpp"
+#include "vector_map.hpp"
 
 #include <QDateTime>
 #include <QDir>
@@ -9,6 +10,7 @@
 #include <QImage>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QSettings>
 #include <QStandardPaths>
 
 #include <algorithm>
@@ -32,6 +34,47 @@ QString TileCache::layerName(int layer) {
     return layer == Satellite ? QStringLiteral("SAT") : QStringLiteral("MAP");
 }
 
+void TileCache::setVectorMap(VectorMap* vm) {
+    vector_ = vm;
+    connect(vm, &VectorMap::rendered, this, [this](int z, int x, int y, quint64, const QImage& img) {
+        const QString k = key(Streets, z, x, y);
+        pending_.remove(k);
+        if (img.isNull()) {
+            empty_.insert(k);  // outside the map's area
+        } else {
+            memory_.insert(k, new QPixmap(QPixmap::fromImage(img)));
+        }
+        emit tileReady();
+    });
+}
+
+void TileCache::vectorChanged() {
+    // rendered street tiles are in memory only: drop them (and their empty marks)
+    const auto keys = memory_.keys();
+    for (const QString& k : keys) {
+        if (k.startsWith(QStringLiteral("0/"))) memory_.remove(k);
+    }
+    for (auto it = empty_.begin(); it != empty_.end();) {
+        it = it->startsWith(QStringLiteral("0/")) ? empty_.erase(it) : std::next(it);
+    }
+    for (auto it = pending_.begin(); it != pending_.end();) {
+        it = it->startsWith(QStringLiteral("0/")) ? pending_.erase(it) : std::next(it);
+    }
+    emit tileReady();
+}
+
+void TileCache::clearMemory() {
+    memory_.clear();
+    empty_.clear();
+    failed_.clear();
+    emit tileReady();
+}
+
+bool TileCache::hasStreetSource() const {
+    return (vector_ && vector_->available()) ||
+           (offline::online() && !QSettings().value(QStringLiteral("map/streets_url")).toString().isEmpty());
+}
+
 QString TileCache::key(int layer, int z, int x, int y) {
     return QStringLiteral("%1/%2/%3/%4").arg(layer).arg(z).arg(x).arg(y);
 }
@@ -45,10 +88,34 @@ const QPixmap* TileCache::peek(int layer, int z, int x, int y) {
     return memory_.object(key(layer, z, x, y));
 }
 
+bool TileCache::empty(int layer, int z, int x, int y) {
+    return empty_.contains(key(layer, z, x, y));
+}
+
+void TileCache::markEmpty(int layer, int z, int x, int y, bool persist) {
+    empty_.insert(key(layer, z, x, y));
+    if (persist) {
+        const QString path = offline::noDataPathFor(dir_, layer, z, x, y);
+        QDir().mkpath(QFileInfo(path).absolutePath());
+        QFile f(path);
+        f.open(QIODevice::WriteOnly);
+    }
+}
+
 const QPixmap* TileCache::tile(int layer, int z, int x, int y) {
     const QString k = key(layer, z, x, y);
     if (const QPixmap* pm = memory_.object(k)) {
         return pm;
+    }
+    if (empty_.contains(k)) {
+        return nullptr;
+    }
+    if (layer == Streets && vector_ && vector_->available()) {
+        if (!pending_.contains(k)) {
+            pending_.insert(k);
+            vector_->request(z, x, y);
+        }
+        return nullptr;
     }
     // the offline folder first (downloaded areas, hand-installed tiles), then
     // the browsing cache
@@ -62,11 +129,21 @@ const QPixmap* TileCache::tile(int layer, int z, int x, int y) {
             return memory_.object(k);
         }
     }
+    if (offline::hasNoDataMarker(layer, z, x, y, dir_)) {
+        empty_.insert(k);
+        return nullptr;
+    }
     request(layer, z, x, y);
     return nullptr;
 }
 
 void TileCache::request(int layer, int z, int x, int y) {
+    if (!offline::online()) {
+        return;  // offline only: what isn't on disk isn't there
+    }
+    if (layer == Streets && QSettings().value(QStringLiteral("map/streets_url")).toString().isEmpty()) {
+        return;  // no raster street source configured (OSM's server refuses apps like this one)
+    }
     const QString k = key(layer, z, x, y);
     if (pending_.contains(k) || pending_.size() >= kMaxPending) {
         return;
@@ -95,6 +172,11 @@ void TileCache::request(int layer, int z, int x, int y) {
         QImage img;
         if (reply->error() != QNetworkReply::NoError || !img.loadFromData(data)) {
             failed_.insert(k, QDateTime::currentMSecsSinceEpoch() + kRetryMs);
+            return;
+        }
+        if (layer == Satellite && offline::isNoDataTile(data)) {
+            markEmpty(layer, z, x, y, true);  // Esri has nothing this deep here
+            emit tileReady();
             return;
         }
         const QString path = diskPath(layer, z, x, y);

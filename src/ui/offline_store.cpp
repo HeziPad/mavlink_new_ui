@@ -1,5 +1,6 @@
 #include "offline_store.hpp"
 
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFileInfo>
 #include <QSettings>
@@ -99,6 +100,38 @@ QUrl url(int layer, int z, int x, int y) {
     t.replace(QStringLiteral("{x}"), QString::number(x));
     t.replace(QStringLiteral("{y}"), QString::number(y));
     return QUrl(t);
+}
+
+bool isNoDataTile(const QByteArray& bytes) {
+    return bytes.size() < 4096 &&
+           QCryptographicHash::hash(bytes, QCryptographicHash::Md5).toHex() == QByteArray(kEsriNoDataMd5);
+}
+
+QString noDataPathFor(const QString& base_dir, int layer, int z, int x, int y) {
+    return QStringLiteral("%1/%2/%3/%4/%5.none").arg(base_dir, subdir(layer)).arg(z).arg(x).arg(y);
+}
+
+bool hasNoDataMarker(int layer, int z, int x, int y, const QString& cache_dir) {
+    if (QFileInfo::exists(noDataPathFor(folder(), layer, z, x, y))) {
+        return true;
+    }
+    return !cache_dir.isEmpty() && QFileInfo::exists(noDataPathFor(cache_dir, layer, z, x, y));
+}
+
+namespace {
+bool& onlineFlag() {
+    static bool on = QSettings().value(QStringLiteral("map/online"), false).toBool();
+    return on;
+}
+}  // namespace
+
+bool online() {
+    return onlineFlag();
+}
+
+void setOnline(bool on) {
+    onlineFlag() = on;
+    QSettings().setValue(QStringLiteral("map/online"), on);
 }
 
 }  // namespace gcs::ui::offline

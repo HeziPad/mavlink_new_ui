@@ -31,6 +31,17 @@ QString pathFor(int layer, int z, int x, int y);  // where the downloader writes
 // Tile URL. Templates use {z} {x} {y}; QSettings map/streets_url,
 // map/satellite_url and map/elevation_url override the defaults.
 QString urlTemplate(int layer);
+// Esri answers "Map data not yet available" with this exact JPEG (md5 hex)
+constexpr const char* kEsriNoDataMd5 = "f27d9de7f80c13501f470595e327aa6d";
+bool isNoDataTile(const QByteArray& bytes);
+// {y}.none: there is no imagery at this zoom here (draw a coarser tile enlarged)
+bool hasNoDataMarker(int layer, int z, int x, int y, const QString& cache_dir = {});
+QString noDataPathFor(const QString& base_dir, int layer, int z, int x, int y);
+
+// Online tile fetching while browsing (off by default: offline only; the
+// explicit downloads in Settings -> OFFLINE still go out)
+bool online();
+void setOnline(bool on);
 QString defaultUrlTemplate(int layer);
 QUrl url(int layer, int z, int x, int y);
 
