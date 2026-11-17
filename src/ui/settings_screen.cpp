@@ -19,7 +19,29 @@ const std::vector<int>& SettingsScreen::trailChoices() {
     return c;
 }
 
+const std::vector<int>& SettingsScreen::offlineRadii() {
+    static const std::vector<int> r = {10, 25, 50};
+    return r;
+}
+
+namespace {
+QString sizeText(qint64 b) {
+    if (b < 0) {
+        return QStringLiteral("…");
+    }
+    if (b >= 1000LL * 1000 * 1000) {
+        return QStringLiteral("%1 GB").arg(b / 1e9, 0, 'f', 1);
+    }
+    if (b >= 1000LL * 1000) {
+        return QStringLiteral("%1 MB").arg(b / 1e6, 0, 'f', b >= 100e6 ? 0 : 1);
+    }
+    return QStringLiteral("%1 kB").arg(b / 1e3, 0, 'f', 0);
+}
+}  // namespace
+
 SettingsScreen::SettingsScreen(QWidget* parent) : QWidget(parent) {
+    radius_.labels = {QStringLiteral("10 KM"), QStringLiteral("25 KM"), QStringLiteral("50 KM")};
+    radius_.selected = 1;
     alt_.labels = {QStringLiteral("METERS"), QStringLiteral("FEET")};
     trail_on_.labels = {QStringLiteral("OFF"), QStringLiteral("ON")};
     trail_len_.labels = {QStringLiteral("30 S"), QStringLiteral("1 MIN"), QStringLiteral("2 MIN"),
@@ -34,9 +56,11 @@ void SettingsScreen::open(const Values& v) {
     const auto& c = trailChoices();
     const auto it = std::find(c.begin(), c.end(), v.trail_secs);
     trail_len_.selected = it != c.end() ? static_cast<int>(it - c.begin()) : 2;
-    for (Segmented* s : {&alt_, &trail_on_, &trail_len_}) {
+    radius_.selected = off_.radius_idx;
+    for (Segmented* s : {&alt_, &trail_on_, &trail_len_, &radius_}) {
         s->knob = s->selected;
     }
+    del_armed_ = false;
     trail_len_.enabled = v.trail_on;
 
     // freeze a blurred copy of what's behind: cheap down/up-scale blur
@@ -82,7 +106,7 @@ void SettingsScreen::tick(double dt) {
         return;
     }
     const double k = reducedMotion() ? 1.0 : 1.0 - std::exp(-16.0 * dt);
-    for (Segmented* s : {&alt_, &trail_on_, &trail_len_}) {
+    for (Segmented* s : {&alt_, &trail_on_, &trail_len_, &radius_}) {
         s->knob += (s->selected - s->knob) * k;
     }
     cat_knob_ += (category_ - cat_knob_) * k;
@@ -129,6 +153,29 @@ void SettingsScreen::mousePressEvent(QMouseEvent* e) {
     if (category_ == kUnits) {
         if (pressSegmented(alt_, pos)) {
             emit altUnitChanged(alt_.selected);
+        }
+    } else if (category_ == kOffline) {
+        if (dl_rect_.contains(pos)) {
+            if (off_.running) {
+                emit offlineCancel();
+            } else {
+                emit offlineDownload();
+            }
+        } else if (del_rect_.contains(pos) && !off_.running) {
+            if (del_armed_) {
+                del_armed_ = false;
+                emit offlineDelete();
+            } else {
+                del_armed_ = true;
+            }
+        } else if (folder_rect_.contains(pos) && !off_.running) {
+            emit offlineChooseFolder();
+        } else if (!off_.running && pressSegmented(radius_, pos)) {
+            off_.radius_idx = radius_.selected;
+            emit offlineRadiusChanged(offlineRadii()[radius_.selected]);
+        }
+        if (!del_rect_.contains(pos)) {
+            del_armed_ = false;
         }
     } else if (category_ == kMap) {
         bool changed = false;
@@ -216,7 +263,7 @@ void SettingsScreen::paintEvent(QPaintEvent*) {
     const QRectF cat_col(pr.left() + 24, top, 190, pr.bottom() - top - 24);
     p.setPen(QPen(alpha(kCyan, 0.18), 1));
     p.drawLine(QPointF(cat_col.right() + 16, cat_col.top()), QPointF(cat_col.right() + 16, cat_col.bottom()));
-    const char* names[kCategories] = {"UNITS", "MAP"};
+    const char* names[kCategories] = {"UNITS", "MAP", "OFFLINE"};
     cat_rects_.clear();
     for (int i = 0; i < kCategories; ++i) {
         const QRectF item(cat_col.left(), cat_col.top() + i * 60, cat_col.width(), 52);
@@ -240,6 +287,8 @@ void SettingsScreen::paintEvent(QPaintEvent*) {
         paintSegmented(p, QRectF(body.left(), body.top() + 54, std::min(body.width(), 360.0), 58), alt_);
         drawText(p, QRectF(body.left(), body.bottom() - 18, body.width(), 18), Qt::AlignLeft | Qt::AlignVCenter,
                  QStringLiteral("distances and speeds stay metric"), labelFont(10, false), alpha(kMuted, 0.8));
+    } else if (category_ == kOffline) {
+        paintOffline(p, body);
     } else {
         paintRow(p, body, QStringLiteral("FLIGHT TRAIL"), QStringLiteral("the line the aircraft leaves behind on the map"));
         paintSegmented(p, QRectF(body.left(), body.top() + 54, std::min(body.width(), 220.0), 58), trail_on_);
@@ -252,6 +301,82 @@ void SettingsScreen::paintEvent(QPaintEvent*) {
         paintSegmented(p, QRectF(body.left(), body.top() + 182, body.width(), 58), trail_len_);
     }
     p.restore();
+}
+
+void SettingsScreen::setOffline(const Offline& o) {
+    const bool was_running = off_.running;
+    off_ = o;
+    if (!o.running && !was_running) {
+        radius_.selected = o.radius_idx;
+    }
+    radius_.enabled = !o.running;
+    update();
+}
+
+void SettingsScreen::paintAction(QPainter& p, const QRectF& r, const QString& label, const QColor& c, bool enabled) {
+    p.save();
+    p.setOpacity(p.opacity() * (enabled ? 1.0 : 0.35));
+    drawGlass(p, chamferPath(r, 9), c, 0.85, alpha(c, 0.16));
+    drawText(p, r, Qt::AlignCenter, label, labelFont(13.5), c);
+    p.restore();
+}
+
+void SettingsScreen::paintOffline(QPainter& p, const QRectF& body) {
+    paintRow(p, body, QStringLiteral("OFFLINE MAP + GROUND HEIGHT"),
+             QStringLiteral("download the area %1 for flying without internet").arg(off_.center));
+    paintSegmented(p, QRectF(body.left(), body.top() + 50, std::min(body.width(), 330.0), 52), radius_);
+
+    // estimate, or progress
+    const QRectF info(body.left(), body.top() + 112, body.width(), 40);
+    if (off_.running && off_.total > 0) {
+        const double f = static_cast<double>(off_.done) / off_.total;
+        const QRectF bar(info.left(), info.top() + 4, info.width(), 12);
+        p.setPen(QPen(alpha(kCyan, 0.5), 1));
+        p.setBrush(alpha(kBg, 0.6));
+        p.drawRect(bar);
+        p.setPen(Qt::NoPen);
+        p.setBrush(kCyan);
+        p.drawRect(QRectF(bar.left(), bar.top(), bar.width() * f, bar.height()));
+        drawText(p, QRectF(info.left(), info.top() + 20, info.width(), 18), Qt::AlignLeft | Qt::AlignVCenter,
+                 QStringLiteral("%1 / %2 tiles · %3%")
+                     .arg(off_.done)
+                     .arg(off_.total)
+                     .arg(static_cast<int>(f * 100))
+                     .append(off_.failed ? QStringLiteral(" · %1 failed").arg(off_.failed) : QString()),
+                 monoFont(11.5), kText);
+    } else {
+        drawText(p, QRectF(info.left(), info.top(), info.width(), 18), Qt::AlignLeft | Qt::AlignVCenter,
+                 QStringLiteral("streets + satellite + elevation · about %1 tiles · ~%2")
+                     .arg(off_.tiles)
+                     .arg(sizeText(off_.bytes)),
+                 monoFont(11.5), kText);
+        drawText(p, QRectF(info.left(), info.top() + 20, info.width(), 18), Qt::AlignLeft | Qt::AlignVCenter,
+                 off_.status, labelFont(10, false), kMuted);
+    }
+
+    // actions
+    const double by = body.top() + 164;
+    dl_rect_ = QRectF(body.left(), by, 220, 54);
+    paintAction(p, dl_rect_, off_.running ? QStringLiteral("CANCEL") : QStringLiteral("⬇ DOWNLOAD AREA"),
+                off_.running ? kAmber : kCyan, true);
+    del_rect_ = QRectF(dl_rect_.right() + 12, by, 170, 54);
+    paintAction(p, del_rect_, del_armed_ ? QStringLiteral("TAP TO CONFIRM") : QStringLiteral("DELETE ALL"), kRed,
+                !off_.running && off_.disk_bytes > 0);
+
+    // folder
+    const double fy = by + 72;
+    drawText(p, QRectF(body.left(), fy, body.width(), 18), Qt::AlignLeft | Qt::AlignVCenter,
+             QStringLiteral("FOLDER · %1 on disk").arg(sizeText(off_.disk_bytes)), labelFont(11), kText);
+    folder_rect_ = QRectF(body.left(), fy + 22, body.width(), 44);
+    drawGlass(p, chamferPath(folder_rect_, 7), kMuted, 0.4, alpha(kBg, 0.6));
+    const QFont ff = monoFont(10.5);
+    drawText(p, folder_rect_.adjusted(12, 0, -90, 0), Qt::AlignLeft | Qt::AlignVCenter,
+             QFontMetricsF(ff).elidedText(off_.folder, Qt::ElideMiddle, folder_rect_.width() - 110), ff, kMuted);
+    drawText(p, folder_rect_.adjusted(0, 0, -12, 0), Qt::AlignRight | Qt::AlignVCenter, QStringLiteral("CHANGE"),
+             labelFont(11), off_.running ? alpha(kMuted, 0.4) : kCyan);
+    drawText(p, QRectF(body.left(), body.bottom() - 18, body.width(), 18), Qt::AlignLeft | Qt::AlignVCenter,
+             QStringLiteral("copy this folder to another computer to use it there (README: Offline maps)"),
+             labelFont(10, false), alpha(kMuted, 0.8));
 }
 
 }  // namespace gcs::ui

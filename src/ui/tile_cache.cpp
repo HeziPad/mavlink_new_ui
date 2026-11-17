@@ -1,5 +1,7 @@
 #include "tile_cache.hpp"
 
+#include "offline_store.hpp"
+
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -48,8 +50,12 @@ const QPixmap* TileCache::tile(int layer, int z, int x, int y) {
     if (const QPixmap* pm = memory_.object(k)) {
         return pm;
     }
-    const QString path = diskPath(layer, z, x, y);
-    if (QFileInfo::exists(path)) {
+    // the offline folder first (downloaded areas, hand-installed tiles), then
+    // the browsing cache
+    for (const QString& path : {offline::find(layer, z, x, y), diskPath(layer, z, x, y)}) {
+        if (path.isEmpty() || !QFileInfo::exists(path)) {
+            continue;
+        }
         QImage img(path);
         if (!img.isNull()) {
             memory_.insert(k, new QPixmap(process(img, layer)));
@@ -74,15 +80,7 @@ void TileCache::request(int layer, int z, int x, int y) {
         failed_.erase(it);
     }
 
-    QUrl url;
-    if (layer == Satellite) {
-        url = QUrl(QStringLiteral("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/%1/%2/%3")
-                       .arg(z)
-                       .arg(y)
-                       .arg(x));
-    } else {
-        url = QUrl(QStringLiteral("https://tile.openstreetmap.org/%1/%2/%3.png").arg(z).arg(x).arg(y));
-    }
+    const QUrl url = offline::url(layer == Satellite ? offline::Satellite : offline::Streets, z, x, y);
     QNetworkRequest req(url);
     // generic client id; no user details leave the machine
     req.setRawHeader("User-Agent", "mavlink_gcs_ui/0.1 (Qt)");

@@ -2,7 +2,7 @@
 
 A minimalist, game-style ground control station for an ArduPilot **QuadPlane**
 (4 lift rotors + pusher), talking MAVLink v2 over UDP. It has a full-bleed map or
-camera with a swappable picture-in-picture, a compact telemetry strip, and six
+camera with a swappable picture-in-picture, a compact telemetry strip, and five
 buttons. It is touch-first, with the mouse as an alternative.
 
 C++17 · Qt 6 Widgets · MAVLink `c_library_v2` · GStreamer (optional, for video).
@@ -40,9 +40,21 @@ sends from. Point the autopilot or MAVProxy output at it.
 ### With SITL
 
 ```sh
-cd ~/ardupilot && Tools/autotest/sim_vehicle.py -v ArduPlane -f quadplane --out=udp:127.0.0.1:14551
+tools/sitl.sh                 # ArduPlane quadplane SITL at your location, output to 127.0.0.1:14551
 ./build/mavlink_gcs_ui
 ```
+
+`tools/sitl.sh` starts `sim_vehicle.py` (checkout in `$ARDUPILOT`, default
+`~/ardupilot`) with `tools/sitl_extra.parm`. That file sets safety ON at boot,
+a battery monitor, and the failsafe settings below. The start location comes from:
+
+1. `GCS_SITL_LOCATION=lat,lon,alt,heading`, if set;
+2. otherwise your public IP's approximate location (ipinfo.io, falling back to
+   ip-api.com), with the ground altitude from Open-Meteo. **This sends your IP
+   address to those services.** `tools/sitl.sh --no-geo` skips it;
+3. otherwise Israel (Tel Aviv, `32.0853,34.7818,17,0`).
+
+Any other arguments go to `sim_vehicle.py` (e.g. `tools/sitl.sh --speedup 2`).
 
 ### Test video
 
@@ -62,14 +74,14 @@ and shows `NO VIDEO`.
 | 2 | **Takeoff / Launch / Resume Plan** | On the ground (**hold 1 s** to confirm): with a mission → AUTO + arm; without → GUIDED + arm + VTOL takeoff, then Hold (circle) on the wing at takeoff altitude. Locked while the safety switch is on. Airborne: **Resume Plan** goes back to the planned loop on the wing (AUTO), also mid-landing (aborts it). If the vehicle's current item isn't a loop waypoint (still the VTOL takeoff after a Hold during the climb, or the landing), it is reset to the loop first, so AUTO never re-runs a rotor takeoff. While flying the loop it reads **On Plan** |
 | 3 | **Guide** | Toggle. Tap the map, or the ground in the camera view, to circle there on the wing (GUIDED) |
 | 4 | **Hold** | Instant. Circle where the aircraft is, on the wing (GUIDED). During a landing this is a go-around |
-| 5 | **Land** | **Hold 1 s**. Circle down beside the planned landing point on the wing, leave into the wind, back-transition and land vertically. Locked until the vehicle's mission has a landing point |
-| 6 | **QRTL** | Instant. Return home on the wing and land vertically |
+| 5 | **Land** | **Hold 1 s**. Circle down beside the landing point **L** on the wing, leave into the wind, back-transition and land vertically. Without an L it lands at home the same way |
 
-**Hold and Guide circles:** while circling, a panel above the dock sets the
+**Hold and Guide circles:** while the **Guide** button is on, a panel above the dock sets the
 **altitude** (−10 / −1 / +1 / +10 m, or −50 … +50 ft; 20–5000 m), the
 **radius** (−50 … +50 m, 40–5000 m) and the **direction** (CW / CCW). Holding a
 button repeats and speeds up (×5 after 1 s, ×10 after 2.5 s). Changes apply
-live. The circle starts at the vehicle's `WP_LOITER_RAD`.
+live. The circle starts at the vehicle's `WP_LOITER_RAD`. Turn Guide off to hide
+the panel; the circle keeps flying.
 
 ArduPlane flies a loiter **bigger than commanded**: `AP_L1_Control` scales the
 radius by EAS2TAS² (about +7 % at 700 m above sea level, more at higher fields,
@@ -82,14 +94,27 @@ GUIDED. In AUTO the altitude comes from the plan: edit the waypoint instead.
 The ALT chip shows the commanded altitude as `62→80` while the aircraft climbs
 or descends to it.
 
-**Land vs QRTL:**
+**Landing and failsafes:** there is one way down, and the failsafes use it too.
 
-| | **Land** | **QRTL** |
-|---|---|---|
-| Where | The landing point you planned (**L**) | Home, or the nearest rally point |
-| Descent | On the wing, on a circle beside L, down to the approach altitude | On the wing at RTL altitude, then on the rotors from about `Q_RTL_ALT` |
-| Approach direction | Into the current wind, with the circle on the side the aircraft comes from | Straight from wherever the aircraft is |
-| Needs | A landing point in the mission | Nothing: always available, so it's the emergency button |
+- **Land** recomputes the approach with the current wind and uploads it. It
+  circles down beside **L** on the wing, leaves the circle on a straight leg
+  into the wind, back-transitions and lands vertically. If the plan has no L,
+  **L is home**: every uploaded mission gets a landing, at L or at home.
+- **Failsafes fly the same landing.** The mission has a `DO_LAND_START` marker
+  just before the approach. With `RTL_AUTOLAND = 2`, any RTL jumps straight
+  into that landing instead of circling over home. Those RTLs are long RC loss
+  (`FS_LONG_ACTN = RTL`), GCS link loss (`FS_GCS_ENABL = 1`) and low battery
+  (`BATT_FS_LOW_ACT = RTL`). `Q_RTL_MODE` must be 0: other values make RTL do
+  its own vertical landing at home and skip L.
+- **Critical battery** stays `QLand`, landing vertically where it is, because
+  there may not be enough left to reach L.
+- **The on-board approach follows the wind.** In flight, the GCS re-uploads it
+  when the wind direction moves 30° or more (at most once a minute), so a
+  failsafe also lands into the current wind. A toast says when it does.
+- **Preflight checks all of these** and fixes them with one tap.
+- **Arming is refused if `RTL_AUTOLAND` is 0.** ArduPilot won't arm with a
+  `DO_LAND_START` in the mission and `RTL_AUTOLAND` at 0 ("DO_LAND_START set
+  and RTL_AUTOLAND disabled"); SYSTEMS explains it.
 
 **Bank angle:** how hard the aircraft banks is the autopilot's job.
 `ROLL_LIMIT_DEG` caps it (the SITL quadplane uses 65°, the ArduPlane default is
@@ -104,7 +129,8 @@ Everything is made for touch first, with the mouse as an alternative. Locked
 buttons say why when pressed (and on hover with a mouse).
 
 **SYSTEMS** in the telemetry bar counts problems. Tap it (or the red alert
-banner) to open the alerts panel: status pills (link, GPS, navigation, sensors,
+banner) to open the alerts panel; tap it again, tap anywhere outside the panel
+or press `Esc` to close it. It shows status pills (link, GPS, navigation, sensors,
 power, arming) and one card per problem. Each card says what's wrong, why it
 matters and what to try, with the raw data (EKF flags, the autopilot's
 message) in small print. The cards come from the EKF status, `SYS_STATUS` sensor
@@ -114,15 +140,27 @@ them (every 30 s) and clear when the vehicle arms. The panel only explains: it
 never changes the vehicle.
 
 The **⚙** at the end of the bar opens **Settings**: altitude in metres or feet,
-and the flight trail (on/off, last 30 s / 1 / 2 / 5 / 10 min / all).
+the flight trail (on/off, last 30 s / 1 / 2 / 5 / 10 min / all), and **offline
+maps** (see below).
+
+**Mouse over the map** shows the point under the cursor, bottom right:
+
+- its latitude and longitude;
+- the **ground height** above sea level, and above or below home;
+- its distance and bearing from the aircraft.
+
+Ground height comes from SRTM elevation data (AWS Terrain Tiles, about ±10 m).
+It measures the surface, so it includes roofs and tree tops.
 
 **SAFETY** in the bar is the hardware safety switch: `ON` (amber, motor
 outputs cut, Launch locked) or `OFF` (red, motors live). Hold it for 1 s to switch, in either
 direction (`MAV_CMD_DO_SET_SAFETY_SWITCH_STATE`). It's locked while armed:
 engaging safety in flight would cut the pusher and servos too. The GCS never
-changes it on its own.
+changes it on its own. **Safety is ON after every power-up**
+(`BRD_SAFETY_DEFLT = 1`, checked and fixed by preflight, applied after a
+reboot), so turning it off is always a deliberate step.
 
-After a QRTL (or RTL / QLAND) landing the vehicle sits in a mode ArduPlane can't
+After an RTL / QLAND landing (a failsafe) the vehicle sits in a mode ArduPlane can't
 arm in, so its pre-arm check fails. SYSTEMS shows that as an info card, not a
 fault: Launch switches mode before arming. `Esc` deselects or leaves
 Plan/Guide, `Del` deletes the selected point, and `Ctrl+Z` undoes a plan edit.
@@ -137,7 +175,7 @@ armed in cruise: disarming would stop the pusher too. The GCS reads
 then end in a rotor hover.
 
 **Planning:** the waypoints form a **loop that is flown forever** until you
-press Hold, Land or QRTL.
+press Hold or Land.
 
 - **Map:** tap to add a waypoint, drag to move one, pinch to zoom.
 - **Editing a point:** tap a point to select it. A panel then lets you set
@@ -213,6 +251,57 @@ and have vehicle-side timeouts as well. A pass stays valid until the autopilot
 reboots, the battery is swapped, a parameter is changed elsewhere, an hour
 passes, or it flies; after a flight a short **turnaround** preflight is offered.
 Every run is saved as JSON under `~/.local/share/mavlink_gcs_ui/preflight/`.
+
+## Offline maps
+
+The map imagery and the ground height can work with no internet.
+
+**In the app:** open Settings ⚙ → **OFFLINE**.
+
+1. Pick a radius (10 / 25 / 50 km) around the aircraft, or around the map
+   centre when there's no aircraft.
+2. Check the tile count and size estimate.
+3. Press **DOWNLOAD AREA**. Coarse zooms come first, so a cancelled download
+   is still useful. Downloading again resumes and only fetches what is missing.
+
+**DELETE ALL** removes the downloaded tiles. **CHANGE** picks another folder,
+for example a USB stick.
+
+| Radius | Map zooms | Elevation zoom | About |
+|---|---|---|---|
+| 10 km | 8–16 (≈2 m/px) | 13 | 4 200 tiles, ~100 MB |
+| 25 km | 8–15 (≈4 m/px) | 13 | 6 900 tiles, ~170 MB |
+| 50 km | 8–14 (≈8 m/px) | 12 | 6 800 tiles, ~170 MB |
+
+Sizes vary with the terrain: city satellite tiles are bigger than desert ones.
+
+**Without the app** (another computer, or preparing the data in advance), use
+`tools/fetch_offline.py`. It needs only Python 3, nothing else:
+
+```sh
+tools/fetch_offline.py --lat 32.0853 --lon 34.7818 --radius-km 25 --out ./offline   # add --dry-run for the estimate
+```
+
+Copy the resulting folder to `~/.local/share/mavlink_gcs_ui/offline/` on the
+field computer, or point Settings → OFFLINE → CHANGE at it. The folder is a
+plain slippy-tile tree, read before the download cache and the network:
+
+```
+offline/osm/{z}/{x}/{y}.png            streets      tile.openstreetmap.org/{z}/{x}/{y}.png
+offline/esri_imagery/{z}/{x}/{y}.jpg   satellite    server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}
+offline/elevation/{z}/{x}/{y}.png      elevation    s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png
+```
+
+- **Any tile source in this layout works,** for example tiles exported from
+  QGIS or MOBAC. Each layer accepts `.png`, `.jpg`, `.jpeg`, `.webp` or `.img`.
+- **Elevation tiles are "terrarium" PNGs:** height in metres =
+  `R·256 + G + B/256 − 32768`. The lookup uses zoom 13 and falls back to zooms
+  12 … 9 when 13 isn't there.
+- **Tile providers have terms.** OpenStreetMap's tile policy forbids heavy bulk
+  downloading, and Esri imagery has its own terms. Keep areas modest, or use a
+  provider you have rights to: set `map/streets_url`, `map/satellite_url` or
+  `map/elevation_url` in the settings file (templates with `{z}` `{x}` `{y}`).
+  `fetch_offline.py` takes the same as `--streets-url` etc.
 
 ## Settings
 
@@ -299,4 +388,8 @@ src/core/   pure C++: vehicle state, ArduPlane modes, geo + camera ray casting, 
 src/link/   UDP worker thread, MAVLink decode, mission transfer state machine, command sender
 src/ui/     Qt widgets: view host/PiP, map, camera HUD, telemetry bar, dock, effects, tiles, video
 tests/      unit tests for core + link (no Qt, no network)
+tools/      sitl.sh (SITL at your location), fetch_offline.py (offline map data without the app)
+resources/  app icon PNGs (from `mavlink_gcs_ui --export-icon DIR`) and the .desktop entry
 ```
+
+`cmake --install build` installs the binary, the desktop entry and the icon.

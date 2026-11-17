@@ -24,6 +24,8 @@ class MavlinkClient;
 namespace gcs::ui {
 
 class AlertsPanel;
+class ElevationCache;
+class OfflineDownloader;
 class CameraView;
 class ControlDock;
 class FxOverlay;
@@ -63,8 +65,8 @@ struct AppSettings {
     void save() const;
 };
 
-// Composes the views, HUD and link, and owns the meaning of the six dock
-// slots (Plan, Launch/Auto, Guide, Hold, Land, QRTL). Everything runs off one 60 Hz timer: state is pulled from the link
+// Composes the views, HUD and link, and owns the meaning of the five dock
+// slots (Plan, Launch/Auto, Guide, Hold, Land). Everything runs off one 60 Hz timer: state is pulled from the link
 // at 30 Hz, animations step every tick.
 class MainWindow : public QWidget {
     Q_OBJECT
@@ -80,7 +82,7 @@ protected:
 
 private:
     // Map/camera swap has no slot: tap the picture-in-picture.
-    enum Slot { kPlan = 0, kLaunch = 1, kGuide = 2, kHold = 3, kLand = 4, kQrtl = 5 };
+    enum Slot { kPlan = 0, kLaunch = 1, kGuide = 2, kHold = 3, kLand = 4 };
 
     void frame();
     void pullState();
@@ -110,17 +112,25 @@ private:
     void adjustOrbit(float d_alt, float d_radius, bool flip);
     double defaultRadius() const;
     void startLandingApproach();
+    MissionPlan withLanding(MissionPlan plan) const;  // L = home when the plan has none
+    LandingApproach approachFor(const MissionPlan& plan, double from_lat, double from_lon) const;
+    void refreshApproachForWind(qint64 now_ms);
     void onCameraClick(double px, double py, double w, double h);
     void launchOrAuto();
     void hold();
     void land();
-    void qrtl();
     int slotForTag(const std::string& tag) const;
 
     AppSettings settings_;
     std::unique_ptr<link::MavlinkClient> client_;
     std::unique_ptr<VideoReceiver> video_;
     TileCache* tiles_ = nullptr;
+    ElevationCache* elev_ = nullptr;
+    OfflineDownloader* offline_ = nullptr;
+    int offline_radius_km_ = 25;
+    qint64 offline_disk_ = -1;
+    QString offline_status_;
+    void refreshOffline();
 
     MapView* map_ = nullptr;
     CameraView* camera_ = nullptr;
@@ -186,6 +196,12 @@ private:
     bool orbit_trim_only_ = false;  // pending re-send is a silent trim correction
     qint64 orbit_sent_ms_ = 0;
     static constexpr qint64 kOrbitResendMs = 300;
+    // the on-board approach (flown by failsafe RTLs) follows the wind
+    std::optional<double> approach_wind_;  // wind direction it was laid out for
+    qint64 approach_sent_ms_ = -1000000;
+    bool approach_refresh_ = false;        // the upload in flight is a silent refresh
+    static constexpr qint64 kApproachRefreshMs = 60000;
+    static constexpr double kApproachRefreshDeg = 30.0;
 
     // Land: the approach is recomputed with the current wind and re-uploaded
     // first; the jump into it happens when the upload is acknowledged.

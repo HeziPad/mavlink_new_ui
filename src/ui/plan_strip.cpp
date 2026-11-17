@@ -118,7 +118,7 @@ void PlanStrip::setInfo(int waypoints, double lap_m, double lap_s, bool has_land
     text += has_land ? QStringLiteral("  ·  L set") : QStringLiteral("  ·  no L");
     info_->setText(text);
     warn_->setVisible(!has_land && waypoints > 0);
-    warn_->setText(QStringLiteral("No landing point: the Land button stays locked; QRTL still returns home"));
+    warn_->setText(QStringLiteral("No landing point: it will land at home (Land and failsafes)"));
     info_->setMinimumWidth(info_->fontMetrics().horizontalAdvance(info_->text()) + 8);
     undo_->setEnabled(can_undo);
     clear_->setEnabled(waypoints > 0 || has_land);

@@ -14,6 +14,8 @@ class QTouchEvent;
 
 namespace gcs::ui {
 
+class ElevationCache;
+
 class TileCache;
 
 
@@ -71,6 +73,10 @@ public:
     void setBallCollapsed(bool on);
     // flight trail: off, or the last `secs` seconds (0 = everything kept)
     void setTrail(bool on, int secs);
+    // ground height for the mouse readout (lat, lon, ground, distance from the aircraft)
+    void setElevation(ElevationCache* elev);
+    double centerLat() const { return clat_; }
+    double centerLon() const { return clon_; }
 
     // ---- the circle commanded in GUIDED (Hold / Guide) --------------------------
     struct OrbitDraw {
@@ -103,6 +109,7 @@ protected:
     void mouseMoveEvent(QMouseEvent* e) override;
     void mouseReleaseEvent(QMouseEvent* e) override;
     void wheelEvent(QWheelEvent* e) override;
+    void leaveEvent(QEvent* e) override;
     void compactChanged() override { updateCursor(); }
 
 private:
@@ -126,8 +133,11 @@ private:
     void paintBall(QPainter& p);
     double metersPerPixel() const;
     void paintOverlayChrome(QPainter& p);
+    void paintHover(QPainter& p, double right, double bottom);
 
     TileCache* tiles_;
+    ElevationCache* elev_ = nullptr;
+    std::optional<QPointF> hover_pos_;  // mouse over the map (never set by touch)
     VehicleState s_;
     MissionPlan vehicle_plan_;
     bool centred_ = false;

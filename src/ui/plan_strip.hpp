@@ -9,7 +9,7 @@ namespace gcs::ui {
 
 // Floating strip shown while planning: the add tool (waypoint / landing
 // point), waypoint count, lap length and time, landing point status, and
-// Undo / Clear / Cancel. All buttons are finger-sized. Keeps the dock at six.
+// Undo / Clear / Cancel. All buttons are finger-sized. Keeps the dock at five.
 class PlanStrip : public QWidget {
     Q_OBJECT
 

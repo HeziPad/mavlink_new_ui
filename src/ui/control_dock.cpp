@@ -521,13 +521,6 @@ void drawDockIcon(QPainter& p, DockIcon icon, const QRectF& r, const QColor& c) 
         p.drawLine(QPointF(5, 27), QPointF(25, 27));
         break;
     }
-    case DockIcon::Qrtl: {
-        p.drawPolyline(QPolygonF({{4, 14}, {15, 4}, {26, 14}}));
-        p.drawPolyline(QPolygonF({{7, 12}, {7, 26}, {23, 26}, {23, 12}}));
-        p.drawLine(QPointF(15, 12), QPointF(15, 22));
-        p.drawPolyline(QPolygonF({{11, 18}, {15, 22}, {19, 18}}));
-        break;
-    }
     }
     p.restore();
 }

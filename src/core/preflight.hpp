@@ -91,6 +91,7 @@ struct ParamCheck {
     std::string title;
     std::string why;
     bool critical = false;
+    bool reboot = false;  // takes effect after a reboot
 };
 const std::vector<ParamCheck>& paramChecks();
 struct ParamVerdict {

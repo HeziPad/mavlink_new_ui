@@ -216,8 +216,9 @@ const std::vector<StepDef>& steps() {
             {"mis.synced", Stage::Mission, Kind::Auto, "Mission on the vehicle",
              "AUTO flies what the vehicle holds, not what the GCS shows.",
              "The vehicle has a mission and it matches the plan.", true, true},
-            {"mis.landing", Stage::Mission, Kind::Auto, "Landing point",
-             "Land (the wind-aligned landing) needs a landing point.", "The mission has a landing point L.", false,
+            {"mis.landing", Stage::Mission, Kind::Auto, "Landing for Land and failsafes",
+             "Land and every failsafe RTL fly the mission's landing: circle beside L, into the wind, land vertically.",
+             "The mission has a landing (L, or home) with its DO_LAND_START marker. Re-sync the plan if not.", true,
              true},
             {"mis.alts", Stage::Mission, Kind::Auto, "Mission altitudes",
              "Too low hits obstacles; too high breaks rules or the fence.",
@@ -544,8 +545,17 @@ std::optional<Eval> evaluate(const std::string& id, const VehicleState& s, const
                                     : ev(Status::Pass, std::to_string(plan.wps.size()) + " waypoints on the vehicle");
         }
         if (id == "mis.landing") {
-            return plan.land ? ev(Status::Pass, "landing point set")
-                             : ev(Status::Warn, "no landing point: only QRTL can land it");
+            if (!plan.land) {
+                return ev(Status::Fail, "no landing in the mission: Plan → Sync adds one (at home if there's no L)");
+            }
+            const bool marker = std::any_of(s.mission.begin(), s.mission.end(),
+                                            [](const MissionItem& it) { return it.command == mav::kCmdDoLandStart; });
+            if (!marker) {
+                return ev(Status::Fail, "no DO_LAND_START: failsafes wouldn't fly the landing. Plan → Sync");
+            }
+            const bool at_home = s.has_home && geo::distance(plan.land->lat, plan.land->lon, s.home_lat, s.home_lon) < 5.0;
+            return ev(Status::Pass, at_home ? "Land and failsafes land at home (no L planned)"
+                                            : "Land and failsafes land at L");
         }
         if (id == "mis.alts") {
             if (plan.wps.empty()) {
@@ -652,12 +662,21 @@ const std::vector<ParamCheck>& paramChecks() {
          "Skipped arming checks are how broken sensors get airborne.", true},
         {"param.THR_FAILSAFE", "THR_FAILSAFE", "RC failsafe enabled",
          "Without it, losing the transmitter isn't detected.", true},
-        {"param.FS_LONG_ACTN", "FS_LONG_ACTN", "Long failsafe returns home",
-         "What it does after a long link loss on the wing; RTL brings it back.", true},
+        {"param.FS_LONG_ACTN", "FS_LONG_ACTN", "Long failsafe lands at L",
+         "After a long RC or GCS link loss: RTL, which flies the same landing as the Land button.", true},
         {"param.FS_GCS_ENABL", "FS_GCS_ENABL", "GCS link failsafe",
-         "This GCS flies the aircraft; if its link is lost the aircraft should react.", false},
-        {"param.BATT_FS_LOW_ACT", "BATT_FS_LOW_ACT", "Low battery action",
-         "At low battery it should come home on its own.", true},
+         "This GCS flies the aircraft; if its link is lost the aircraft should come back and land.", true},
+        {"param.RTL_AUTOLAND", "RTL_AUTOLAND", "Failsafes fly the Land approach",
+         "2 makes every RTL go straight to the mission's landing (circle beside L, into the wind, land "
+         "vertically) instead of circling over home. With 0 the mission's landing marker also blocks arming.",
+         true},
+        {"param.Q_RTL_MODE", "Q_RTL_MODE", "RTL uses the mission landing",
+         "Any other value makes RTL do its own vertical landing at home and skip the landing at L.", true},
+        {"param.BRD_SAFETY_DEFLT", "BRD_SAFETY_DEFLT", "Safety ON at power-up",
+         "The motors stay cut after power-up until you turn safety off by hand. Applies after a reboot.", true,
+         true},
+        {"param.BATT_FS_LOW_ACT", "BATT_FS_LOW_ACT", "Low battery lands at L",
+         "At low battery it should fly the landing at L on its own.", true},
         {"param.BATT_FS_CRT_ACT", "BATT_FS_CRT_ACT", "Critical battery action",
          "At critical battery it should land right away (QLand).", true},
         {"param.BATT_LOW_VOLT", "BATT_LOW_VOLT", "Low battery voltage",
@@ -729,6 +748,9 @@ ParamVerdict checkParam(const ParamCheck& c, const VehicleState& s, const Profil
     };
 
     if (c.id == "param.Q_GUIDED_MODE") return simple("Q_GUIDED_MODE", 0.0f, "circle on the wing");
+    if (c.id == "param.RTL_AUTOLAND") return simple("RTL_AUTOLAND", 2.0f, "RTL flies the landing at L");
+    if (c.id == "param.Q_RTL_MODE") return simple("Q_RTL_MODE", 0.0f, "RTL hands over to the mission landing");
+    if (c.id == "param.BRD_SAFETY_DEFLT") return simple("BRD_SAFETY_DEFLT", 1.0f, "safety starts ON");
     if (c.id == "param.THR_FAILSAFE") return simple("THR_FAILSAFE", 1.0f, "RC loss is detected");
     if (c.id == "param.FS_GCS_ENABL") {
         const auto cur = get("FS_GCS_ENABL");
@@ -746,11 +768,11 @@ ParamVerdict checkParam(const ParamCheck& c, const VehicleState& s, const Profil
         v.known = true;
         v.current = *cur;
         const int a = static_cast<int>(std::lround(*cur));
-        v.ok = a == 1 || a == 5;
+        v.ok = a == 1;
         if (!v.ok) v.recommended = 1.0f;
         const char* names[] = {"Continue", "RTL", "Glide", "Parachute", "Auto", "AUTOLAND"};
         v.detail = "FS_LONG_ACTN = " + std::string(a >= 0 && a <= 5 ? names[a] : "?") +
-                   (v.ok ? " ✓" : " → recommended RTL (home, then lands vertically)");
+                   (v.ok ? " ✓ flies the landing at L" : " → recommended RTL (flies the landing at L)");
         return v;
     }
     if (c.id == "param.BATT_FS_LOW_ACT" || c.id == "param.BATT_FS_CRT_ACT") {
@@ -762,11 +784,14 @@ ParamVerdict checkParam(const ParamCheck& c, const VehicleState& s, const Profil
         const int a = static_cast<int>(std::lround(*cur));
         const char* names[] = {"Warn only", "RTL", "Land", "Terminate", "QLand", "Parachute", "Loiter to QLand",
                                "AUTOLAND or RTL"};
-        v.ok = low ? (a == 1 || a == 6 || a == 7) : (a == 4 || a == 6 || a == 2);
+        // low: RTL or Land both jump to the mission's landing sequence
+        // critical: land right where it is, there may not be enough left to reach L
+        v.ok = low ? (a == 1 || a == 2) : (a == 4 || a == 6);
         if (!v.ok) v.recommended = low ? 1.0f : 4.0f;
         v.detail = std::string(low ? "BATT_FS_LOW_ACT" : "BATT_FS_CRT_ACT") + " = " +
                    (a >= 0 && a <= 7 ? names[a] : "?") +
-                   (v.ok ? " ✓" : low ? " → recommended RTL" : " → recommended QLand (land where it is)");
+                   (v.ok ? (low ? " ✓ flies the landing at L" : " ✓ lands where it is")
+                         : low ? " → recommended RTL (flies the landing at L)" : " → recommended QLand (land where it is)");
         return v;
     }
     if (c.id == "param.BATT_LOW_VOLT" || c.id == "param.BATT_CRT_VOLT") {

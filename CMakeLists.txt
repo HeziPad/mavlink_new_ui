@@ -39,6 +39,7 @@ add_library(gcs_core STATIC
     src/core/orbit_trim.cpp
     src/core/plane_modes.cpp
     src/core/preflight.cpp
+    src/core/tiles.cpp
     src/core/vehicle_state.cpp
     ${GCS_LINK_SOURCES}
 )
@@ -56,13 +57,17 @@ endif()
 add_executable(mavlink_gcs_ui
     src/main.cpp
     src/ui/alerts_panel.cpp
+    src/ui/app_icon.cpp
     src/ui/attitude_ball.cpp
     src/ui/camera_view.cpp
     src/ui/control_dock.cpp
+    src/ui/elevation_cache.cpp
     src/ui/fx_overlay.cpp
     src/ui/main_window.cpp
     src/ui/orbit_panel.cpp
     src/ui/map_view.cpp
+    src/ui/offline_downloader.cpp
+    src/ui/offline_store.cpp
     src/ui/plan_strip.cpp
     src/ui/preflight_art.cpp
     src/ui/preflight_runner.cpp
@@ -97,4 +102,14 @@ foreach(name geo mission_builder mission_transfer command_sender lift_rotors hea
         target_compile_options(test_${name} PRIVATE -Wno-address-of-packed-member)
     endif()
     add_test(NAME ${name} COMMAND test_${name})
+endforeach()
+
+# ---- install ----------------------------------------------------------------------
+include(GNUInstallDirs)
+install(TARGETS mavlink_gcs_ui RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(FILES resources/mavlink_gcs_ui.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+foreach(size 16 24 32 48 64 128 256 512)
+    install(FILES resources/icons/mavlink_gcs_ui_${size}.png
+            DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/${size}x${size}/apps
+            RENAME mavlink_gcs_ui.png)
 endforeach()

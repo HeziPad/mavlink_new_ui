@@ -410,6 +410,11 @@ std::vector<PreflightRunner::Button> PreflightRunner::buttons(const std::string&
             if (v.known && !v.ok && !c.critical && st != Status::Skipped) {
                 add("skip", QStringLiteral("KEEP AS IS"), Style::Neutral);
             }
+            // written here and only applied at boot
+            if (c.reboot && v.ok && fix_from_to_.count(c.name)) {
+                add("reboot", QStringLiteral("REBOOT AUTOPILOT"), Style::Primary, true, !armed,
+                    QStringLiteral("Disarm first"));
+            }
         }
         return b;
     }
@@ -634,6 +639,10 @@ void PreflightRunner::act(const std::string& id, const std::string& a) {
                 fix_pending_.erase(id);
                 fix_from_to_[c.name] = {v.current, *v.recommended};
                 client_->setParam(c.name, *v.recommended);
+            }
+            if (a == "reboot") {
+                send("reboot", {link::makeReboot()});
+                toast(QStringLiteral("Rebooting the autopilot: the link comes back in a few seconds"), true);
             }
         }
         return;

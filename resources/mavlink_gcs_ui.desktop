@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=QuadPlane GCS
+Comment=Game-style ground control station for an ArduPilot QuadPlane
+Exec=mavlink_gcs_ui
+Icon=mavlink_gcs_ui
+Terminal=false
+Categories=Utility;Science;
+StartupWMClass=mavlink_gcs_ui

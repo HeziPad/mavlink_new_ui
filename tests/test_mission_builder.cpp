@@ -20,7 +20,7 @@ static void testLayout() {
     const LandingApproach appr = computeLandingApproach(*plan.land, in);
     const auto items = buildLoopMission(-35.363, 149.165, 584.0, plan, 40.0f, &appr);
     const size_t n = plan.wps.size();
-    CHECK(items.size() == n + 5);  // home, takeoff, n wps, jump, approach circle, land
+    CHECK(items.size() == n + 6);  // home, takeoff, n wps, jump, land start, approach circle, land
 
     for (size_t i = 0; i < items.size(); ++i) {
         CHECK(items[i].seq == i);
@@ -49,7 +49,11 @@ static void testLayout() {
     CHECK_NEAR(jump.param1, 2.0, 1e-6);
     CHECK_NEAR(jump.param2, -1.0, 1e-6);  // forever
 
-    const auto& circle = items[n + 3];
+    const auto& start = items[n + 3];
+    CHECK(start.command == mav::kCmdDoLandStart);
+    CHECK(start.x == toE7(-35.362));
+    CHECK(seqToWaypointIndex(items, static_cast<int>(n + 3)) == -1);  // not a loop point
+    const auto& circle = items[n + 4];
     CHECK(circle.command == mav::kCmdNavLoiterToAlt);
     CHECK(circle.x == toE7(appr.c_lat));
     CHECK_NEAR(std::abs(circle.param2), appr.radius, 1e-3);
@@ -57,13 +61,13 @@ static void testLayout() {
     CHECK_NEAR(circle.param4, 1.0, 1e-6);  // exit on the tangent
     CHECK_NEAR(circle.z, 35.0, 1e-6);
 
-    const auto& land = items[n + 4];
+    const auto& land = items[n + 5];
     CHECK(land.command == mav::kCmdNavVtolLand);
     CHECK_NEAR(land.param1, 0.0, 1e-6);  // straight in, not the spiral option
     CHECK(land.x == toE7(-35.362));
     CHECK_NEAR(land.z, 0.0, 1e-6);  // ground: ArduPlane's descent profile reference
     CHECK_NEAR(extractPlan(items).land->alt_rel, 35.0, 1e-6);  // approach alt kept via the circle
-    CHECK(landSeq(items) == static_cast<int>(n + 3));  // landing starts at the circle
+    CHECK(landSeq(items) == static_cast<int>(n + 4));  // landing starts at the circle
 
     // the uploaded approach can be recovered for drawing
     const auto back = extractApproach(items);

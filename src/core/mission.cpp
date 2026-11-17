@@ -114,6 +114,8 @@ std::vector<MissionItem> buildLoopMission(double home_lat, double home_lon, doub
     }
 
     if (plan.land && approach) {
+        // RTL_AUTOLAND jumps to the DO_LAND_START nearest the aircraft
+        items.push_back(located(mav::kCmdDoLandStart, plan.land->lat, plan.land->lon, 0.0f));
         MissionItem circle = located(mav::kCmdNavLoiterToAlt, approach->c_lat, approach->c_lon, approach->alt);
         circle.param2 = static_cast<float>(approach->ccw ? -approach->radius : approach->radius);
         circle.param4 = 1.0f;  // leave on the tangent toward the land point

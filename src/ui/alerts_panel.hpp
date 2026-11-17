@@ -25,9 +25,6 @@ public:
     void place(const QRect& area);  // right-aligned inside `area`
     void tick(double dt);
 
-signals:
-    void closeRequested();
-
 protected:
     void paintEvent(QPaintEvent* e) override;
     void mousePressEvent(QMouseEvent* e) override;
@@ -51,7 +48,6 @@ private:
     bool dragged_ = false;
     QPointF press_pos_;
     double press_scroll_ = 0.0;
-    QRectF close_rect_;
 };
 
 }  // namespace gcs::ui

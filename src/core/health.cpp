@@ -392,6 +392,9 @@ struct Pattern {
 const std::vector<Pattern>& patterns() {
     // order matters: the first match wins, so specific before generic
     static const std::vector<Pattern> t = {
+        {{"rtl_autoland disabled"}, "txt.rtl_autoland", Severity::Warning, "Failsafe landing not set up",
+         "The mission has a landing marker (DO_LAND_START) but RTL_AUTOLAND is 0, so the autopilot refuses to arm.",
+         {"Open PREFLIGHT → Settings and set RTL_AUTOLAND = 2 (failsafes then fly the Land approach)"}},
         {{"vtol land too short"}, "txt.vtol_land_short", Severity::Warning, "Landing leg too short",
          "A waypoint right before the VTOL landing is too close to it for the transition.",
          {"Re-sync the plan from this GCS: it puts an approach circle before the landing",

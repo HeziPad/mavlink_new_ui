@@ -20,6 +20,7 @@ constexpr uint16_t kCmdNavLoiterToAlt = 31;
 constexpr uint16_t kCmdNavVtolTakeoff = 84;
 constexpr uint16_t kCmdNavVtolLand = 85;
 constexpr uint16_t kCmdDoJump = 177;
+constexpr uint16_t kCmdDoLandStart = 189;     // marks where a landing sequence starts (RTL_AUTOLAND)
 constexpr float kVtolLandFwSpiral = 1.0f;         // NAV_VTOL_LAND_OPTIONS_FW_SPIRAL_APPROACH
 }  // namespace mav
 
@@ -110,9 +111,12 @@ LandingApproach computeLandingApproach(const UserWaypoint& land, const ApproachI
 //   2..n+1     WAYPOINT x n   (per-point relative altitude)
 //   n+2        DO_JUMP -> 2, repeat forever   (n >= 2)
 //              LOITER_UNLIM at the point is used instead when n == 1
-//   n+3        LOITER_TO_ALT at the approach circle centre (+-radius = CW/CCW,
+//   n+3        DO_LAND_START at plan.land: with RTL_AUTOLAND = 2 every RTL
+//              (failsafes included) jumps here and flies the same landing as
+//              the Land button
+//   n+4        LOITER_TO_ALT at the approach circle centre (+-radius = CW/CCW,
 //              z = approach alt, exit on the tangent toward the next item)
-//   n+4        VTOL_LAND at plan.land (no spiral option; z = 0 = ground at home
+//   n+5        VTOL_LAND at plan.land (no spiral option; z = 0 = ground at home
 //              level: ArduPlane uses this as the ground for its descent)
 //
 // The approach sits behind an endless jump, so it is never reached by
@@ -135,7 +139,8 @@ MissionPlan extractPlan(const std::vector<MissionItem>& items);
 std::optional<LandingApproach> extractApproach(const std::vector<MissionItem>& items);
 
 // seq where landing starts: the approach circle if there is one, else the
-// first VTOL_LAND / LAND item; -1 if none.
+// first VTOL_LAND / LAND item; -1 if none. (The DO_LAND_START marker before
+// the circle is not returned: jumping to the circle is the same thing.)
 int landSeq(const std::vector<MissionItem>& items);
 
 // Maps a mission seq to an index into extractPlan(items).wps; -1 when the

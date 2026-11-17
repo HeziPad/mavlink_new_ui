@@ -1,5 +1,6 @@
 #include "check.hpp"
 #include "core/geo.hpp"
+#include "core/tiles.hpp"
 #include "core/vehicle_state.hpp"
 
 using namespace gcs::geo;
@@ -281,7 +282,30 @@ static void testTrackPredictor() {
     CHECK(!TrackPredictor{}.valid());
 }
 
+static void testTiles() {
+    namespace t = gcs::tiles;
+    // well-known tile: zoom 0 is one tile; Tel Aviv at z13 (OSM 4887/3324)
+    const t::TilePos z0 = t::locate(32.0853, 34.7818, 0);
+    CHECK(z0.x == 0 && z0.y == 0);
+    const t::TilePos p = t::locate(32.0853, 34.7818, 13);
+    CHECK(p.x == 4887);
+    CHECK(p.y == 3324);
+    CHECK(p.px >= 0.0 && p.px < 256.0 && p.py >= 0.0 && p.py < 256.0);
+    // terrarium: (128, 0, 0) is sea level; 1 m per G step
+    CHECK_NEAR(t::terrarium(128, 0, 0), 0.0, 1e-9);
+    CHECK_NEAR(t::terrarium(128, 100, 128), 100.5, 1e-9);
+    CHECK_NEAR(t::terrarium(127, 255, 0), -1.0, 1e-9);
+    // range: a 10 km radius at z13 (tile ~4.15 km at 32 N) spans 5-6 tiles a side
+    const t::Range r = t::around(32.0853, 34.7818, 10000.0, 13);
+    CHECK(r.x1 - r.x0 + 1 >= 5 && r.x1 - r.x0 + 1 <= 7);
+    CHECK(r.y1 - r.y0 + 1 >= 5 && r.y1 - r.y0 + 1 <= 7);
+    CHECK(r.x0 <= p.x && p.x <= r.x1 && r.y0 <= p.y && p.y <= r.y1);
+    CHECK(r.count() == static_cast<size_t>((r.x1 - r.x0 + 1) * (r.y1 - r.y0 + 1)));
+    CHECK_NEAR(t::tileMeters(32.0853, 13), 4148.0, 20.0);
+}
+
 int main() {
+    testTiles();
     testTrackPredictor();
     testPredictVelocity();
     testFootprint();

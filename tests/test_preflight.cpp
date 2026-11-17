@@ -159,7 +159,34 @@ void testParams() {
     s.params["FENCE_ENABLE"] = 0.0f;
     v = check("param.FENCE_ENABLE");
     CHECK(v.known && !v.ok && !v.recommended);  // advice only: no blind write
+    // failsafes fly the Land approach: RTL_AUTOLAND 2, Q_RTL_MODE 0
+    s.params["RTL_AUTOLAND"] = 0.0f;
+    v = check("param.RTL_AUTOLAND");
+    CHECK(v.known && !v.ok && v.recommended && *v.recommended == 2.0f);
+    CHECK(st("param.RTL_AUTOLAND", s) == Status::Fail);
+    s.params["Q_RTL_MODE"] = 2.0f;  // VTOL approach at home would skip the landing at L
+    v = check("param.Q_RTL_MODE");
+    CHECK(!v.ok && v.recommended && *v.recommended == 0.0f);
+    s.params["FS_LONG_ACTN"] = 0.0f;
+    CHECK(!check("param.FS_LONG_ACTN").ok);
+    s.params["FS_LONG_ACTN"] = 1.0f;
+    CHECK(check("param.FS_LONG_ACTN").ok);
+    s.params["BATT_FS_LOW_ACT"] = 2.0f;  // Land: jumps to the landing sequence too
+    CHECK(check("param.BATT_FS_LOW_ACT").ok);
+    s.params["BATT_FS_CRT_ACT"] = 1.0f;  // critical must land in place, not fly to L
+    v = check("param.BATT_FS_CRT_ACT");
+    CHECK(!v.ok && v.recommended && *v.recommended == 4.0f);
+    // safety starts ON at boot; applies after a reboot
+    s.params["BRD_SAFETY_DEFLT"] = 0.0f;
+    v = check("param.BRD_SAFETY_DEFLT");
+    CHECK(!v.ok && v.recommended && *v.recommended == 1.0f);
+    for (const auto& c : paramChecks()) {
+        if (c.id == "param.BRD_SAFETY_DEFLT") {
+            CHECK(c.reboot && c.critical);
+        }
+    }
     const auto names = paramsToFetch();
+    CHECK(std::find(names.begin(), names.end(), "RTL_AUTOLAND") != names.end());
     CHECK(std::find(names.begin(), names.end(), "Q_FRAME_CLASS") != names.end());
 }
 

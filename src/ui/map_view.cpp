@@ -1,5 +1,8 @@
 #include "map_view.hpp"
 
+#include "elevation_cache.hpp"
+#include "units.hpp"
+
 #include "attitude_ball.hpp"
 #include "wind_gauge.hpp"
 #include "core/geo.hpp"
@@ -72,6 +75,7 @@ MapView::MapView(TileCache* tiles, QWidget* parent) : HudView(parent), tiles_(ti
     // Touch is handled here (pinch zoom + one-finger tap/drag); in PiP mode it
     // is ignored so Qt synthesises the mouse click the ViewHost swaps on.
     setAttribute(Qt::WA_AcceptTouchEvents);
+    setMouseTracking(true);  // the lat / lon / ground readout follows the mouse
     connect(tiles_, &TileCache::tileReady, this, qOverload<>(&QWidget::update));
     heading_.rate = 25.0;  // light smoothing on top of the per-frame prediction
     updateCursor();
@@ -501,6 +505,10 @@ void MapView::mouseMoveEvent(QMouseEvent* e) {
         return;
     }
     touch_input_ = false;  // hovering only happens with a mouse
+    if (e->source() == Qt::MouseEventNotSynthesized) {
+        hover_pos_ = pos;
+        update();
+    }
     if (mode_ == Mode::Plan) {
         const int h = planPointAt(pos);
         if (h != hover_wp_) {
@@ -508,6 +516,69 @@ void MapView::mouseMoveEvent(QMouseEvent* e) {
             updateCursor();
             update();
         }
+    }
+}
+
+void MapView::leaveEvent(QEvent* e) {
+    hover_pos_.reset();
+    update();
+    HudView::leaveEvent(e);
+}
+
+void MapView::setElevation(ElevationCache* elev) {
+    elev_ = elev;
+    if (elev_) {
+        connect(elev_, &ElevationCache::ready, this, qOverload<>(&QWidget::update));
+    }
+}
+
+void MapView::paintHover(QPainter& p, double right, double bottom) {
+    if (!hover_pos_ || compact_ || touch_input_ || pressing_ || !rect().contains(hover_pos_->toPoint())) {
+        return;
+    }
+    double lat = 0.0, lon = 0.0;
+    toLatLon(*hover_pos_, lat, lon);
+    const QString pos = QStringLiteral("%1° %2   %3° %4")
+                            .arg(std::abs(lat), 0, 'f', 5)
+                            .arg(lat >= 0 ? QLatin1Char('N') : QLatin1Char('S'))
+                            .arg(std::abs(lon), 0, 'f', 5)
+                            .arg(lon >= 0 ? QLatin1Char('E') : QLatin1Char('W'));
+    QString ground = QStringLiteral("GROUND  —");
+    if (elev_) {
+        if (const auto h = elev_->elevation(lat, lon)) {
+            ground = QStringLiteral("GROUND  %1 MSL").arg(units::altText(*h));
+            if (s_.has_home) {
+                const double rel = *h - s_.home_alt_amsl;
+                ground += QStringLiteral("  ·  %1%2 vs HOME")
+                              .arg(rel >= 0 ? QStringLiteral("+") : QString())
+                              .arg(units::altText(rel));
+            }
+        } else {
+            ground = QStringLiteral("GROUND  loading…");
+        }
+    }
+    QString from;
+    if (has_ac_) {
+        const double d = geo::distance(ac_lat_, ac_lon_, lat, lon);
+        from = QStringLiteral("%1  ·  %2° from AIRCRAFT")
+                   .arg(formatDistance(d))
+                   .arg(static_cast<int>(std::lround(geo::wrap360(geo::bearing(ac_lat_, ac_lon_, lat, lon)))) % 360, 3,
+                        10, QLatin1Char('0'));
+    }
+    const QFont mf = monoFont(12, true);
+    const QFont sf = monoFont(11);
+    const QFontMetricsF fm(mf), fs(sf);
+    double w = std::max({fm.horizontalAdvance(pos), fs.horizontalAdvance(ground), fs.horizontalAdvance(from)}) + 28;
+    const int lines = from.isEmpty() ? 2 : 3;
+    const QRectF box(right - w, bottom - (12 + lines * 18), w, 12 + lines * 18);
+    drawGlass(p, chamferPath(box, 7), kCyan, 0.35, alpha(kGlassDeep, 0.9));
+    double y = box.top() + 6;
+    drawText(p, QRectF(box.left() + 14, y, w - 28, 18), Qt::AlignLeft | Qt::AlignVCenter, pos, mf, kText);
+    y += 18;
+    drawText(p, QRectF(box.left() + 14, y, w - 28, 18), Qt::AlignLeft | Qt::AlignVCenter, ground, sf, kGreen);
+    y += 18;
+    if (!from.isEmpty()) {
+        drawText(p, QRectF(box.left() + 14, y, w - 28, 18), Qt::AlignLeft | Qt::AlignVCenter, from, sf, kMuted);
     }
 }
 
@@ -1123,6 +1194,7 @@ void MapView::paintOverlayChrome(QPainter& p) {
     double xr = right;
     xr = chip(layer_chip_, xr, layer_ == TileCache::Satellite ? QStringLiteral("▣ Sat") : QStringLiteral("▣ Map"), true);
     chip(follow_chip_, xr, QStringLiteral("◎ Follow"), follow_);
+    paintHover(p, right, y - 52);
 
     // mode hint
     if (mode_ == Mode::Guide) {

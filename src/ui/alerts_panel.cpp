@@ -176,10 +176,7 @@ void AlertsPanel::mouseMoveEvent(QMouseEvent* e) {
     }
 }
 
-void AlertsPanel::mouseReleaseEvent(QMouseEvent* e) {
-    if (pressing_ && !dragged_ && close_rect_.contains(e->position())) {
-        emit closeRequested();
-    }
+void AlertsPanel::mouseReleaseEvent(QMouseEvent*) {
     pressing_ = false;
 }
 
@@ -223,9 +220,6 @@ void AlertsPanel::paintEvent(QPaintEvent*) {
     }
     drawText(p, QRectF(r.left() + 18, r.top() + 33, 300, 16), Qt::AlignLeft | Qt::AlignVCenter, summary,
              labelFont(10.5), sc);
-    close_rect_ = QRectF(r.right() - 58, r.top() + 6, 50, 48);
-    drawGlass(p, chamferPath(close_rect_.adjusted(4, 4, -4, -4), 6), kCyan, 0.5, kGlassDeep);
-    drawText(p, close_rect_, Qt::AlignCenter, QStringLiteral("✕"), monoFont(17, true), kText);
 
     // ---- group pills ----------------------------------------------------------------
     std::array<int, kGroups> worst;

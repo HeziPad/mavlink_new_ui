@@ -25,6 +25,22 @@ public:
     };
     // the trail lengths offered (seconds, 0 = all)
     static const std::vector<int>& trailChoices();
+    // offline area radii offered (km)
+    static const std::vector<int>& offlineRadii();
+
+    // what the OFFLINE page shows; MainWindow keeps it current
+    struct Offline {
+        QString center;         // "around the aircraft" / "around the map centre"
+        int radius_idx = 1;
+        size_t tiles = 0;       // estimate for the selected radius
+        qint64 bytes = 0;
+        bool running = false;
+        size_t done = 0, total = 0, failed = 0;
+        qint64 disk_bytes = -1; // in the folder now (-1 unknown)
+        QString folder;
+        QString status;         // last result line
+    };
+    void setOffline(const Offline& o);
 
     explicit SettingsScreen(QWidget* parent);
 
@@ -36,6 +52,11 @@ public:
 signals:
     void altUnitChanged(int unit);
     void trailChanged(bool on, int secs);
+    void offlineRadiusChanged(int km);
+    void offlineDownload();
+    void offlineCancel();
+    void offlineDelete();
+    void offlineChooseFolder();
     void closed();
 
 protected:
@@ -43,7 +64,7 @@ protected:
     void mousePressEvent(QMouseEvent* e) override;
 
 private:
-    enum Category { kUnits = 0, kMap = 1, kCategories };
+    enum Category { kUnits = 0, kMap = 1, kOffline = 2, kCategories };
     // a segmented control: one finger-sized cell per option, sliding highlight
     struct Segmented {
         QStringList labels;
@@ -56,6 +77,8 @@ private:
     QRectF panelRect() const;
     void paintSegmented(QPainter& p, const QRectF& r, Segmented& seg);
     void paintRow(QPainter& p, const QRectF& r, const QString& title, const QString& sub);
+    void paintOffline(QPainter& p, const QRectF& body);
+    void paintAction(QPainter& p, const QRectF& r, const QString& label, const QColor& c, bool enabled);
     bool pressSegmented(Segmented& seg, const QPointF& pos);
 
     QPixmap backdrop_;
@@ -70,6 +93,10 @@ private:
     Segmented alt_;
     Segmented trail_on_;
     Segmented trail_len_;
+    Segmented radius_;
+    Offline off_;
+    QRectF dl_rect_, del_rect_, folder_rect_;
+    bool del_armed_ = false;  // DELETE asks once more
 
     QRectF close_rect_;
     std::vector<QRectF> cat_rects_;

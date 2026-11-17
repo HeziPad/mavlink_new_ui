@@ -540,7 +540,7 @@ void CameraView::paintRollScale(QPainter& p, const QPointF& c, double rad) {
 void CameraView::paintRefChip(QPainter& p) {
     // under the AIRCRAFT box (see paintReadouts)
     const bool body = ref_ == HudRef::Body;
-    const QColor col = body ? kAmber : kGreen;
+    const QColor col = body ? kGreen : kAmber;  // matches the AIRCRAFT (green) and LOS (yellow) boxes
     ref_chip_ = layout().chip;
     drawGlass(p, chamferPath(ref_chip_, 7), col, 0.85, kGlassDeep);
     const bool misaligned = body && live();
@@ -623,7 +623,7 @@ void CameraView::paintHeadingTape(QPainter& p, const QRectF& r) {
     if (std::abs(other) < span / 2) {
         const double x = r.center().x() + other * ppd;
         p.setPen(Qt::NoPen);
-        p.setBrush(alpha(body ? kAmber : kCyan, 0.9));
+        p.setBrush(alpha(body ? kAmber : kGreen, 0.9));
         p.drawPolygon(QPolygonF({QPointF(x, r.top() + 2), QPointF(x - 5, r.top() - 6), QPointF(x + 5, r.top() - 6)}));
     }
     p.restore();
@@ -692,7 +692,7 @@ void CameraView::paintReadouts(QPainter& p) {
         p.drawRect(box);
         drawText(p, QRectF(box.left() + 10, box.top() + 5, box.width() - 20, 16), Qt::AlignLeft | Qt::AlignVCenter,
                  gimbal_ ? QStringLiteral("GIMBAL · LOS") : QStringLiteral("FIXED MOUNT · LOS"), labelFont(10.5),
-                 gimbal_ ? hud : kAmber);
+                 kAmber);
         // relative to the platform: the main numbers
         row(box, 0, QStringLiteral("PAN"), signedDeg(pan_rel_.value), hud);
         row(box, 1, QStringLiteral("TILT"), signedDeg(tilt_rel_.value), hud);
