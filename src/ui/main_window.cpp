@@ -53,6 +53,7 @@ AppSettings AppSettings::load() {
     s.reduced_motion = q.value(QStringLiteral("ui/reduced_motion"), s.reduced_motion).toBool();
     s.alt_unit = q.value(QStringLiteral("ui/alt_unit"), s.alt_unit).toInt();
     s.hud_reference = q.value(QStringLiteral("camera/hud_reference"), s.hud_reference).toInt();
+    s.wind_north_up = q.value(QStringLiteral("camera/wind_north_up"), s.wind_north_up).toBool();
     s.ball_collapsed = q.value(QStringLiteral("map/ball_collapsed"), s.ball_collapsed).toBool();
     s.trail_on = q.value(QStringLiteral("map/trail_on"), s.trail_on).toBool();
     s.trail_secs = q.value(QStringLiteral("map/trail_secs"), s.trail_secs).toInt();
@@ -82,6 +83,7 @@ void AppSettings::save() const {
     q.setValue(QStringLiteral("map/follow"), follow);
     q.setValue(QStringLiteral("ui/alt_unit"), alt_unit);
     q.setValue(QStringLiteral("camera/hud_reference"), hud_reference);
+    q.setValue(QStringLiteral("camera/wind_north_up"), wind_north_up);
     q.setValue(QStringLiteral("map/ball_collapsed"), ball_collapsed);
     q.setValue(QStringLiteral("map/trail_on"), trail_on);
     q.setValue(QStringLiteral("map/trail_secs"), trail_secs);
@@ -117,6 +119,7 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
     camera_ = new CameraView(video_.get());
     camera_->setCamera(settings_.camera_hfov, settings_.camera_tilt);
     camera_->setHudReference(settings_.hud_reference == 1 ? CameraView::HudRef::Body : CameraView::HudRef::Los);
+    camera_->setWindNorthUp(settings_.wind_north_up);
 
     host_ = new ViewHost(map_, camera_, this);
     strip_ = new PlanStrip(this);
@@ -138,7 +141,7 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
             [this](const QString& reason) { fx_->toast(reason, kMuted, QStringLiteral("Safety")); });
     connect(bar_, &TelemetryBar::safetyToggleRequested, this, [this](bool make_safe) {
         client_->runSequence("safety", {link::makeSetSafety(make_safe)});
-        fx_->toast(make_safe ? QStringLiteral("Safety ON: motor outputs cut") : QStringLiteral("Safety OFF: motors live"),
+        fx_->toast(make_safe ? QStringLiteral("Safety ON: motors cut") : QStringLiteral("Safety OFF: motors live"),
                    make_safe ? kAmber : kRed, QStringLiteral("Safety"));
     });
 
@@ -178,6 +181,10 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
         settings_.save();
     });
     connect(camera_, &CameraView::groundClicked, this, &MainWindow::onCameraClick);
+    connect(camera_, &CameraView::windNorthUpChanged, this, [this](bool on) {
+        settings_.wind_north_up = on;
+        settings_.save();
+    });
     connect(camera_, &CameraView::hudReferenceChanged, this, [this](int ref) {
         settings_.hud_reference = ref;
         settings_.save();
@@ -398,6 +405,12 @@ void MainWindow::updateMotion() {
         const PredictedPosition p = predictPosition(s_, now);
         map_->setAircraftPosition(p.lat, p.lon);
         camera_->setAltitude(p.alt_rel);
+        if (s_.pos_rx != track_rx_) {
+            track_rx_ = s_.pos_rx;
+            track_.addSample(s_.vn, s_.ve, s_.vd, s_.pos_rx, s_.yaw_rate);
+        }
+        const PredictedVelocity v = track_.at(now);
+        camera_->setVelocity(v.vn, v.ve, v.vd);
     }
 }
 
@@ -676,7 +689,7 @@ void MainWindow::refreshDock() {
                 spec.reason = no_link;
             } else if (safetyState(s_) == SafetyState::Safe) {
                 spec.enabled = false;
-                spec.reason = QStringLiteral("Safety on: motors cut. Hold SAFETY in the top bar for 1 s to make them live");
+                spec.reason = QStringLiteral("Safety ON: motors cut. Hold SAFETY in the top bar for 1 s to turn it off");
             } else if (!gpsHealthy(s_) || !s_.has_home) {
                 spec.enabled = false;
                 spec.reason = QStringLiteral("Waiting for GPS fix and home position");
@@ -1073,13 +1086,22 @@ void MainWindow::onCameraClick(double px, double py, double w, double h) {
 void MainWindow::launchOrAuto() {
     setGuide(false);
     if (isAirborne(s_)) {
-        // The current item must be a loop waypoint: after an aborted landing
-        // it is still the approach, and after a Hold during the takeoff climb
-        // it is the VTOL takeoff, which AUTO would re-run on the rotors.
-        if (resumeNeedsReset(s_)) {
-            const int seq = seqToWaypointIndex(s_.mission, resume_seq_) >= 0 ? resume_seq_ : 2;
+        // Rejoin the loop at the nearest waypoint (not where it left off). This
+        // also keeps AUTO off the VTOL takeoff (a Hold during the climb) and
+        // the landing items (an aborted landing), which it would otherwise
+        // resume on the rotors.
+        const PredictedPosition here = predictPosition(s_, Clock::now());
+        const int seq = s_.mission_known ? nearestLoopSeq(s_.mission, here.lat, here.lon, defaultRadius()) : -1;
+        if (seq >= 0) {
             client_->runSequence("auto", {link::makeSetMissionCurrent(static_cast<uint16_t>(seq)),
                                           link::makeSetMode(plane::AUTO, "AUTO")});
+            const auto& it = s_.mission[seq];
+            const double lat = it.x * 1e-7, lon = it.y * 1e-7;
+            map_->ping(lat, lon, kGreen);
+            fx_->toast(QStringLiteral("Resume Plan → WP%1, %2 m")
+                           .arg(seqToWaypointIndex(s_.mission, seq) + 1)
+                           .arg(std::lround(geo::distance(here.lat, here.lon, lat, lon))),
+                       kGreen, QStringLiteral("Plan"));
         } else {
             client_->setMode(plane::AUTO, "auto");
         }
@@ -1133,13 +1155,6 @@ void MainWindow::land() {
     }
     takeoff_handoff_ = false;
     setGuide(false);
-    // remember where to resume the loop if the landing is aborted
-    const int lseq = landSeq(s_.mission);
-    if (s_.mission_current >= 2 && s_.mission_current < lseq && seqToWaypointIndex(s_.mission, s_.mission_current) >= 0) {
-        resume_seq_ = s_.mission_current;
-    } else {
-        resume_seq_ = 2;
-    }
     startLandingApproach();
 }
 

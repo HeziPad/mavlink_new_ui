@@ -34,12 +34,20 @@ CameraView::CameraView(VideoReceiver* video, QWidget* parent) : HudView(parent),
     yaw_.rate = cam_az_.rate = 25.0;
     as_.rate = 10.0;
     alt_.rate = 20.0;
+    fpm_drift_.rate = fpm_gamma_.rate = 8.0;
     cam_el_.set(mount_pitch_);
     tilt_rel_.set(mount_pitch_);
 }
 
 bool CameraView::live() const {
     return frame_age_ < kNoVideoAfter;
+}
+
+void CameraView::setVelocity(double vn, double ve, double vd) {
+    vn_ = vn;
+    ve_ = ve;
+    vd_ = vd;
+    has_vel_ = true;
 }
 
 double CameraView::aspect() const {
@@ -98,6 +106,15 @@ void CameraView::tick(double dt) {
     as_.step(dt);
     alt_.step(dt);
     travelled_ += s_.groundspeed * dt;
+    // flight-path marker: track from the predicted velocity (turns with the
+    // heading), relative to the ruler reference, then lightly smoothed
+    if (has_vel_ && std::hypot(vn_, ve_) > 2.0) {
+        const double track = std::atan2(ve_, vn_) * geo::kRadToDeg;
+        fpm_drift_.set(std::clamp(geo::wrap180(track - refYaw()), -40.0, 40.0));
+        fpm_gamma_.set(std::atan2(-vd_, std::hypot(vn_, ve_)) * geo::kRadToDeg);
+    }
+    fpm_drift_.step(dt);
+    fpm_gamma_.step(dt);
     const double target = ref_ == HudRef::Body ? 1.0 : 0.0;
     if (reducedMotion()) {
         ref_blend_ = target;
@@ -162,6 +179,12 @@ void CameraView::setHudReference(HudRef ref, bool animate) {
 
 void CameraView::mousePressEvent(QMouseEvent* e) {
     if (compact_ || e->button() != Qt::LeftButton) {
+        return;
+    }
+    if (wind_rect_.contains(e->position())) {
+        wind_north_up_ = !wind_north_up_;
+        emit windNorthUpChanged(wind_north_up_);
+        update();
         return;
     }
     if (ref_chip_.contains(e->position())) {
@@ -298,6 +321,24 @@ void CameraView::paintSynthetic(QPainter& p) {
     }
 }
 
+CameraView::Layout CameraView::layout() const {
+    Layout l;
+    const QRectF r = rect();
+    const QPointF c = r.center();
+    constexpr double kColX = 16, kColW = 200;
+    l.aircraft = QRectF(kColX, 120, kColW, 92);
+    l.los = QRectF(kColX, l.aircraft.bottom() + 8, kColW, 104);
+    l.chip = QRectF(kColX, l.los.bottom() + 8, kColW, 48);
+    l.wind = QRectF(kColX, l.chip.bottom() + 8, kColW, 120);
+    const double tape_h = std::min(r.height() * 0.46, 360.0);
+    const double tape_x = l.aircraft.right() + 12;  // just inside the column, mirrored on the right
+    l.as_tape = QRectF(tape_x, c.y() - tape_h / 2, 70, tape_h);
+    l.alt_tape = QRectF(r.width() - tape_x - 70, c.y() - tape_h / 2, 70, tape_h);
+    l.ladder_clip = QRectF(l.as_tape.right() + 14, c.y() - r.height() * 0.30,
+                           std::max(40.0, l.alt_tape.left() - 14 - (l.as_tape.right() + 14)), r.height() * 0.57);
+    return l;
+}
+
 void CameraView::paintHud(QPainter& p) {
     const QRectF r = rect();
     const QPointF c = r.center();
@@ -306,7 +347,9 @@ void CameraView::paintHud(QPainter& p) {
 
     // ---- horizon + ladder (rotated with roll) -------------------------------
     p.save();
-    p.setClipRect(QRectF(c.x() - r.width() * 0.32, c.y() - r.height() * 0.30, r.width() * 0.64, r.height() * 0.57));
+    p.setClipRect(compact_ ? QRectF(c.x() - r.width() * 0.32, c.y() - r.height() * 0.30, r.width() * 0.64,
+                                    r.height() * 0.57)
+                           : layout().ladder_clip);
     p.translate(c);
     p.rotate(-refRoll());
     const double hy = hudY(0.0);
@@ -345,11 +388,8 @@ void CameraView::paintHud(QPainter& p) {
         }
 
         // flight path marker: where the aircraft is actually going
-        if (s_.has_position && s_.groundspeed > 2.0) {
-            const double track = std::atan2(s_.ve, s_.vn) * geo::kRadToDeg;
-            const double drift = std::clamp(geo::wrap180(track - refYaw()), -40.0, 40.0);
-            const double gamma = std::atan2(-s_.vd, std::hypot(s_.vn, s_.ve)) * geo::kRadToDeg;
-            const QPointF fpm(f * tanDeg(drift), hudY(gamma));
+        if (has_vel_ && std::hypot(vn_, ve_) > 2.0) {
+            const QPointF fpm(f * tanDeg(fpm_drift_.value), hudY(fpm_gamma_.value));
             p.setPen(QPen(hud, 1.6));
             p.setBrush(Qt::NoBrush);
             p.drawEllipse(fpm, 7, 7);
@@ -396,30 +436,16 @@ void CameraView::paintHud(QPainter& p) {
         return;
     }
 
-    paintRollScale(p, c, std::min(r.width(), r.height()) * 0.30);
+    // the arc's numbers must stay below the heading tape and status line (~y 160)
+    paintRollScale(p, c, std::max(60.0, std::min(std::min(r.width(), r.height()) * 0.30, c.y() - 190.0)));
 
     paintHeadingTape(p, QRectF(c.x() - r.width() * 0.22, 66, r.width() * 0.44, 38));
     paintReadouts(p);
     paintRefChip(p);
-    {
-        // wind relative to the nose, under the HUD chip (left of the airspeed tape)
-        WindInfo w;
-        w.valid = s_.has_wind;
-        w.from_deg = s_.wind_from_deg;
-        w.speed = s_.wind_speed;
-        const QRectF wb(16, 306, 108, 118);
-        p.setPen(QPen(alpha(hud, 0.5), 1));
-        p.setBrush(alpha(kBg, 0.55));
-        p.drawRect(wb);
-        drawText(p, QRectF(wb.left() + 8, wb.top() + 3, 60, 14), Qt::AlignLeft | Qt::AlignVCenter,
-                 QStringLiteral("WIND"), labelFont(9), alpha(hud, 0.8));
-        paintWindGauge(p, wb.adjusted(4, 16, -4, -4), w, yaw_.value, time_, false, false);
-    }
-    const double tape_h = std::min(r.height() * 0.46, 360.0);
-    paintVerticalTape(p, QRectF(c.x() - r.width() * 0.36 - 70, c.y() - tape_h / 2, 70, tape_h), as_.value, 2.0, true,
-                      QStringLiteral("AS"));
-    paintVerticalTape(p, QRectF(c.x() + r.width() * 0.36, c.y() - tape_h / 2, 70, tape_h),
-                      units::altToDisplay(alt_.value), units::feet() ? 20.0 : 5.0, false,
+    paintWind(p);
+    const Layout lay = layout();
+    paintVerticalTape(p, lay.as_tape, as_.value, 2.0, true, QStringLiteral("AS"));
+    paintVerticalTape(p, lay.alt_tape, units::altToDisplay(alt_.value), units::feet() ? 20.0 : 5.0, false,
                       QStringLiteral("ALT %1").arg(units::altUnitLabel()));
 
     // status line under the crosshair
@@ -515,11 +541,13 @@ void CameraView::paintRefChip(QPainter& p) {
     // under the AIRCRAFT box (see paintReadouts)
     const bool body = ref_ == HudRef::Body;
     const QColor col = body ? kAmber : kGreen;
-    // narrow: the airspeed tape's label sits just right of it
-    ref_chip_ = QRectF(16, 120 + 92 + 8, 108, 48);
+    ref_chip_ = layout().chip;
     drawGlass(p, chamferPath(ref_chip_, 7), col, 0.85, kGlassDeep);
-    drawText(p, QRectF(ref_chip_.left() + 10, ref_chip_.top() + 5, 90, 14), Qt::AlignLeft | Qt::AlignVCenter,
-             QStringLiteral("HUD RULERS"), labelFont(9), alpha(kMuted, 0.95));
+    const bool misaligned = body && live();
+    drawText(p, QRectF(ref_chip_.left() + 10, ref_chip_.top() + 5, ref_chip_.width() - 20, 14),
+             Qt::AlignLeft | Qt::AlignVCenter,
+             misaligned ? QStringLiteral("HUD RULERS · NOT ON VIDEO") : QStringLiteral("HUD RULERS · TAP"),
+             labelFont(9), misaligned ? alpha(kAmber, 0.9) : alpha(kMuted, 0.95));
     drawText(p, QRectF(ref_chip_.left() + 10, ref_chip_.top() + 20, 70, 22), Qt::AlignLeft | Qt::AlignVCenter,
              body ? QStringLiteral("BODY") : QStringLiteral("LOS"), labelFont(14), col);
     // two-position indicator on the right
@@ -531,11 +559,33 @@ void CameraView::paintRefChip(QPainter& p) {
     p.setPen(Qt::NoPen);
     p.setBrush(col);
     p.drawEllipse(QPointF(kx, track.center().y()), 5, 5);
-    if (body && live()) {
-        drawText(p, QRectF(ref_chip_.left() + 2, ref_chip_.bottom() + 4, ref_chip_.width(), 28),
-                 Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, QStringLiteral("not aligned with the video"),
-                 labelFont(9), alpha(kAmber, 0.8));
+}
+
+void CameraView::paintWind(QPainter& p) {
+    // tap: relative to the nose <-> north up
+    const QColor hud = kGreen;
+    WindInfo w;
+    w.valid = s_.has_wind;
+    w.from_deg = s_.wind_from_deg;
+    w.speed = s_.wind_speed;
+    wind_rect_ = layout().wind;
+    // the PiP sits bottom-left (ViewHost::pipRect: 30 % of the width, 16:10);
+    // in a small window there's no room for the gauge above it
+    const double pip_top = height() - 16.0 - std::clamp(width() * 0.30, 240.0, 420.0) * 10.0 / 16.0;
+    if (wind_rect_.bottom() > pip_top - 8.0) {
+        wind_rect_ = QRectF();
+        return;
     }
+    const QRectF& wb = wind_rect_;
+    p.setPen(QPen(alpha(hud, 0.5), 1));
+    p.setBrush(alpha(kBg, 0.55));
+    p.drawRect(wb);
+    drawText(p, QRectF(wb.left() + 10, wb.top() + 4, wb.width() - 20, 14), Qt::AlignLeft | Qt::AlignVCenter,
+             QStringLiteral("WIND"), labelFont(10.5), hud);
+    drawText(p, QRectF(wb.left() + 10, wb.top() + 4, wb.width() - 20, 14), Qt::AlignRight | Qt::AlignVCenter,
+             wind_north_up_ ? QStringLiteral("N-UP · TAP") : QStringLiteral("REL · TAP"), labelFont(9),
+             wind_north_up_ ? alpha(kCyan, 0.9) : alpha(kMuted, 0.95));
+    paintWindGauge(p, wb.adjusted(6, 20, -6, -4), w, yaw_.value, time_, wind_north_up_, false);
 }
 
 void CameraView::paintHeadingTape(QPainter& p, const QRectF& r) {
@@ -607,33 +657,40 @@ void CameraView::paintReadouts(QPainter& p) {
         drawText(p, QRectF(box.left() + 10, y, 50, 16), Qt::AlignLeft | Qt::AlignVCenter, k, lf, alpha(hud, 0.65));
         drawText(p, QRectF(box.left() + 56, y, box.width() - 64, 16), Qt::AlignRight | Qt::AlignVCenter, v, vf, c);
     };
-    const double top = 120;
+    const Layout lay = layout();
 
     // ---- aircraft ---------------------------------------------------------------
     {
-        const QRectF box(16, top, 168, 92);
+        const QRectF& box = lay.aircraft;
+        auto row = [&](int i, const QString& k, const QString& v) {
+            // values stop short of the ball on the right
+            const double y = box.top() + 26 + i * 19;
+            drawText(p, QRectF(box.left() + 10, y, 50, 16), Qt::AlignLeft | Qt::AlignVCenter, k, lf, alpha(hud, 0.65));
+            drawText(p, QRectF(box.left() + 56, y, box.width() - 56 - 66, 16), Qt::AlignRight | Qt::AlignVCenter, v, vf,
+                     hud);
+        };
         p.setPen(QPen(alpha(hud, 0.5), 1));
         p.setBrush(alpha(kBg, 0.55));
         p.drawRect(box);
         drawText(p, QRectF(box.left() + 10, box.top() + 5, 120, 16), Qt::AlignLeft | Qt::AlignVCenter,
                  QStringLiteral("AIRCRAFT"), labelFont(10.5), hud);
-        row(box, 0, QStringLiteral("ROLL"), signedDeg(roll_.value), hud);
-        row(box, 1, QStringLiteral("PITCH"), signedDeg(pitch_.value), hud);
-        row(box, 2, QStringLiteral("HDG"),
-            QStringLiteral("%1°").arg(static_cast<int>(std::lround(yaw_.value)) % 360, 3, 10, QLatin1Char('0')), hud);
-        // mini attitude ball
-        paintAttitudeBall(p, QPointF(box.right() + 34, box.center().y()), 26, roll_.value, pitch_.value, yaw_.value,
-                          true);
+        row(0, QStringLiteral("ROLL"), signedDeg(roll_.value));
+        row(1, QStringLiteral("PITCH"), signedDeg(pitch_.value));
+        row(2, QStringLiteral("HDG"),
+            QStringLiteral("%1°").arg(static_cast<int>(std::lround(yaw_.value)) % 360, 3, 10, QLatin1Char('0')));
+        // mini attitude ball, inside the box on the right
+        paintAttitudeBall(p, QPointF(box.right() - 34, box.center().y() + 6), 24, roll_.value, pitch_.value,
+                          yaw_.value, true);
     }
 
     // ---- line of sight ------------------------------------------------------------
     {
-        // bottom right: the top right is where toasts stack
-        const QRectF box(width() - 16 - 196, height() - 250, 196, 111);
+        // under AIRCRAFT: the platform's angles, then where its camera points
+        const QRectF& box = lay.los;
         p.setPen(QPen(alpha(hud, 0.5), 1));
         p.setBrush(alpha(kBg, 0.55));
         p.drawRect(box);
-        drawText(p, QRectF(box.left() + 10, box.top() + 5, 176, 16), Qt::AlignLeft | Qt::AlignVCenter,
+        drawText(p, QRectF(box.left() + 10, box.top() + 5, box.width() - 20, 16), Qt::AlignLeft | Qt::AlignVCenter,
                  gimbal_ ? QStringLiteral("GIMBAL · LOS") : QStringLiteral("FIXED MOUNT · LOS"), labelFont(10.5),
                  gimbal_ ? hud : kAmber);
         // relative to the platform: the main numbers
@@ -643,9 +700,9 @@ void CameraView::paintReadouts(QPainter& p) {
         const QString earth = QStringLiteral("AZ %1°  EL %2")
                                   .arg(static_cast<int>(std::lround(cam_az_.value)) % 360, 3, 10, QLatin1Char('0'))
                                   .arg(signedDeg(cam_el_.value));
-        drawText(p, QRectF(box.left() + 10, box.top() + 26 + 2 * 19 + 4, box.width() - 20, 16),
-                 Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("earth"), lf, alpha(hud, 0.5));
-        drawText(p, QRectF(box.left() + 10, box.top() + 26 + 3 * 19 + 2, box.width() - 18, 16),
+        drawText(p, QRectF(box.left() + 10, box.top() + 26 + 2 * 19 + 2, 50, 16), Qt::AlignLeft | Qt::AlignVCenter,
+                 QStringLiteral("EARTH"), lf, alpha(hud, 0.5));
+        drawText(p, QRectF(box.left() + 56, box.top() + 26 + 2 * 19 + 2, box.width() - 64, 16),
                  Qt::AlignRight | Qt::AlignVCenter, earth, monoFont(11), alpha(hud, 0.8));
     }
 }

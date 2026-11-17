@@ -207,6 +207,32 @@ int seqToWaypointIndex(const std::vector<MissionItem>& items, int seq) {
     return idx;
 }
 
+int nearestLoopSeq(const std::vector<MissionItem>& items, double lat, double lon, double skip_within_m) {
+    std::vector<int> loop;
+    for (size_t i = 1; i < items.size(); ++i) {
+        if (seqToWaypointIndex(items, static_cast<int>(i)) >= 0) {
+            loop.push_back(static_cast<int>(i));
+        }
+    }
+    if (loop.empty()) {
+        return -1;
+    }
+    size_t best = 0;
+    double best_d = 1e18;
+    for (size_t k = 0; k < loop.size(); ++k) {
+        const auto& it = items[loop[k]];
+        const double d = geo::distance(lat, lon, it.x * 1e-7, it.y * 1e-7);
+        if (d < best_d) {
+            best_d = d;
+            best = k;
+        }
+    }
+    if (best_d < skip_within_m && loop.size() > 1) {
+        best = (best + 1) % loop.size();
+    }
+    return loop[best];
+}
+
 double lapLength(const std::vector<UserWaypoint>& wps) {
     if (wps.size() < 2) {
         return 0.0;

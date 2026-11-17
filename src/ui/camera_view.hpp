@@ -29,6 +29,8 @@ public:
     enum class HudRef { Los = 0, Body = 1 };
     void setHudReference(HudRef ref, bool animate = false);
     HudRef hudReference() const { return ref_; }
+    void setWindNorthUp(bool on) { wind_north_up_ = on; update(); }
+    bool windNorthUp() const { return wind_north_up_; }
 
     QString pipTag() const override;
     QColor pipTagColor() const override;
@@ -37,6 +39,8 @@ public:
     // predicted every frame: aircraft attitude and camera line of sight
     void setMotion(const geo::Attitude& aircraft, const CameraLos& los);
     void setAltitude(double alt_rel) { alt_.set(alt_rel); }
+    // predicted ground velocity (NED, m/s), for the flight-path marker
+    void setVelocity(double vn, double ve, double vd);
     void setCamera(double hfov_deg, double mount_pitch_deg);
     void setGuideMode(bool on);
     void tick(double dt);
@@ -47,6 +51,7 @@ public:
 signals:
     void groundClicked(double px, double py, double width, double height);
     void hudReferenceChanged(int ref);  // HudRef
+    void windNorthUpChanged(bool on);
 
 protected:
     void paintEvent(QPaintEvent* e) override;
@@ -63,6 +68,16 @@ private:
     double refYaw() const;
     void paintRollScale(QPainter& p, const QPointF& c, double rad);
     void paintRefChip(QPainter& p);
+    void paintWind(QPainter& p);
+
+    // Left column (AIRCRAFT, LOS, HUD chip, WIND), the tapes just inside it
+    // and the ladder between the tapes. One place, so paint and hit-tests agree.
+    struct Layout {
+        QRectF aircraft, los, chip, wind;
+        QRectF as_tape, alt_tape;
+        QRectF ladder_clip;
+    };
+    Layout layout() const;
     void paintSynthetic(QPainter& p);
     void paintHud(QPainter& p);
     void paintHeadingTape(QPainter& p, const QRectF& r);
@@ -83,6 +98,9 @@ private:
     Tween cam_roll_, cam_el_;        // camera LOS, earth frame
     AngleTween cam_az_;
     Tween pan_rel_, tilt_rel_;       // LOS relative to the platform
+    double vn_ = 0.0, ve_ = 0.0, vd_ = 0.0;
+    bool has_vel_ = false;
+    Tween fpm_drift_, fpm_gamma_;    // flight-path marker angles, lightly smoothed
     bool gimbal_ = false;
     double hfov_ = 70.0;
     double mount_pitch_ = -30.0;
@@ -93,6 +111,8 @@ private:
     double ref_blend_ = 0.0;  // 0 = LOS, 1 = body; animates toward ref_
     double ref_glitch_ = 0.0;
     QRectF ref_chip_;
+    QRectF wind_rect_;
+    bool wind_north_up_ = false;  // HUD wind gauge: false = relative to the nose
 
     QPointF click_;
     double click_t_ = -1.0;

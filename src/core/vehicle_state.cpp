@@ -221,6 +221,50 @@ PredictedPosition predictPosition(const VehicleState& s, Clock::time_point now) 
     return p;
 }
 
+PredictedVelocity predictVelocity(const VehicleState& s, Clock::time_point now) {
+    const double age = std::clamp(secondsSince(s.pos_rx, now), 0.0, kMaxPredictPosition);
+    const double a = s.yaw_rate * age * geo::kDegToRad;
+    PredictedVelocity v;
+    v.vn = s.vn * std::cos(a) - s.ve * std::sin(a);
+    v.ve = s.vn * std::sin(a) + s.ve * std::cos(a);
+    v.vd = s.vd;
+    return v;
+}
+
+void TrackPredictor::addSample(double vn, double ve, double vd, Clock::time_point t, double yaw_rate_dps) {
+    const double track = std::atan2(ve, vn);
+    const double speed = std::hypot(vn, ve);
+    const double dt = have_ ? std::chrono::duration<double>(t - t_).count() : 0.0;
+    if (have_ && dt > 0.02 && dt < 0.5 && speed > 2.0 && speed_ > 2.0) {
+        const double d = std::remainder(track - track_, 2.0 * geo::kPi);
+        // light filtering: GPS velocity has a little noise
+        track_rate_ += 0.5 * (d / dt - track_rate_);
+        speed_rate_ += 0.5 * ((speed - speed_) / dt - speed_rate_);
+    } else {
+        track_rate_ = yaw_rate_dps * geo::kDegToRad;  // first sample or a gap: assume a coordinated turn
+        speed_rate_ = 0.0;
+    }
+    have_ = true;
+    t_ = t;
+    track_ = track;
+    speed_ = speed;
+    vd_ = vd;
+}
+
+PredictedVelocity TrackPredictor::at(Clock::time_point now) const {
+    PredictedVelocity v;
+    if (!have_) {
+        return v;
+    }
+    const double age = std::clamp(std::chrono::duration<double>(now - t_).count(), 0.0, kMaxPredictPosition);
+    const double tr = track_ + track_rate_ * age;
+    const double sp = std::max(0.0, speed_ + speed_rate_ * age);
+    v.vn = sp * std::cos(tr);
+    v.ve = sp * std::sin(tr);
+    v.vd = vd_;
+    return v;
+}
+
 CameraLos cameraLos(const VehicleState& s, const geo::Attitude& aircraft, double fixed_tilt_deg,
                     Clock::time_point now, bool gimbal_body_frame) {
     CameraLos los;

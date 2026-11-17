@@ -54,7 +54,8 @@ Three layers with a strict dependency direction: `core` ← `link` ← `ui`.
 - QRTL entered in wing-borne flight flies home on the wing, then lands vertically.
 - Gimbal: ArduPilot's `GIMBAL_DEVICE_ATTITUDE_STATUS` gives roll/pitch in the earth frame and yaw in the vehicle frame (flag). `core::cameraLos` turns that, or the fixed tilt setting, into an earth-frame camera attitude plus pan/tilt relative to the platform.
 - ArduPlane reports `vtol_state` as FW while parked on the ground, so don't infer "hovering" from it alone.
-- Resuming AUTO continues from the vehicle's *current* item. After a Hold during the AUTO VTOL climb that is still `NAV_VTOL_TAKEOFF`, and AUTO would hover and climb on the rotors again. `launchOrAuto` resets it to a loop waypoint when `resumeNeedsReset()`.
+- Resuming AUTO continues from the vehicle's *current* item. After a Hold during the AUTO VTOL climb that is still `NAV_VTOL_TAKEOFF`, and AUTO would hover and climb on the rotors again. `launchOrAuto` always sets the current item to `nearestLoopSeq()` first.
+- After a VTOL landing the mission stays on the land item and AUTO won't arm ("In landing sequence", "missing takeoff waypoint"). Launch sends `SET_MISSION_CURRENT(1, reset)` before AUTO + arm.
 - Safety switch: `SYS_STATUS` `MOTOR_OUTPUTS` is always present and *enabled* unless safety is engaged (`safetyState()`). Toggle with `MAV_CMD_DO_SET_SAFETY_SWITCH_STATE`; SITL implements it. Never while armed: it cuts every output, the pusher and servos included.
 - RTL, QRTL and QLAND refuse arming ("mode not armable"), so after a QRTL landing the pre-arm bit fails although nothing is wrong. `reconcileLandedMode` turns that into an info card.
 - Don't gate Launch on the prearm-healthy bit. It is evaluated for the *current* mode (e.g. "QRTL mode not armable") and doesn't apply to the mode Launch switches to.

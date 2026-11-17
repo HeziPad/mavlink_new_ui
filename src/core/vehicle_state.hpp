@@ -216,6 +216,35 @@ struct PredictedPosition {
     double alt_rel = 0.0;
 };
 PredictedPosition predictPosition(const VehicleState& s, Clock::time_point now);
+// Velocity (m/s, NED) turned by yaw_rate x age: in a coordinated turn the
+// track turns with the heading. Without this, a track from the 10 Hz velocity
+// set against the per-frame predicted heading saw-tooths (the HUD's FPM).
+struct PredictedVelocity {
+    double vn = 0.0;
+    double ve = 0.0;
+    double vd = 0.0;
+};
+PredictedVelocity predictVelocity(const VehicleState& s, Clock::time_point now);
+
+// Better than predictVelocity in wind: in a steady orbit the ground track
+// doesn't turn at the heading rate (crab varies around the circle), so the
+// track rate is measured from consecutive velocity samples instead. Feed every
+// new sample; at() extrapolates track and speed (capped like the others).
+class TrackPredictor {
+public:
+    void addSample(double vn, double ve, double vd, Clock::time_point t, double yaw_rate_dps);
+    PredictedVelocity at(Clock::time_point now) const;
+    bool valid() const { return have_; }
+
+private:
+    bool have_ = false;
+    Clock::time_point t_{};
+    double track_ = 0.0;       // rad
+    double speed_ = 0.0;       // m/s, horizontal
+    double vd_ = 0.0;
+    double track_rate_ = 0.0;  // rad/s
+    double speed_rate_ = 0.0;  // m/s^2
+};
 // Euler angle rates from body rates (rad/s in, deg/s out).
 void bodyRatesToEuler(double roll_rad, double pitch_rad, double p, double q, double r, double& roll_rate,
                       double& pitch_rate, double& yaw_rate);

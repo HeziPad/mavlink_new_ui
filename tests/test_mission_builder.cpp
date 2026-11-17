@@ -257,7 +257,33 @@ static void testLandingInMission() {
     CHECK(!resumeNeedsReset(s));
 }
 
+static void testNearestLoopSeq() {
+    MissionPlan plan;
+    plan.wps = {{-35.360, 149.160, 80.0f}, {-35.355, 149.170, 80.0f}, {-35.365, 149.175, 80.0f}};
+    plan.land = UserWaypoint{-35.362, 149.166, 35.0f};
+    ApproachInputs in;
+    in.from_lat = -35.36;
+    in.from_lon = 149.16;
+    const LandingApproach appr = computeLandingApproach(*plan.land, in);
+    const auto items = buildLoopMission(-35.363, 149.165, 584.0, plan, 40.0f, &appr);
+    const int wp1 = 2, wp2 = 3, wp3 = 4;  // after HOME and the VTOL takeoff
+    CHECK(seqToWaypointIndex(items, wp1) == 0 && seqToWaypointIndex(items, wp3) == 2);
+    // 300 m from WP2: go to WP2
+    double lat, lon;
+    geo::offset(-35.355, 149.170, 300.0, 0.0, lat, lon);
+    CHECK(nearestLoopSeq(items, lat, lon, 80.0) == wp2);
+    // right on top of WP2: the next one
+    CHECK(nearestLoopSeq(items, -35.355, 149.1701, 80.0) == wp3);
+    // on top of the last: wraps to the first
+    CHECK(nearestLoopSeq(items, -35.365, 149.175, 80.0) == wp1);
+    // never the takeoff, approach or landing items
+    const int n = nearestLoopSeq(items, plan.land->lat, plan.land->lon, 0.0);
+    CHECK(n == wp1 || n == wp2 || n == wp3);
+    CHECK(nearestLoopSeq({}, 0, 0, 0) == -1);
+}
+
 int main() {
+    testNearestLoopSeq();
     testLandingInMission();
     testApproachGeometry();
     testLayout();

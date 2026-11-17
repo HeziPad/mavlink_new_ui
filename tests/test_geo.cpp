@@ -235,7 +235,55 @@ static void testFootprint() {
     CHECK_NEAR(std::hypot(fp.outline[0].north, fp.outline[0].east), 1500.0, 1.0);
 }
 
+static void testPredictVelocity() {
+    using namespace gcs;
+    // constant 15 deg/s right turn at 25 m/s, sampled heading 090
+    VehicleState s;
+    const Clock::time_point t0 = Clock::time_point{} + std::chrono::hours(1);
+    s.pos_rx = t0;
+    s.vn = 0.0;
+    s.ve = 25.0;
+    s.yaw_rate = 15.0;
+    for (double age : {0.0, 0.05, 0.1}) {
+        const auto v = predictVelocity(s, t0 + std::chrono::microseconds(static_cast<long>(age * 1e6)));
+        const double track = wrap360(std::atan2(v.ve, v.vn) * kRadToDeg);
+        CHECK_NEAR(track, 90.0 + 15.0 * age, 0.1);
+        CHECK_NEAR(std::hypot(v.vn, v.ve), 25.0, 1e-9);
+    }
+    // capped like the position prediction
+    const auto far = predictVelocity(s, t0 + std::chrono::seconds(5));
+    CHECK_NEAR(wrap360(std::atan2(far.ve, far.vn) * kRadToDeg), 90.0 + 15.0 * kMaxPredictPosition, 0.1);
+}
+
+static void testTrackPredictor() {
+    using namespace gcs;
+    // orbit in wind: the track turns at a varying rate that isn't the yaw rate
+    TrackPredictor tp;
+    const Clock::time_point t0 = Clock::time_point{} + std::chrono::hours(1);
+    auto track_at = [](double t) { return 0.3 * t + 0.15 * std::sin(0.3 * t); };  // rad
+    auto speed_at = [](double t) { return 25.0 + 6.0 * std::cos(0.3 * t); };
+    double worst = 0.0;
+    for (int k = 0; k < 100; ++k) {
+        const double ts = k * 0.1;  // 10 Hz samples
+        const auto t = t0 + std::chrono::milliseconds(k * 100);
+        tp.addSample(speed_at(ts) * std::cos(track_at(ts)), speed_at(ts) * std::sin(track_at(ts)), 0.0, t, 0.0);
+        if (k < 3) {
+            continue;
+        }
+        for (int f = 1; f < 6; ++f) {  // frames between samples
+            const double tf = ts + f * 0.016;
+            const auto v = tp.at(t + std::chrono::milliseconds(f * 16));
+            const double err = std::abs(std::remainder(std::atan2(v.ve, v.vn) - track_at(tf), 2 * kPi)) * kRadToDeg;
+            worst = std::max(worst, err);
+        }
+    }
+    CHECK(worst < 0.2);  // deg; the yaw-rate method can be off by degrees here
+    CHECK(!TrackPredictor{}.valid());
+}
+
 int main() {
+    testTrackPredictor();
+    testPredictVelocity();
     testFootprint();
     testMountComposition();
     testPrediction();

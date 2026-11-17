@@ -363,10 +363,10 @@ void TelemetryBar::paintEvent(QPaintEvent*) {
         QString text = QStringLiteral("—");
         QColor c = kMuted;
         if (alive_ && st == SafetyState::Safe) {
-            text = QStringLiteral("SAFE");
+            text = QStringLiteral("ON");  // safety on: motors cut
             c = kAmber;
         } else if (alive_ && st == SafetyState::Live) {
-            text = QStringLiteral("LIVE");
+            text = QStringLiteral("OFF");  // safety off: motors live
             c = kRed;
         }
         if (safety_pending_ > 0.0) {

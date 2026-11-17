@@ -116,8 +116,8 @@ never changes the vehicle.
 The **⚙** at the end of the bar opens **Settings**: altitude in metres or feet,
 and the flight trail (on/off, last 30 s / 1 / 2 / 5 / 10 min / all).
 
-**SAFETY** in the bar is the hardware safety switch: `SAFE` (amber, motor
-outputs cut, Launch locked) or `LIVE` (red). Hold it for 1 s to switch, in either
+**SAFETY** in the bar is the hardware safety switch: `ON` (amber, motor
+outputs cut, Launch locked) or `OFF` (red, motors live). Hold it for 1 s to switch, in either
 direction (`MAV_CMD_DO_SET_SAFETY_SWITCH_STATE`). It's locked while armed:
 engaging safety in flight would cut the pusher and servos too. The GCS never
 changes it on its own.
@@ -219,9 +219,17 @@ gimbal reports.
 
 Two readouts sit beside it:
 
+The left column holds, top to bottom:
+
 - **AIRCRAFT:** roll, pitch and heading, with a small attitude ball.
-- **GIMBAL · LOS:** pan and tilt **relative to the aircraft**, with the
-  earth-frame azimuth and elevation underneath.
+- **GIMBAL · LOS** (or FIXED MOUNT): pan and tilt **relative to the aircraft**,
+  with the earth-frame azimuth and elevation underneath.
+- The **HUD RULERS** switch (LOS / BODY).
+- **WIND** (tap: relative to the nose, or north-up).
+
+The flight-path marker (circle with three ticks) is where the aircraft is
+actually going. Its track is predicted every frame along with the heading, so it
+stays steady in turns; in wind it sits beside the nose by the crab angle.
 
 In Guide mode, a tap on the video is cast along the real LOS to find the
 ground point.
@@ -245,7 +253,11 @@ boresight crosshair, labelled with its range. An **attitude ball** sits at the
 top left, with a **wind gauge** under it: north-up, the arrow shows where the
 wind blows to, with the direction it comes from, its speed, and the head/cross
 components for the current heading (tap either to shrink both). The camera HUD
-has the same gauge relative to the nose.
+has the same gauge, relative to the nose by default; tap it to switch to
+north-up.
+
+**Resume Plan** rejoins the loop at the **nearest waypoint** (the next one if
+the aircraft is already on top of the nearest), not where it left off.
 
 Map tiles (OpenStreetMap / Esri World Imagery) are cached under
 `~/.cache/mavlink_gcs_ui/tiles`. The map works offline with whatever is

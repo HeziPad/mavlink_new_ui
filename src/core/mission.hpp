@@ -144,5 +144,10 @@ int seqToWaypointIndex(const std::vector<MissionItem>& items, int seq);
 
 // Horizontal length of one lap (wp1 -> ... -> wpN -> wp1), metres.
 double lapLength(const std::vector<UserWaypoint>& wps);
+// Where Resume Plan rejoins the loop: the seq of the loop waypoint nearest to
+// (lat, lon). If the aircraft is already within `skip_within_m` of it, the
+// next one around the loop instead (so it doesn't turn back over it).
+// -1 when the mission has no loop.
+int nearestLoopSeq(const std::vector<MissionItem>& items, double lat, double lon, double skip_within_m);
 
 }  // namespace gcs

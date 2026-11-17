@@ -52,6 +52,7 @@ struct AppSettings {
     double cruise_speed = 18.0;
     int alt_unit = 0;            // units::Alt
     int hud_reference = 0;       // CameraView::HudRef
+    bool wind_north_up = false;  // camera HUD wind gauge
     bool ball_collapsed = false; // map attitude ball
     bool trail_on = true;
     int trail_secs = 120;        // 0 = all
@@ -171,6 +172,8 @@ private:
     // radius from measured laps so the flown circle matches the drawn one
     OrbitTrim trim_;
     Clock::time_point trim_pos_rx_{};
+    TrackPredictor track_;  // ground track for the HUD's flight-path marker
+    Clock::time_point track_rx_{};
     void updateOrbitTrim();
     MapView::OrbitDraw orbitDraw() const;
     bool orbit_dirty_ = false;
@@ -181,7 +184,6 @@ private:
     // Land: the approach is recomputed with the current wind and re-uploaded
     // first; the jump into it happens when the upload is acknowledged.
     bool land_pending_ = false;
-    int resume_seq_ = 2;  // loop item to resume after an aborted landing
 };
 
 }  // namespace gcs::ui
