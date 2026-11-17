@@ -1,5 +1,6 @@
 #include "check.hpp"
 #include "core/geo.hpp"
+#include "core/vehicle_state.hpp"
 
 using namespace gcs::geo;
 
@@ -101,7 +102,192 @@ static void testProjectRoundTrip() {
     CHECK(!projectNed(cam, Attitude{}, Vec3{-100.0, 0.0, 0.0}, rx, ry));
 }
 
+static void testMountComposition() {
+    // level aircraft heading 90, camera tilted down 30 and panned right 40
+    const Attitude body{0.0, 0.0, 90.0};
+    const Attitude cam = composeMount(body, 40.0, -30.0);
+    CHECK_NEAR(cam.yaw_deg, 130.0, 1e-6);
+    CHECK_NEAR(cam.pitch_deg, -30.0, 1e-6);
+    const Attitude rel = relativeTo(body, cam);
+    CHECK_NEAR(rel.yaw_deg, 40.0, 1e-6);
+    CHECK_NEAR(rel.pitch_deg, -30.0, 1e-6);
+    // pitched-up aircraft: earth elevation = body pitch + mount tilt (no pan)
+    const Attitude up{0.0, 10.0, 0.0};
+    CHECK_NEAR(composeMount(up, 0.0, -30.0).pitch_deg, -20.0, 1e-6);
+}
+
+static void testPrediction() {
+    using namespace gcs;
+    VehicleState s;
+    const auto t0 = Clock::now();
+    s.roll_deg = 10.0;
+    s.roll_rate = 20.0;  // deg/s
+    s.yaw_deg = 359.0;
+    s.yaw_rate = 10.0;
+    s.att_rx = t0;
+    auto a = predictAttitude(s, t0 + std::chrono::milliseconds(100));
+    CHECK_NEAR(a.roll_deg, 12.0, 1e-6);
+    CHECK_NEAR(a.yaw_deg, 0.0, 1e-6);  // wraps
+    // capped: a stale sample does not run away
+    a = predictAttitude(s, t0 + std::chrono::seconds(5));
+    CHECK_NEAR(a.roll_deg, 10.0 + 20.0 * kMaxPredictAttitude, 1e-6);
+
+    s.lat = 47.0;
+    s.lon = 8.0;
+    s.alt_rel = 50.0;
+    s.vn = 20.0;
+    s.vd = -2.0;  // climbing
+    s.pos_rx = t0;
+    const auto p = predictPosition(s, t0 + std::chrono::milliseconds(250));
+    CHECK_NEAR(distance(47.0, 8.0, p.lat, p.lon), 5.0, 0.01);
+    CHECK_NEAR(p.alt_rel, 50.5, 1e-6);
+
+    // body rates -> euler rates: level, pure yaw rate
+    double rr = 0, pr = 0, yr = 0;
+    bodyRatesToEuler(0.0, 0.0, 0.0, 0.0, 0.1, rr, pr, yr);
+    CHECK_NEAR(yr, 0.1 * kRadToDeg, 1e-9);
+    // banked 60 deg in a level turn: yaw rate comes from q and r
+    bodyRatesToEuler(60.0 * kDegToRad, 0.0, 0.0, 0.1 * std::sin(60.0 * kDegToRad), 0.1 * std::cos(60.0 * kDegToRad),
+                     rr, pr, yr);
+    CHECK_NEAR(yr, 0.1 * kRadToDeg, 1e-9);
+    CHECK_NEAR(pr, 0.0, 1e-9);
+}
+
+static void testCameraLos() {
+    using namespace gcs;
+    VehicleState s;
+    const auto now = Clock::now();
+    const Attitude ac{0.0, 5.0, 100.0};
+    // no gimbal: fixed tilt
+    auto los = cameraLos(s, ac, -30.0, now);
+    CHECK(!los.gimbal);
+    CHECK_NEAR(los.tilt_rel, -30.0, 1e-9);
+    CHECK_NEAR(los.earth.pitch_deg, -25.0, 1e-6);
+    // ArduPilot gimbal: earth-frame tilt, vehicle-frame pan
+    s.has_gimbal = true;
+    s.gimbal_rx = now;
+    s.gimbal_pitch = -40.0;
+    s.gimbal_yaw = 30.0;
+    los = cameraLos(s, ac, -30.0, now);
+    CHECK(los.gimbal);
+    CHECK_NEAR(los.earth.yaw_deg, 130.0, 1e-6);
+    CHECK_NEAR(los.earth.pitch_deg, -40.0, 1e-6);
+    // relative to the platform (body axes): close to the reported pan, and
+    // composing it back onto the aircraft gives the same earth LOS
+    CHECK_NEAR(los.pan_rel, 30.0, 3.0);
+    CHECK_NEAR(los.tilt_rel, -45.0, 3.0);
+    const Attitude again = composeMount(ac, los.pan_rel, los.tilt_rel);
+    CHECK_NEAR(wrap180(again.yaw_deg - los.earth.yaw_deg), 0.0, 1e-6);
+    CHECK_NEAR(again.pitch_deg, los.earth.pitch_deg, 1e-6);
+    // body-frame reporting (ArduPilot servo mount): angles are relative to the airframe
+    los = cameraLos(s, ac, -30.0, now, true);
+    CHECK_NEAR(los.pan_rel, 30.0, 1e-9);
+    CHECK_NEAR(los.tilt_rel, -40.0, 1e-9);
+    CHECK_NEAR(los.earth.pitch_deg, composeMount(ac, 30.0, -40.0).pitch_deg, 1e-9);
+    // stale gimbal falls back
+    los = cameraLos(s, ac, -30.0, now + std::chrono::seconds(5));
+    CHECK(!los.gimbal);
+}
+
+static void testFootprint() {
+    // straight down, square image, 90 deg FOV, 100 m up: a 200 m square
+    CameraModel cam;
+    cam.hfov_deg = 90.0;
+    cam.mount_pitch_deg = 0.0;
+    cam.width = cam.height = 1000.0;
+    Attitude down{0.0, -90.0, 0.0};
+    Footprint fp = cameraFootprint(cam, down, 100.0, 3000.0);
+    CHECK(fp.valid);
+    CHECK(fp.outline.size() == 32);
+    double maxn = 0, maxe = 0;
+    for (size_t i = 0; i < fp.outline.size(); ++i) {
+        CHECK(!fp.open[i]);
+        maxn = std::max(maxn, std::abs(fp.outline[i].north));
+        maxe = std::max(maxe, std::abs(fp.outline[i].east));
+    }
+    CHECK_NEAR(maxn, 100.0, 1.0);
+    CHECK_NEAR(maxe, 100.0, 1.0);
+    CHECK_NEAR(fp.center.range, 0.0, 0.5);
+
+    // 30 deg down looking north, 16:9: a trapezoid, wider far than near
+    cam.hfov_deg = 60.0;
+    cam.width = 1600.0;
+    cam.height = 900.0;
+    Attitude tilted{0.0, -30.0, 0.0};
+    fp = cameraFootprint(cam, tilted, 100.0, 3000.0, 4);
+    CHECK(fp.valid);
+    CHECK_NEAR(fp.center.range, 100.0 / std::tan(30.0 * kDegToRad), 1.0);
+    // corners: 0 = top-left (far), 4 = top-right, 8 = bottom-right (near), 12 = bottom-left
+    const double far_w = fp.outline[4].east - fp.outline[0].east;
+    const double near_w = fp.outline[8].east - fp.outline[12].east;
+    CHECK(far_w > near_w * 1.5);
+    CHECK(fp.outline[0].north > fp.outline[12].north);
+    for (bool o : fp.open) {
+        CHECK(!o);
+    }
+
+    // looking just above the horizon: the top edge is open at max range
+    Attitude level{0.0, 0.0, 90.0};
+    fp = cameraFootprint(cam, level, 100.0, 1500.0, 4);
+    CHECK(fp.valid);  // the lower half still sees the ground
+    CHECK(fp.open[0] && fp.open[2]);
+    CHECK(!fp.open[8]);
+    CHECK_NEAR(std::hypot(fp.outline[0].north, fp.outline[0].east), 1500.0, 1.0);
+}
+
+static void testPredictVelocity() {
+    using namespace gcs;
+    // constant 15 deg/s right turn at 25 m/s, sampled heading 090
+    VehicleState s;
+    const Clock::time_point t0 = Clock::time_point{} + std::chrono::hours(1);
+    s.pos_rx = t0;
+    s.vn = 0.0;
+    s.ve = 25.0;
+    s.yaw_rate = 15.0;
+    for (double age : {0.0, 0.05, 0.1}) {
+        const auto v = predictVelocity(s, t0 + std::chrono::microseconds(static_cast<long>(age * 1e6)));
+        const double track = wrap360(std::atan2(v.ve, v.vn) * kRadToDeg);
+        CHECK_NEAR(track, 90.0 + 15.0 * age, 0.1);
+        CHECK_NEAR(std::hypot(v.vn, v.ve), 25.0, 1e-9);
+    }
+    // capped like the position prediction
+    const auto far = predictVelocity(s, t0 + std::chrono::seconds(5));
+    CHECK_NEAR(wrap360(std::atan2(far.ve, far.vn) * kRadToDeg), 90.0 + 15.0 * kMaxPredictPosition, 0.1);
+}
+
+static void testTrackPredictor() {
+    using namespace gcs;
+    // orbit in wind: the track turns at a varying rate that isn't the yaw rate
+    TrackPredictor tp;
+    const Clock::time_point t0 = Clock::time_point{} + std::chrono::hours(1);
+    auto track_at = [](double t) { return 0.3 * t + 0.15 * std::sin(0.3 * t); };  // rad
+    auto speed_at = [](double t) { return 25.0 + 6.0 * std::cos(0.3 * t); };
+    double worst = 0.0;
+    for (int k = 0; k < 100; ++k) {
+        const double ts = k * 0.1;  // 10 Hz samples
+        const auto t = t0 + std::chrono::milliseconds(k * 100);
+        tp.addSample(speed_at(ts) * std::cos(track_at(ts)), speed_at(ts) * std::sin(track_at(ts)), 0.0, t, 0.0);
+        if (k < 3) {
+            continue;
+        }
+        for (int f = 1; f < 6; ++f) {  // frames between samples
+            const double tf = ts + f * 0.016;
+            const auto v = tp.at(t + std::chrono::milliseconds(f * 16));
+            const double err = std::abs(std::remainder(std::atan2(v.ve, v.vn) - track_at(tf), 2 * kPi)) * kRadToDeg;
+            worst = std::max(worst, err);
+        }
+    }
+    CHECK(worst < 0.2);  // deg; the yaw-rate method can be off by degrees here
+    CHECK(!TrackPredictor{}.valid());
+}
+
 int main() {
+    testTrackPredictor();
+    testPredictVelocity();
+    testFootprint();
+    testMountComposition();
+    testPrediction();
+    testCameraLos();
     testDistanceBearing();
     testOffsetRoundTrip();
     testCameraNadir();

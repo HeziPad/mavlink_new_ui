@@ -1,6 +1,7 @@
 #include "command_sender.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 
 namespace gcs::link {
@@ -22,6 +23,14 @@ CommandRequest makeArm(bool arm) {
     return r;
 }
 
+CommandRequest makeSetSafety(bool safe) {
+    CommandRequest r;
+    r.command = MAV_CMD_DO_SET_SAFETY_SWITCH_STATE;
+    r.params[0] = safe ? static_cast<float>(SAFETY_SWITCH_STATE_SAFE) : static_cast<float>(SAFETY_SWITCH_STATE_DANGEROUS);
+    r.label = safe ? "SAFETY ON" : "SAFETY OFF";
+    return r;
+}
+
 CommandRequest makeVtolTakeoff(float alt_rel) {
     // ArduPlane runs a GUIDED quadplane takeoff from MAV_CMD_NAV_TAKEOFF
     // (quadplane.do_user_takeoff); NAV_VTOL_TAKEOFF (84) is only a mission item
@@ -33,11 +42,28 @@ CommandRequest makeVtolTakeoff(float alt_rel) {
     return r;
 }
 
-CommandRequest makeSetMissionCurrent(uint16_t seq) {
+CommandRequest makeSetMissionCurrent(uint16_t seq, bool reset) {
     CommandRequest r;
     r.command = MAV_CMD_DO_SET_MISSION_CURRENT;
     r.params[0] = static_cast<float>(seq);
+    r.params[1] = reset ? 1.0f : 0.0f;
     r.label = "MISSION " + std::to_string(seq);
+    return r;
+}
+
+CommandRequest makeReposition(double lat, double lon, float alt_rel, float radius_m, bool ccw) {
+    CommandRequest r;
+    r.command = MAV_CMD_DO_REPOSITION;
+    r.as_int = true;
+    r.frame = MAV_FRAME_GLOBAL_RELATIVE_ALT_INT;
+    r.params[0] = -1.0f;                                                    // ground speed: default
+    r.params[1] = static_cast<float>(MAV_DO_REPOSITION_FLAGS_CHANGE_MODE);  // -> GUIDED
+    r.params[2] = radius_m;                                                 // loiter radius (planes)
+    r.params[3] = ccw ? 1.0f : 0.0f;                                        // ArduPlane: 0 = clockwise
+    r.x = static_cast<int32_t>(std::llround(lat * 1.0e7));
+    r.y = static_cast<int32_t>(std::llround(lon * 1.0e7));
+    r.z = alt_rel;
+    r.label = "ORBIT";
     return r;
 }
 
@@ -60,10 +86,16 @@ const char* CommandSender::resultName(uint8_t mav_result) {
 void CommandSender::transmit(Pending& p, Clock::time_point now) {
     mavlink_message_t msg{};
     const auto& q = p.req.params;
-    mavlink_msg_command_long_pack(ids_.own_sys, ids_.own_comp, &msg, ids_.target_sys,
-                                  ids_.target_comp, p.req.command,
-                                  static_cast<uint8_t>(std::min(p.attempts, 255)), q[0], q[1], q[2],
-                                  q[3], q[4], q[5], q[6]);
+    if (p.req.as_int) {
+        mavlink_msg_command_int_pack(ids_.own_sys, ids_.own_comp, &msg, ids_.target_sys, ids_.target_comp,
+                                     p.req.frame, p.req.command, 0, 0, q[0], q[1], q[2], q[3], p.req.x, p.req.y,
+                                     p.req.z);
+    } else {
+        mavlink_msg_command_long_pack(ids_.own_sys, ids_.own_comp, &msg, ids_.target_sys,
+                                      ids_.target_comp, p.req.command,
+                                      static_cast<uint8_t>(std::min(p.attempts, 255)), q[0], q[1], q[2],
+                                      q[3], q[4], q[5], q[6]);
+    }
     p.attempts += 1;
     p.last_tx = now;
     send_(msg);

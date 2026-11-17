@@ -1,6 +1,7 @@
 #include "waypoint_panel.hpp"
 
 #include "theme.hpp"
+#include "units.hpp"
 
 #include <QFontMetrics>
 #include <QHBoxLayout>
@@ -72,12 +73,15 @@ WaypointPanel::WaypointPanel(QWidget* parent) : QWidget(parent) {
     st->setContentsMargins(0, 0, 0, 0);
     st->setSpacing(6);
     for (int d : {-10, -1, 1, 10}) {
-        auto* b = makeButton(d > 0 ? QStringLiteral("+%1").arg(d) : QString::number(d));
+        auto* b = makeButton(QStringLiteral("+50"));  // widest label (feet) sizes the button
+        b->setText(units::altStepLabel(d));
         b->setAutoRepeat(true);  // press and hold keeps stepping
         b->setAutoRepeatDelay(400);
         b->setAutoRepeatInterval(90);
-        connect(b, &QPushButton::clicked, this, [this, d] { emit altitudeDelta(static_cast<float>(d)); });
+        connect(b, &QPushButton::clicked, this,
+                [this, d] { emit altitudeDelta(static_cast<float>(units::altStepMeters(d))); });
         st->addWidget(b);
+        alt_steps_.push_back({b, d});
     }
     outer->addWidget(steppers_);
 
@@ -121,7 +125,7 @@ void WaypointPanel::showWaypoint(int index, float alt_rel) {
     landing_ = false;
     title_->setText(QStringLiteral("WAYPOINT %1").arg(index + 1));
     title_->setStyleSheet(QStringLiteral("color: #ffb547;"));
-    alt_->setText(QStringLiteral("%1 m").arg(alt_rel, 0, 'f', 0));
+    alt_->setText(units::altText(alt_rel));
     alt_->show();
     note_->hide();
     steppers_->show();
@@ -133,7 +137,7 @@ void WaypointPanel::showLanding(float approach_alt) {
     landing_ = true;
     title_->setText(QStringLiteral("LANDING POINT"));
     title_->setStyleSheet(QStringLiteral("color: #5cff9d;"));
-    alt_->setText(QStringLiteral("%1 m").arg(approach_alt, 0, 'f', 0));
+    alt_->setText(units::altText(approach_alt));
     alt_->show();
     note_->show();
     steppers_->show();
@@ -159,6 +163,12 @@ void WaypointPanel::paintEvent(QPaintEvent*) {
     drawGlass(p, chamferPath(r, 12), accent, 0.6, kGlassDeep);
     p.setPen(QPen(accent, 2));
     p.drawLine(QPointF(r.left() + 1, r.top() + 12), QPointF(r.left() + 12, r.top() + 1));
+}
+
+void WaypointPanel::unitsChanged() {
+    for (const auto& [b, d] : alt_steps_) {
+        b->setText(units::altStepLabel(d));
+    }
 }
 
 }  // namespace gcs::ui

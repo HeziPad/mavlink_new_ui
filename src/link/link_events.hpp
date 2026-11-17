@@ -17,7 +17,6 @@ struct LinkEvent {
         MissionUploaded,   // items
         MissionDownloaded, // items
         MissionFailed,     // upload flag, text
-        GuidedResult,      // ok, text
         VehicleConnected,  // first heartbeat from a vehicle (sysid in done)
         Error,             // text
     };

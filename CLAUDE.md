@@ -10,7 +10,7 @@ Game-style ground control station for an ArduPilot **QuadPlane**: C++17, Qt 6 Wi
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo   # -DGCS_WITH_GSTREAMER=OFF to skip video
 cmake --build build
 ctest --test-dir build --output-on-failure      # all tests
-ctest --test-dir build -R mission_transfer      # one test (geo, mission_builder, mission_transfer, command_sender, lift_rotors)
+ctest --test-dir build -R mission_transfer      # one test (geo, mission_builder, mission_transfer, command_sender, lift_rotors, health, orbit_trim)
 ./build/test_geo                                # or run a test binary directly
 ./build/mavlink_gcs_ui                          # listens on udp 127.0.0.1:14551
 ```
@@ -27,29 +27,42 @@ There is no linter; the build uses `-Wall -Wextra -Wpedantic` and should stay wa
 
 Three layers with a strict dependency direction: `core` ← `link` ← `ui`.
 
-- **`src/core/`**: pure C++, no Qt and no I/O. `VehicleState`, ArduPlane mode numbers and names, geo math including camera-ray-to-ground casting, and the mission builder.
+- **`src/core/`**: pure C++, no Qt and no I/O. `VehicleState`, ArduPlane mode numbers and names, geo math including camera-ray-to-ground casting and the camera footprint, the mission builder, `health` (EKF/sensor/GPS/STATUSTEXT → plain-language advisories) and `OrbitTrim`.
 - **`src/link/`**: plain C++ plus POSIX sockets, also Qt-free. It is compiled together with core into the `gcs_core` static library, which is what the tests link against. `MavlinkClient` owns a single worker thread that owns the socket, parser, `MissionTransfer` state machine and `CommandSender` (retries and ACK handling). The UI thread only ever:
   - calls `snapshot()` to copy the latest `VehicleState`,
   - calls `pollEvents()` to drain `LinkEvent`s (command results, STATUSTEXTs, mission results),
   - calls request methods (`setMode`, `runSequence`, `uploadMission`, `guidedGoto`, ...), which post closures that run on the worker.
 
   Keep it this way: don't touch worker-owned members from other threads.
-- **`src/ui/`**: Qt widgets, touch-first. Map touch is handled in `MapView::event`: one finger goes through the same `pointer*` path as the mouse, and two fingers pinch. In PiP mode touch is ignored, so Qt synthesises the click that `ViewHost` swaps on. Other widgets rely on Qt's touch→mouse synthesis. Keep targets ≥ 44–48 px and don't put information behind hover only. `MainWindow` drives everything from a 16 ms `PreciseTimer` `frame()` tick that snapshots state, drains events and updates widgets. Rendering is mostly custom `paintEvent` code (map, camera HUD, effects overlay), not stock widgets. `ViewHost` handles the full-bleed main view and the swappable PiP. `ControlDock` holds the six action buttons and their lock/reason logic. Tiles are fetched and disk-cached by `TileCache`. Video is only compiled when `GCS_HAVE_GSTREAMER` is defined.
+- **`src/ui/`**: Qt widgets, touch-first. Map touch is handled in `MapView::event`: one finger goes through the same `pointer*` path as the mouse, and two fingers pinch. In PiP mode touch is ignored, so Qt synthesises the click that `ViewHost` swaps on. Other widgets rely on Qt's touch→mouse synthesis. Keep targets ≥ 44–48 px and don't put information behind hover only. `MainWindow` drives everything from a 16 ms `PreciseTimer` `frame()` tick that snapshots state, drains events and updates widgets. Rendering is mostly custom `paintEvent` code (map, camera HUD, effects overlay), not stock widgets. `ViewHost` handles the full-bleed main view and the swappable PiP. `ControlDock` holds the six action buttons and their lock/reason logic. Tiles are fetched and disk-cached by `TileCache`. Video is only compiled when `GCS_HAVE_GSTREAMER` is defined. Everything internal is in metres; any altitude shown to the user goes through `ui/units` (`altText`, `altStepMeters`), which follows the m/ft setting. Problems are shown as `core::health` advisories in `AlertsPanel` (opened from SYSTEMS or the alert banner), not as raw flags.
 
 `include/c_library_v2/` holds the vendored, generated MAVLink headers. They are included as SYSTEM, and link sources disable `-Wpedantic` and `-Waddress-of-packed-member`. Don't edit them.
 
 ## ArduPlane / SITL gotchas (verified against SITL)
 
 - GUIDED takeoff must use `MAV_CMD_NAV_TAKEOFF` (22), not `MAV_CMD_NAV_VTOL_TAKEOFF` (84).
-- Product rule: **the lift rotors are only for takeoff and landing.** Hold is always LOITER, never QLOITER. A GUIDED takeoff ends in a rotor hover (`QPOS_POSITION2`), so `MainWindow::checkTakeoffHandoff` switches to LOITER at about the takeoff altitude. `Q_GUIDED_MODE` must be 0, or GUIDED targets end in a hover. The GCS reads it and alerts. Don't "solve" the rule by disarming in flight: that stops the pusher too.
-- The mission layout (`core/mission.cpp`) is `HOME` → `NAV_VTOL_TAKEOFF` → WPs → `DO_JUMP`(→2, repeat −1) → optional `NAV_VTOL_LAND` with `param1 = 1`, which is the fixed-wing spiral approach. The land item is only reached through `MAV_CMD_DO_SET_MISSION_CURRENT` (Land button).
-  - The land item's `z` is the spiral's target altitude, and it must not be 0. `Location::sanitize` reads a relative alt of 0 as "current altitude", so the aircraft would back-transition at cruise height and descend the whole way on the rotors. This was seen in SITL.
-  - The "VTOL land too short" arming check only fires when a `NAV_WAYPOINT` directly precedes the land item. The `DO_JUMP` in between avoids it.
+- Product rule: **the lift rotors are only for takeoff and landing.** Hold and Guide are GUIDED orbits via `DO_REPOSITION` (COMMAND_INT): `param2` flag CHANGE_MODE, `param3` radius, `param4` 0 = CW. Re-sending with the same centre changes the radius, altitude or direction live, which LOITER can't do (it only uses `WP_LOITER_RAD`). They are never QLOITER. A GUIDED takeoff ends in a rotor hover (`QPOS_POSITION2`), so `MainWindow::checkTakeoffHandoff` calls `hold()` at about the takeoff altitude. `Q_GUIDED_MODE` must be 0, or GUIDED targets end in a hover. The GCS reads it and alerts. Don't "solve" the rule by disarming in flight: that stops the pusher too.
+- The mission layout (`core/mission.cpp`) is `HOME` → `NAV_VTOL_TAKEOFF` → WPs → `DO_JUMP`(→2, repeat −1) → optional `NAV_LOITER_TO_ALT` (the approach circle beside L, ±radius = CW/CCW, `param4` = 1 tangent exit) → `NAV_VTOL_LAND` (`param1` = 0). The landing is only reached through `MAV_CMD_DO_SET_MISSION_CURRENT`. The Land button first re-uploads the approach with the current `WIND`. Auto after an aborted landing sets the current item back to the loop.
+  - ArduPlane only stays on the wing toward a VTOL_LAND beyond `transition_threshold = 1.5·v²/(2·Q_TRANS_DECEL)` (about 234 m at 25 m/s). Closer than that it goes straight to rotor position control. Its built-in spiral option (`param1` = 1) breaks out about one loiter radius from L, which is inside that threshold. In SITL that meant 79 s on the rotors. That's why the GCS builds its own circle and straight leg (`computeLandingApproach`).
+  - `NAV_LOITER_TO_ALT` completes when the altitude is reached *and* the aircraft is heading toward the next item, so it leaves on the tangent.
+  - The circle's `z` is the approach altitude. It must not be 0, because `Location::sanitize` reads a relative 0 as "current altitude".
+  - The VTOL_LAND's `z` must be 0, meaning ground at home level. Without a rangefinder, ArduPlane uses the land item's altitude as the ground for its descent profile (`relative_ground_altitude` → `height_above_target`). With z = approach alt, it thinks it's already down and descends the whole way at `Q_LAND_FINAL_SPD` (0.5 m/s). In SITL that was 61 s instead of about 20 s.
+  - The "VTOL land too short" arming check only fires when a `NAV_WAYPOINT` directly precedes the land item. The `LOITER_TO_ALT` in between avoids it.
   - A one-waypoint loop uses `NAV_LOITER_UNLIM` instead.
+- ArduPlane flies a GUIDED loiter bigger than `param3`: `AP_L1_Control::loiter_radius()` scales it by EAS2TAS² when `NAVL1_LIM_BANK` = 0 (+7 % at SITL's ~700 m AMSL), and L1 overshoots small circles (80 m flew as 91 m). `core::OrbitTrim` measures whole laps and commands `requested / ratio`, so send `trim_.commandRadius()`, not the requested radius.
 - Q_ASSIST can spin the lift rotors in cruise, and speed assist sends no STATUSTEXT. The LIFT ROTORS indicator therefore reads `SERVO_OUTPUT_RAW` and maps outputs with `SERVOn_FUNCTION` 33–40.
 - QRTL entered in wing-borne flight flies home on the wing, then lands vertically.
+- Gimbal: ArduPilot's `GIMBAL_DEVICE_ATTITUDE_STATUS` gives roll/pitch in the earth frame and yaw in the vehicle frame (flag). `core::cameraLos` turns that, or the fixed tilt setting, into an earth-frame camera attitude plus pan/tilt relative to the platform.
 - ArduPlane reports `vtol_state` as FW while parked on the ground, so don't infer "hovering" from it alone.
+- Resuming AUTO continues from the vehicle's *current* item. After a Hold during the AUTO VTOL climb that is still `NAV_VTOL_TAKEOFF`, and AUTO would hover and climb on the rotors again. `launchOrAuto` always sets the current item to `nearestLoopSeq()` first.
+- After a VTOL landing the mission stays on the land item and AUTO won't arm ("In landing sequence", "missing takeoff waypoint"). Launch sends `SET_MISSION_CURRENT(1, reset)` before AUTO + arm.
+- Safety switch: `SYS_STATUS` `MOTOR_OUTPUTS` is always present and *enabled* unless safety is engaged (`safetyState()`). Toggle with `MAV_CMD_DO_SET_SAFETY_SWITCH_STATE`; SITL implements it. Never while armed: it cuts every output, the pusher and servos included.
+- RTL, QRTL and QLAND refuse arming ("mode not armable"), so after a QRTL landing the pre-arm bit fails although nothing is wrong. `reconcileLandedMode` turns that into an info card.
 - Don't gate Launch on the prearm-healthy bit. It is evaluated for the *current* mode (e.g. "QRTL mode not armable") and doesn't apply to the mode Launch switches to.
+
+## UI motion
+
+Telemetry arrives at 10–25 Hz. Don't draw the latest sample through a fast exponential tween: it arrives in about 60 ms and then sits still, which looks like a staircase. `MainWindow::frame` pulls every frame and calls `predictAttitude` / `predictPosition` (last sample + rate × age, capped), then views apply light smoothing on top.
 
 ## Qt gotchas
 

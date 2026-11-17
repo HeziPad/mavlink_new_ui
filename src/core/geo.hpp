@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>
+
 namespace gcs::geo {
 
 constexpr double kPi = 3.14159265358979323846;
@@ -47,6 +49,15 @@ struct Attitude {
     double yaw_deg = 0.0;
 };
 
+// Earth-frame attitude of a camera mounted on `body` at (mount_yaw, mount_pitch)
+// relative to the body (yaw first, then pitch; no mount roll). With an earth
+// frame camera attitude, use a CameraModel with mount_pitch_deg = 0.
+Attitude composeMount(const Attitude& body, double mount_yaw_deg, double mount_pitch_deg);
+
+// Attitude of `cam` (earth frame) expressed relative to `body`: yaw = pan,
+// pitch = tilt, roll = camera roll, all relative to the platform.
+Attitude relativeTo(const Attitude& body, const Attitude& cam);
+
 // Direction (not normalised) of the ray through pixel (px, py) in NED.
 Vec3 pixelRayNed(const CameraModel& cam, const Attitude& att, double px, double py);
 
@@ -70,5 +81,18 @@ struct GroundTarget {
 GroundTarget cameraRayToGround(const CameraModel& cam, const Attitude& att, double px, double py,
                                double alt_agl, double max_range = 2000.0,
                                double fallback_range = 300.0);
+
+// Ground area the camera sees: its image border cast onto flat ground
+// `alt_agl` below. Border points whose rays miss the ground within max_range
+// (at or above the horizon) are placed max_range out along their bearing and
+// flagged `open`, so the far edge can be drawn as "continues beyond".
+struct Footprint {
+    bool valid = false;           // at least part of the image sees the ground
+    std::vector<NE> outline;      // clockwise around the image border
+    std::vector<bool> open;       // per outline point
+    GroundTarget center;          // where the boresight hits
+};
+Footprint cameraFootprint(const CameraModel& cam, const Attitude& att, double alt_agl, double max_range,
+                          int per_edge = 8);
 
 }  // namespace gcs::geo

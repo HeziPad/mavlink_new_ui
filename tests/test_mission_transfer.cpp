@@ -59,7 +59,11 @@ std::vector<MissionItem> sampleMission() {
     MissionPlan plan;
     plan.wps = {{-35.36, 149.16, 80.0f}, {-35.35, 149.17, 80.0f}};
     plan.land = UserWaypoint{-35.362, 149.166, 30.0f};
-    return buildLoopMission(-35.363, 149.165, 584.0, plan, 40.0f);
+    ApproachInputs in;
+    in.from_lat = -35.36;
+    in.from_lon = 149.16;
+    const LandingApproach appr = computeLandingApproach(*plan.land, in);
+    return buildLoopMission(-35.363, 149.165, 584.0, plan, 40.0f, &appr);
 }
 
 uint16_t itemSeq(const mavlink_message_t& m) {

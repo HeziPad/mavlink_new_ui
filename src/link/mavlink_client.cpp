@@ -22,8 +22,9 @@ namespace gcs::link {
 
 namespace {
 
-constexpr size_t kTrailMax = 2000;
-constexpr double kTrailSpacing = 2.0;  // metres
+constexpr size_t kTrailMax = 10000;      // ~40 km: the map's "ALL" trail
+constexpr size_t kTrailTrim = 500;       // erase in chunks, not per point
+constexpr double kTrailSpacing = 4.0;  // metres
 
 VtolState toVtol(uint8_t v) {
     switch (v) {
@@ -119,23 +120,6 @@ MavlinkClient::MavlinkClient(Config cfg) : cfg_(std::move(cfg)) {
     commands_ = std::make_unique<CommandSender>(
         [this](const mavlink_message_t& m) { sendMessage(m); },
         [this](const CommandSender::Result& r) {
-            if (r.tag == "guide") {
-                if (!r.final) {
-                    return;
-                }
-                if (r.ok && guided_.armed_send) {
-                    guided_.armed_send = false;
-                    sendGuidedItem();
-                } else {
-                    guided_.armed_send = false;
-                    LinkEvent ev;
-                    ev.type = LinkEvent::Type::GuidedResult;
-                    ev.ok = false;
-                    ev.text = r.cancelled ? r.text : "GUIDED mode " + r.text;
-                    publish(std::move(ev));
-                }
-                return;
-            }
             LinkEvent ev;
             ev.type = r.final ? LinkEvent::Type::CommandResult : LinkEvent::Type::CommandStep;
             ev.tag = r.tag;
@@ -239,7 +223,6 @@ void MavlinkClient::uploadMission(std::vector<MissionItem> items) {
             publish(std::move(fail));
             return;
         }
-        guided_.pending = false;
         mission_->startUpload(std::move(items), Clock::now());
     });
 }
@@ -262,53 +245,6 @@ void MavlinkClient::downloadMission() {
         mission_->startDownload(Clock::now());
     });
 }
-
-void MavlinkClient::guidedGoto(double lat, double lon, float alt_rel) {
-    post([this, lat, lon, alt_rel]() {
-        auto reject = [this](const std::string& why) {
-            LinkEvent ev;
-            ev.type = LinkEvent::Type::GuidedResult;
-            ev.ok = false;
-            ev.text = why;
-            publish(std::move(ev));
-        };
-        if (!vehicle_locked_) {
-            reject("no vehicle link");
-            return;
-        }
-        if (mission_->busy()) {
-            reject("mission transfer in progress");
-            return;
-        }
-        guided_.lat = lat;
-        guided_.lon = lon;
-        guided_.alt = alt_rel;
-        guided_.attempts = 0;
-        guided_.pending = false;
-        if (state_.custom_mode != plane::GUIDED) {
-            guided_.armed_send = true;
-            commands_->runSequence("guide", {makeSetMode(plane::GUIDED, "GUIDED")}, Clock::now());
-        } else {
-            guided_.armed_send = false;
-            sendGuidedItem();
-        }
-    });
-}
-
-void MavlinkClient::sendGuidedItem() {
-    mavlink_message_t msg{};
-    mavlink_msg_mission_item_int_pack(ids_.own_sys, ids_.own_comp, &msg, ids_.target_sys,
-                                      ids_.target_comp, 0, MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
-                                      MAV_CMD_NAV_WAYPOINT, 2 /* current=2: guided */, 0, 0.0f,
-                                      0.0f, 0.0f, 0.0f, toE7(guided_.lat), toE7(guided_.lon),
-                                      guided_.alt, MAV_MISSION_TYPE_MISSION);
-    guided_.pending = true;
-    guided_.sent = Clock::now();
-    guided_.attempts += 1;
-    sendMessage(msg);
-}
-
-// ---- worker ---------------------------------------------------------------------
 
 bool MavlinkClient::openSocket() {
     auto fail = [this](const std::string& what) {
@@ -477,6 +413,11 @@ void MavlinkClient::handleMessage(const mavlink_message_t& msg) {
         publish(std::move(ev));
         return;
     }
+    if (msg.msgid == MAVLINK_MSG_ID_GIMBAL_DEVICE_ATTITUDE_STATUS) {
+        // from the autopilot (its mount driver) or a MAVLink gimbal component
+        decodeGimbal(msg);
+        return;
+    }
     if (msg.compid != ids_.target_comp) {
         return;
     }
@@ -485,18 +426,6 @@ void MavlinkClient::handleMessage(const mavlink_message_t& msg) {
         return;
     }
     if (commands_->handle(msg, now)) {
-        return;
-    }
-    if (msg.msgid == MAVLINK_MSG_ID_MISSION_ACK && guided_.pending) {
-        mavlink_mission_ack_t ack{};
-        mavlink_msg_mission_ack_decode(&msg, &ack);
-        guided_.pending = false;
-        LinkEvent ev;
-        ev.type = LinkEvent::Type::GuidedResult;
-        ev.ok = ack.type == MAV_MISSION_ACCEPTED;
-        ev.text = ev.ok ? "target accepted"
-                        : std::string("target ") + MissionTransfer::ackName(ack.type);
-        publish(std::move(ev));
         return;
     }
     decodeTelemetry(msg);
@@ -531,6 +460,10 @@ void MavlinkClient::decodeTelemetry(const mavlink_message_t& msg) {
         s.roll_deg = a.roll * geo::kRadToDeg;
         s.pitch_deg = a.pitch * geo::kRadToDeg;
         s.yaw_deg = geo::wrap360(a.yaw * geo::kRadToDeg);
+        bodyRatesToEuler(a.roll, a.pitch, a.rollspeed, a.pitchspeed, a.yawspeed, s.roll_rate, s.pitch_rate,
+                         s.yaw_rate);
+        s.att_rx = now;
+        ++attitude_count_;
         break;
     }
     case MAVLINK_MSG_ID_VFR_HUD: {
@@ -558,10 +491,12 @@ void MavlinkClient::decodeTelemetry(const mavlink_message_t& msg) {
         s.vn = p.vx / 100.0;
         s.ve = p.vy / 100.0;
         s.vd = p.vz / 100.0;
+        s.pos_rx = now;
+        ++position_count_;
         if (s.trail.empty() ||
             geo::distance(s.trail.back().lat, s.trail.back().lon, s.lat, s.lon) >= kTrailSpacing) {
-            s.trail.push_back({s.lat, s.lon, static_cast<float>(s.alt_rel)});
-            if (s.trail.size() > kTrailMax) {
+            s.trail.push_back({s.lat, s.lon, static_cast<float>(s.alt_rel), now});
+            if (s.trail.size() > kTrailMax + kTrailTrim) {
                 s.trail.erase(s.trail.begin(), s.trail.begin() + (s.trail.size() - kTrailMax));
             }
         }
@@ -619,6 +554,10 @@ void MavlinkClient::decodeTelemetry(const mavlink_message_t& msg) {
         mavlink_msg_ekf_status_report_decode(&msg, &e);
         s.has_ekf = true;
         s.ekf_flags = e.flags;
+        s.ekf_vel_var = e.velocity_variance;
+        s.ekf_pos_var = e.pos_horiz_variance;
+        s.ekf_hgt_var = e.pos_vert_variance;
+        s.ekf_mag_var = e.compass_variance;
         break;
     }
     case MAVLINK_MSG_ID_EXTENDED_SYS_STATE: {
@@ -629,6 +568,22 @@ void MavlinkClient::decodeTelemetry(const mavlink_message_t& msg) {
         s.landed = toLanded(e.landed_state);
         updateCruiseLatch(s);
         updateAssistTimer(s, now);
+        break;
+    }
+    case MAVLINK_MSG_ID_WIND: {
+        mavlink_wind_t w{};
+        mavlink_msg_wind_decode(&msg, &w);
+        // ArduPilot: direction the wind is coming FROM, degrees
+        s.has_wind = true;
+        s.wind_from_deg = geo::wrap360(w.direction);
+        s.wind_speed = w.speed;
+        break;
+    }
+    case MAVLINK_MSG_ID_NAV_CONTROLLER_OUTPUT: {
+        mavlink_nav_controller_output_t n{};
+        mavlink_msg_nav_controller_output_decode(&msg, &n);
+        s.has_nav = true;
+        s.nav_alt_error = n.alt_error;
         break;
     }
     case MAVLINK_MSG_ID_PARAM_VALUE:
@@ -673,7 +628,7 @@ void MavlinkClient::requestStreams(Clock::time_point now) {
                                          ids_.target_comp, MAV_DATA_STREAM_ALL, 4, 1);
     sendMessage(msg);
 
-    commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_ATTITUDE, 20.0), now);
+    commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_ATTITUDE, 25.0), now);
     commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_GLOBAL_POSITION_INT, 10.0), now);
     commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_VFR_HUD, 10.0), now);
     commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_SYS_STATUS, 2.0), now);
@@ -684,6 +639,9 @@ void MavlinkClient::requestStreams(Clock::time_point now) {
     commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_MISSION_CURRENT, 1.0), now);
     commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_HOME_POSITION, 0.5), now);
     commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_SERVO_OUTPUT_RAW, 4.0), now);
+    commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_NAV_CONTROLLER_OUTPUT, 4.0), now);
+    commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_WIND, 1.0), now);
+    commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_GIMBAL_DEVICE_ATTITUDE_STATUS, 10.0), now);
     last_stream_request_ = now;
     streams_requested_ = true;
 }
@@ -705,6 +663,15 @@ void MavlinkClient::requestParams(Clock::time_point now) {
     if (state_.q_guided_mode < 0) {
         request("Q_GUIDED_MODE");
     }
+    if (state_.airspeed_cruise < 0) {
+        request("AIRSPEED_CRUISE");
+    }
+    if (state_.trans_decel < 0) {
+        request("Q_TRANS_DECEL");
+    }
+    if (state_.loiter_radius < 0) {
+        request("WP_LOITER_RAD");
+    }
     for (int i = 0; i < 16; ++i) {
         if (state_.servo_function[i] == 0) {
             request("SERVO" + std::to_string(i + 1) + "_FUNCTION");
@@ -721,6 +688,18 @@ void MavlinkClient::handleParamValue(const mavlink_message_t& msg) {
         state_.q_guided_mode = value;
         return;
     }
+    if (name == "AIRSPEED_CRUISE") {
+        state_.airspeed_cruise = p.param_value;
+        return;
+    }
+    if (name == "Q_TRANS_DECEL") {
+        state_.trans_decel = p.param_value;
+        return;
+    }
+    if (name == "WP_LOITER_RAD") {
+        state_.loiter_radius = std::abs(p.param_value);
+        return;
+    }
     // SERVOn_FUNCTION, n = 1..16
     if (name.size() > 14 && name.compare(0, 5, "SERVO") == 0 &&
         name.compare(name.size() - 9, 9, "_FUNCTION") == 0) {
@@ -734,6 +713,31 @@ void MavlinkClient::handleParamValue(const mavlink_message_t& msg) {
             state_.servo_function[n - 1] = stored;
         }
     }
+}
+
+void MavlinkClient::decodeGimbal(const mavlink_message_t& msg) {
+    mavlink_gimbal_device_attitude_status_t g{};
+    mavlink_msg_gimbal_device_attitude_status_decode(&msg, &g);
+    const double w = g.q[0], x = g.q[1], y = g.q[2], z = g.q[3];
+    if (!std::isfinite(w) || std::abs(w * w + x * x + y * y + z * z - 1.0) > 0.1) {
+        return;  // NaN quaternion = attitude unknown
+    }
+    VehicleState& s = state_;
+    s.gimbal_roll = std::atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y)) * geo::kRadToDeg;
+    s.gimbal_pitch = std::asin(std::clamp(2.0 * (w * y - z * x), -1.0, 1.0)) * geo::kRadToDeg;
+    s.gimbal_yaw = std::atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z)) * geo::kRadToDeg;
+    // Spec: yaw is earth-frame unless YAW_IN_VEHICLE_FRAME (ArduPilot sets it).
+    // Older senders without either flag used the vehicle frame unless YAW_LOCK.
+    if (g.flags & GIMBAL_DEVICE_FLAGS_YAW_IN_VEHICLE_FRAME) {
+        s.gimbal_yaw_earth = false;
+    } else if (g.flags & GIMBAL_DEVICE_FLAGS_YAW_IN_EARTH_FRAME) {
+        s.gimbal_yaw_earth = true;
+    } else {
+        s.gimbal_yaw_earth = (g.flags & GIMBAL_DEVICE_FLAGS_YAW_LOCK) != 0;
+    }
+    s.has_gimbal = true;
+    s.gimbal_rx = Clock::now();
+    state_dirty_ = true;
 }
 
 void MavlinkClient::periodic(Clock::time_point now) {
@@ -758,7 +762,20 @@ void MavlinkClient::periodic(Clock::time_point now) {
         requestStreams(now);
     }
 
-    const bool params_missing = state_.q_guided_mode < 0 || state_.servo_functions_known < 16;
+    const bool params_missing = state_.q_guided_mode < 0 || state_.servo_functions_known < 16 ||
+                                state_.airspeed_cruise < 0 || state_.trans_decel < 0 ||
+                                state_.loiter_radius < 0;
+
+    if (rate_t0_ == Clock::time_point{}) {
+        rate_t0_ = now;
+    } else if (now - rate_t0_ >= seconds(1)) {
+        const double span = std::chrono::duration<double>(now - rate_t0_).count();
+        state_.attitude_hz = attitude_count_ / span;
+        state_.position_hz = position_count_ / span;
+        attitude_count_ = position_count_ = 0;
+        rate_t0_ = now;
+        state_dirty_ = true;
+    }
     if (params_missing && state_.has_heartbeat && param_rounds_ < 10 &&
         now - last_param_request_ >= seconds(3) && now - last_stream_request_ >= milliseconds(500)) {
         requestParams(now);
@@ -784,19 +801,6 @@ void MavlinkClient::periodic(Clock::time_point now) {
         now - last_stream_request_ >= milliseconds(1500) && !mission_->busy()) {
         initial_download_done_ = true;
         mission_->startDownload(now);
-    }
-
-    if (guided_.pending && now - guided_.sent >= milliseconds(1500)) {
-        if (guided_.attempts < 3) {
-            sendGuidedItem();
-        } else {
-            guided_.pending = false;
-            LinkEvent ev;
-            ev.type = LinkEvent::Type::GuidedResult;
-            ev.ok = false;
-            ev.text = "no response to guided target";
-            publish(std::move(ev));
-        }
     }
 
     mission_->tick(now);

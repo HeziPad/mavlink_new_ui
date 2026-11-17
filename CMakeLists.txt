@@ -33,7 +33,9 @@ set(GCS_LINK_SOURCES
 
 add_library(gcs_core STATIC
     src/core/geo.cpp
+    src/core/health.cpp
     src/core/mission.cpp
+    src/core/orbit_trim.cpp
     src/core/plane_modes.cpp
     src/core/vehicle_state.cpp
     ${GCS_LINK_SOURCES}
@@ -51,18 +53,24 @@ endif()
 # ---- application --------------------------------------------------------------
 add_executable(mavlink_gcs_ui
     src/main.cpp
+    src/ui/alerts_panel.cpp
+    src/ui/attitude_ball.cpp
     src/ui/camera_view.cpp
     src/ui/control_dock.cpp
     src/ui/fx_overlay.cpp
     src/ui/main_window.cpp
+    src/ui/orbit_panel.cpp
     src/ui/map_view.cpp
     src/ui/plan_strip.cpp
     src/ui/telemetry_bar.cpp
     src/ui/theme.cpp
+    src/ui/settings_screen.cpp
     src/ui/tile_cache.cpp
     src/ui/video_receiver.cpp
     src/ui/view_host.cpp
+    src/ui/units.cpp
     src/ui/waypoint_panel.cpp
+    src/ui/wind_gauge.cpp
 )
 target_link_libraries(mavlink_gcs_ui PRIVATE gcs_core Qt6::Widgets Qt6::Network)
 gcs_warnings(mavlink_gcs_ui)
@@ -76,7 +84,7 @@ endif()
 
 # ---- tests ----------------------------------------------------------------------
 enable_testing()
-foreach(name geo mission_builder mission_transfer command_sender lift_rotors)
+foreach(name geo mission_builder mission_transfer command_sender lift_rotors health orbit_trim)
     add_executable(test_${name} tests/test_${name}.cpp)
     target_link_libraries(test_${name} PRIVATE gcs_core)
     gcs_warnings(test_${name})

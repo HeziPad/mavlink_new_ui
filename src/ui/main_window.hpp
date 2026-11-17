@@ -1,13 +1,18 @@
 #pragma once
 
+#include "core/health.hpp"
+#include "core/orbit_trim.hpp"
 #include "core/vehicle_state.hpp"
 #include "link/link_events.hpp"
+#include "map_view.hpp"
 
 #include <QElapsedTimer>
 #include <QString>
 #include <QWidget>
 
 #include <memory>
+#include <optional>
+#include <set>
 #include <string>
 
 class QTimer;
@@ -18,11 +23,13 @@ class MavlinkClient;
 
 namespace gcs::ui {
 
+class AlertsPanel;
 class CameraView;
 class ControlDock;
 class FxOverlay;
-class MapView;
+class OrbitPanel;
 class PlanStrip;
+class SettingsScreen;
 class TelemetryBar;
 class TileCache;
 class VideoReceiver;
@@ -38,10 +45,17 @@ struct AppSettings {
     float land_approach_alt = 30.0f;  // fixed-wing spiral descends to this, then VTOL
     double camera_hfov = 70.0;
     double camera_tilt = -30.0;
+    bool gimbal_body_frame = false;  // ArduPilot servo mounts report body-frame angles
     int map_layer = 0;
     bool follow = true;
     bool reduced_motion = false;
     double cruise_speed = 18.0;
+    int alt_unit = 0;            // units::Alt
+    int hud_reference = 0;       // CameraView::HudRef
+    bool wind_north_up = false;  // camera HUD wind gauge
+    bool ball_collapsed = false; // map attitude ball
+    bool trail_on = true;
+    int trail_secs = 120;        // 0 = all
 
     static AppSettings load();
     void save() const;
@@ -73,8 +87,15 @@ private:
     void refreshDock();
     void refreshPlanStrip();
     void refreshPanel();
+    void refreshOrbitPanel();
+    void updateMotion();
+    void updateFootprint(const CameraLos& los);
     void checkTakeoffHandoff();
     void layoutOverlays();
+    void applyAltUnit(int unit);
+    void showAlerts(bool on);
+    QRect alertsArea() const;
+    int orbitPanelX() const;
 
     void onTriggered(int slot);
     void onLongPressed(int slot);
@@ -83,6 +104,10 @@ private:
     void syncPlan();
     void setGuide(bool on);
     void sendGuided(double lat, double lon);
+    void sendOrbit();
+    void adjustOrbit(float d_alt, float d_radius, bool flip);
+    double defaultRadius() const;
+    void startLandingApproach();
     void onCameraClick(double px, double py, double w, double h);
     void launchOrAuto();
     void hold();
@@ -102,7 +127,10 @@ private:
     ControlDock* dock_ = nullptr;
     PlanStrip* strip_ = nullptr;
     WaypointPanel* panel_ = nullptr;
+    OrbitPanel* orbit_panel_ = nullptr;
     FxOverlay* fx_ = nullptr;
+    SettingsScreen* settings_screen_ = nullptr;
+    AlertsPanel* alerts_ = nullptr;
 
     QTimer* timer_ = nullptr;
     QElapsedTimer clock_;
@@ -115,6 +143,11 @@ private:
     bool uploading_ = false;
     bool ever_connected_ = false;
     bool link_was_alive_ = false;
+    // plain-language health: state-derived advisories plus translated
+    // STATUSTEXTs; ids already announced with a toast
+    AdvisoryBook book_;
+    std::vector<Advisory> advisories_;
+    std::set<std::string> announced_;
     std::string last_mode_;
     int last_vtol_ = -1;
     // GUIDED takeoff ends in a rotor hover; hand over to LOITER on the wing
@@ -122,6 +155,35 @@ private:
     bool takeoff_handoff_ = false;
     bool handoff_seen_guided_ = false;
     LiftRotors last_lift_ = LiftRotors::Unknown;
+
+    // The circle we commanded in GUIDED (Hold or a Guide target) via
+    // DO_REPOSITION. Edited live from the orbit panel; changes are coalesced
+    // and re-sent at most every kOrbitResendMs.
+    struct Orbit {
+        double lat = 0.0;
+        double lon = 0.0;
+        float alt = 80.0f;
+        float radius = 80.0f;
+        bool ccw = false;
+        bool hold = true;  // false: a Guide target
+    };
+    std::optional<Orbit> orbit_;
+    // ArduPlane flies the loiter bigger than asked; this trims the commanded
+    // radius from measured laps so the flown circle matches the drawn one
+    OrbitTrim trim_;
+    Clock::time_point trim_pos_rx_{};
+    TrackPredictor track_;  // ground track for the HUD's flight-path marker
+    Clock::time_point track_rx_{};
+    void updateOrbitTrim();
+    MapView::OrbitDraw orbitDraw() const;
+    bool orbit_dirty_ = false;
+    bool orbit_trim_only_ = false;  // pending re-send is a silent trim correction
+    qint64 orbit_sent_ms_ = 0;
+    static constexpr qint64 kOrbitResendMs = 300;
+
+    // Land: the approach is recomputed with the current wind and re-uploaded
+    // first; the jump into it happens when the upload is acknowledged.
+    bool land_pending_ = false;
 };
 
 }  // namespace gcs::ui

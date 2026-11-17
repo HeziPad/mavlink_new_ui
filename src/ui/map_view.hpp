@@ -7,6 +7,7 @@
 
 #include <QColor>
 
+#include <optional>
 #include <vector>
 
 class QTouchEvent;
@@ -54,8 +55,34 @@ public:
     void deletePoint(int id);
     void insertAfter(int index);                  // midpoint to the next loop point
 
-    // ---- guided ------------------------------------------------------------
-    void setGuidedTarget(bool has, double lat = 0.0, double lon = 0.0);
+    // ---- motion (predicted, set every frame) ---------------------------------
+    void setAircraftPosition(double lat, double lon);
+    void setHeading(double deg);
+    void setAttitude(double roll_deg, double pitch_deg);  // attitude ball
+
+    // ---- camera footprint: the ground the camera sees ------------------------
+    struct FootprintDraw {
+        std::vector<geo::NE> outline;  // metres from the aircraft
+        std::vector<bool> open;        // beyond the horizon / max range
+        geo::NE center;
+        bool center_hit = false;
+    };
+    void setFootprint(std::optional<FootprintDraw> fp);
+    void setBallCollapsed(bool on);
+    // flight trail: off, or the last `secs` seconds (0 = everything kept)
+    void setTrail(bool on, int secs);
+
+    // ---- the circle commanded in GUIDED (Hold / Guide) --------------------------
+    struct OrbitDraw {
+        double lat = 0.0;
+        double lon = 0.0;
+        double radius = 80.0;
+        bool ccw = false;
+        bool hold = true;
+        double flown = -1.0;    // measured flown radius, < 0 unknown
+        bool trimmed = false;   // the flown circle matches the request
+    };
+    void setOrbit(std::optional<OrbitDraw> orbit);
     void ping(double lat, double lon, const QColor& color);
 
     void tick(double dt);
@@ -67,6 +94,7 @@ signals:
     void addToolChanged(AddTool t);
     void followChanged(bool on);
     void layerChanged(int layer);
+    void ballCollapsedChanged(bool collapsed);
 
 protected:
     bool event(QEvent* e) override;
@@ -92,6 +120,11 @@ private:
     void paintTiles(QPainter& p);
     void paintRoute(QPainter& p, const MissionPlan& plan, const QColor& c, bool editable, int active_index);
     void paintAircraft(QPainter& p);
+    void paintOrbit(QPainter& p);
+    void paintApproach(QPainter& p);
+    void paintFootprint(QPainter& p);
+    void paintBall(QPainter& p);
+    double metersPerPixel() const;
     void paintOverlayChrome(QPainter& p);
 
     TileCache* tiles_;
@@ -119,8 +152,10 @@ private:
     int sel_ = kNone;
     int alt_edit_wp_ = kNone;  // point whose altitude edits share one undo step
 
-    bool has_target_ = false;
-    double target_lat_ = 0.0, target_lon_ = 0.0;
+    std::optional<OrbitDraw> orbit_;
+    std::optional<LandingApproach> approach_;  // from the vehicle's mission
+    bool has_ac_ = false;
+    double ac_lat_ = 0.0, ac_lon_ = 0.0;       // predicted aircraft position
 
     struct Ping {
         double lat, lon;
@@ -141,7 +176,15 @@ private:
     double pinch_dist0_ = 0.0;
     double pinch_zoom0_ = 0.0;
     double pinch_lat_ = 0.0, pinch_lon_ = 0.0;
-    QRectF follow_chip_, layer_chip_;
+    QRectF follow_chip_, layer_chip_, ball_rect_;
+
+    std::optional<FootprintDraw> footprint_;
+    Tween roll_, pitch_;
+    bool has_att_ = false;
+    bool ball_collapsed_ = false;
+    bool trail_on_ = true;
+    int trail_secs_ = 120;
+    double ball_open_ = 1.0;  // 0 collapsed .. 1 open, animated
 
     AngleTween heading_;
 };

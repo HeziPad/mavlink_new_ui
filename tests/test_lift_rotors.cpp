@@ -107,7 +107,19 @@ static void testSpinDownIsNotAssist() {
     CHECK(liftRotorState(s, T0 + std::chrono::seconds(4)) == LiftRotors::Off);
 }
 
+static void testSafetyState() {
+    VehicleState s;
+    CHECK(safetyState(s) == SafetyState::Unknown);
+    s.has_sys_status = true;
+    CHECK(safetyState(s) == SafetyState::Unknown);  // not reported
+    s.sensors_present = kSensorMotorOutputs;
+    CHECK(safetyState(s) == SafetyState::Safe);
+    s.sensors_enabled = kSensorMotorOutputs;
+    CHECK(safetyState(s) == SafetyState::Live);
+}
+
 int main() {
+    testSafetyState();
     testSpinDownIsNotAssist();
     testAssistReportedAsTransition();
     testUnknownUntilMapped();

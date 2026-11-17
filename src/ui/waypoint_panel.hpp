@@ -2,6 +2,9 @@
 
 #include <QWidget>
 
+#include <utility>
+#include <vector>
+
 class QLabel;
 class QPushButton;
 
@@ -18,6 +21,8 @@ public:
 
     void showWaypoint(int index, float alt_rel);
     void showLanding(float approach_alt);
+    // relabel the steppers after a display unit change (they step in m or ft)
+    void unitsChanged();
 
 signals:
     void altitudeDelta(float delta);
@@ -38,6 +43,7 @@ private:
     QPushButton* insert_;
     QPushButton* delete_;
     bool landing_ = false;
+    std::vector<std::pair<QPushButton*, int>> alt_steps_;  // button, metres-mode step
 };
 
 }  // namespace gcs::ui
