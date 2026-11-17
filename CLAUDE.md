@@ -68,6 +68,15 @@ Three layers with a strict dependency direction: `core` ← `link` ← `ui`.
 
 Telemetry arrives at 10–25 Hz. Don't draw the latest sample through a fast exponential tween: it arrives in about 60 ms and then sits still, which looks like a staircase. `MainWindow::frame` pulls every frame and calls `predictAttitude` / `predictPosition` (last sample + rate × age, capped), then views apply light smoothing on top.
 
+## Paint budget
+
+Everything repaints at 60 Hz in software, so each frame's full-window repaint must stay well under 16 ms on the target screen (1920×1200 here: ~6 ms map, ~8 ms camera). Measured costs at that size: 50 full-length AA grid lines ≈ 4.6 ms, a 6000-point trail ≈ 5 ms, smooth-scaled tiles ≈ 2.4 ms, a full-window radial gradient or pattern fill ≈ 1–2.5 ms, one full-window pixmap blit ≈ 0.3 ms. So:
+
+- Anything that doesn't change every frame goes into a cached pixmap: `MapView` draws grid + tiles + the trail into a backdrop with a margin (`paintBackdrop`) and only shifts it; `CameraView` caches its vignette + scanlines.
+- Don't keep transparent full-window widgets visible when idle: `FxOverlay` hides itself, because a visible one forces a full recomposite every frame.
+- Qt 6's raster engine splits big fills over the global `QThreadPool`; `main.cpp` caps it at 2 threads (same frame time as 16, ~40 % less CPU). `GCS_PAINT_THREADS` overrides.
+- Measure with a driver that `repaint()`s widgets and times them, not by eye.
+
 ## Qt gotchas
 
 - Qt's `emit` macro clashes with any method named `emit()`, so don't name methods that.

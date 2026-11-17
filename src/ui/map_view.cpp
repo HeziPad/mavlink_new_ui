@@ -1,15 +1,14 @@
 #include "map_view.hpp"
 
-#include "elevation_cache.hpp"
-#include "units.hpp"
-
 #include "attitude_ball.hpp"
+#include "elevation_cache.hpp"
 #include "wind_gauge.hpp"
 #include "core/geo.hpp"
 #include "theme.hpp"
 #include "tile_cache.hpp"
 #include "units.hpp"
 
+#include <QDateTime>
 #include <QFontMetricsF>
 #include <QMouseEvent>
 #include <QPainter>
@@ -76,7 +75,10 @@ MapView::MapView(TileCache* tiles, QWidget* parent) : HudView(parent), tiles_(ti
     // is ignored so Qt synthesises the mouse click the ViewHost swaps on.
     setAttribute(Qt::WA_AcceptTouchEvents);
     setMouseTracking(true);  // the lat / lon / ground readout follows the mouse
-    connect(tiles_, &TileCache::tileReady, this, qOverload<>(&QWidget::update));
+    connect(tiles_, &TileCache::tileReady, this, [this] {
+        ++tiles_gen_;
+        update();
+    });
     heading_.rate = 25.0;  // light smoothing on top of the per-frame prediction
     updateCursor();
 }
@@ -528,7 +530,10 @@ void MapView::leaveEvent(QEvent* e) {
 void MapView::setElevation(ElevationCache* elev) {
     elev_ = elev;
     if (elev_) {
-        connect(elev_, &ElevationCache::ready, this, qOverload<>(&QWidget::update));
+        connect(elev_, &ElevationCache::ready, this, [this] {
+            ++elev_gen_;
+            update();
+        });
     }
 }
 
@@ -545,7 +550,10 @@ void MapView::paintHover(QPainter& p, double right, double bottom) {
                             .arg(lon >= 0 ? QLatin1Char('E') : QLatin1Char('W'));
     QString ground = QStringLiteral("GROUND  —");
     if (elev_) {
-        if (const auto h = elev_->elevation(lat, lon)) {
+        if (hover_elev_.lat != lat || hover_elev_.lon != lon || hover_elev_.gen != elev_gen_) {
+            hover_elev_ = {lat, lon, elev_gen_, elev_->elevation(lat, lon)};
+        }
+        if (const auto h = hover_elev_.h) {
             ground = QStringLiteral("GROUND  %1 MSL").arg(units::altText(*h));
             if (s_.has_home) {
                 const double rel = *h - s_.home_alt_amsl;
@@ -704,23 +712,7 @@ void MapView::wheelEvent(QWheelEvent* e) {
 void MapView::paintEvent(QPaintEvent*) {
     QPainter p(this);
     beginView(p);
-    const QRectF r = rect();
-
-    // background + tactical grid (visible where tiles are missing / offline)
-    p.fillRect(r, kBg);
-    p.setPen(QPen(alpha(kCyan, 0.05), 1));
-    const double grid = 64.0;
-    const QPointF c0 = worldPx(clat_, clon_, zoom_);
-    const double ox = std::fmod(-c0.x() + width() / 2.0, grid);
-    const double oy = std::fmod(-c0.y() + height() / 2.0, grid);
-    for (double x = ox; x < r.right(); x += grid) {
-        p.drawLine(QPointF(x, 0), QPointF(x, r.bottom()));
-    }
-    for (double y = oy; y < r.bottom(); y += grid) {
-        p.drawLine(QPointF(0, y), QPointF(r.right(), y));
-    }
-
-    paintTiles(p);
+    paintBackdrop(p);
 
     // home
     if (s_.has_home) {
@@ -751,30 +743,11 @@ void MapView::paintEvent(QPaintEvent*) {
         paintRoute(p, vehicle_plan_, kCyan, false, active);
     }
 
-    // trail: the chosen time window, fading toward its oldest end
-    if (trail_on_ && s_.trail.size() > 1) {
-        const size_t n = s_.trail.size();
-        size_t first = 0;
-        if (trail_secs_ > 0) {
-            const auto cutoff = Clock::now() - std::chrono::seconds(trail_secs_);
-            first = static_cast<size_t>(
-                std::lower_bound(s_.trail.begin(), s_.trail.end(), cutoff,
-                                 [](const TrailPoint& tp, Clock::time_point c) { return tp.t < c; }) -
-                s_.trail.begin());
-        }
-        const size_t span = n - first;
-        const size_t chunk = 12;
-        for (size_t i = first + 1; span > 1 && i < n; i += chunk) {
-            QPolygonF poly;
-            const size_t end = std::min(n, i + chunk);
-            for (size_t k = i - 1; k < end; ++k) {
-                poly << toScreen(s_.trail[k].lat, s_.trail[k].lon);
-            }
-            const double a = 0.08 + 0.75 * static_cast<double>(end - first) / span;
-            p.setPen(QPen(alpha(kCyan, a), compact_ ? 1.5 : 2.2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-            p.setBrush(Qt::NoBrush);
-            p.drawPolyline(poly);
-        }
+    // trail head: the points that arrived after the backdrop was drawn
+    if (trail_on_ && bd_.trail_on && bd_.trail_n > 0 && s_.trail.size() > bd_.trail_n) {
+        const QPointF world_tl = worldPx(clat_, clon_, zoom_) - QPointF(width() / 2.0, height() / 2.0);
+        const size_t first = trailFirst();
+        paintTrail(p, world_tl, bd_.trail_n - 1, s_.trail.size(), first, s_.trail.size() - first);
     }
 
     paintApproach(p);
@@ -797,26 +770,141 @@ void MapView::paintEvent(QPaintEvent*) {
     finishView(p);
 }
 
-void MapView::paintTiles(QPainter& p) {
+size_t MapView::trailFirst() const {
+    if (trail_secs_ <= 0) {
+        return 0;
+    }
+    const auto cutoff = Clock::now() - std::chrono::seconds(trail_secs_);
+    return static_cast<size_t>(std::lower_bound(s_.trail.begin(), s_.trail.end(), cutoff,
+                                                [](const TrailPoint& tp, Clock::time_point c) { return tp.t < c; }) -
+                               s_.trail.begin());
+}
+
+void MapView::paintTrail(QPainter& p, const QPointF& world_tl, size_t from, size_t to, size_t first, size_t span) {
+    // fading toward the oldest end; points closer than ~2 px on screen are
+    // skipped, so a long trail costs what it covers on screen, not its length
+    from = std::max(from, first);
+    if (to <= from + 1 || span < 2) {
+        return;
+    }
+    p.save();
+    p.setBrush(Qt::NoBrush);
+    constexpr int kBuckets = 10;  // alpha steps along the trail
+    QPolygonF poly;
+    int bucket = -1;
+    QPointF last;
+    auto flush = [&] {
+        if (poly.size() > 1) {
+            const double a = 0.08 + 0.75 * (bucket + 1.0) / kBuckets;
+            p.setPen(QPen(alpha(kCyan, a), compact_ ? 1.5 : 2.2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            p.drawPolyline(poly);
+        }
+    };
+    for (size_t k = from; k < to; ++k) {
+        const QPointF pt = worldPx(s_.trail[k].lat, s_.trail[k].lon, zoom_) - world_tl;
+        const int b = std::min(kBuckets - 1, static_cast<int>(kBuckets * static_cast<double>(k - first) / span));
+        if (b != bucket) {
+            flush();
+            const QPointF join = poly.isEmpty() ? pt : poly.back();
+            poly.clear();
+            poly << join;
+            bucket = b;
+            last = join;
+        }
+        const QPointF d = pt - last;
+        if (k + 1 == to || d.x() * d.x() + d.y() * d.y() >= 4.0) {
+            poly << pt;
+            last = pt;
+        }
+    }
+    flush();
+    p.restore();
+}
+
+void MapView::buildBackdrop(const QPointF& world_tl, const QSize& size) {
+    const qreal dpr = devicePixelRatioF();
+    if (bd_.pm.size() != size * dpr) {
+        bd_.pm = QPixmap(size * dpr);
+    }
+    bd_.pm.setDevicePixelRatio(dpr);
+    QPainter p(&bd_.pm);
+    p.fillRect(QRectF(QPointF(0, 0), QSizeF(size)), kBg);
+    // tactical grid (visible where tiles are missing / offline)
+    const QColor grid_c = alpha(kCyan, 0.05);
+    const double grid = 64.0;
+    // first grid line at or after the pixmap's left / top edge, fixed to the world
+    auto first = [grid](double w) { return std::fmod(grid - std::fmod(w, grid), grid); };
+    for (double x = first(world_tl.x()); x < size.width(); x += grid) {
+        p.fillRect(QRectF(std::floor(x), 0, 1, size.height()), grid_c);
+    }
+    for (double y = first(world_tl.y()); y < size.height(); y += grid) {
+        p.fillRect(QRectF(0, std::floor(y), size.width(), 1), grid_c);
+    }
+    paintTiles(p, world_tl, QSizeF(size));
+    p.setRenderHint(QPainter::Antialiasing, true);
+    bd_.trail_on = trail_on_;
+    bd_.trail_secs = trail_secs_;
+    bd_.trail_n = s_.trail.size();
+    bd_.trail_first = 0;
+    if (trail_on_ && s_.trail.size() > 1) {
+        const size_t first = trailFirst();
+        bd_.trail_first = first;
+        paintTrail(p, world_tl, first, s_.trail.size(), first, s_.trail.size() - first);
+    }
+    bd_.world_tl = world_tl;
+    bd_.zoom = zoom_;
+    bd_.layer = layer_;
+    bd_.tiles_gen = tiles_gen_;
+    bd_.built_ms = QDateTime::currentMSecsSinceEpoch();
+}
+
+void MapView::paintBackdrop(QPainter& p) {
+    const QPointF centre = worldPx(clat_, clon_, zoom_);
+    const QPointF view_tl = centre - QPointF(width() / 2.0, height() / 2.0);
+    const QSize want(width() + 2 * kBackdropMargin, height() + 2 * kBackdropMargin);
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const QPointF off = view_tl - bd_.world_tl;  // where the view sits inside the pixmap
+    const bool inside = off.x() >= 0 && off.y() >= 0 && off.x() + width() <= bd_.pm.width() / bd_.pm.devicePixelRatio() &&
+                        off.y() + height() <= bd_.pm.height() / bd_.pm.devicePixelRatio();
+    const bool stale =
+        bd_.pm.isNull() || bd_.zoom != zoom_ || bd_.layer != layer_ || !inside ||
+        bd_.pm.size() != want * devicePixelRatioF() || bd_.trail_on != trail_on_ || bd_.trail_secs != trail_secs_ ||
+        (bd_.tiles_gen != tiles_gen_) ||
+        (bd_.missing > 0 && now - bd_.built_ms > 2000) ||                      // retry tiles that failed
+        (trail_on_ && s_.trail.size() != bd_.trail_n && now - bd_.built_ms > 1000) ||  // fold the trail head in
+        (trail_on_ && s_.trail.size() < bd_.trail_n);                           // trail restarted
+    if (stale) {
+        // snap to whole pixels so the shifted copy stays crisp
+        const QPointF tl(std::floor(view_tl.x()) - kBackdropMargin, std::floor(view_tl.y()) - kBackdropMargin);
+        buildBackdrop(tl, want);
+    }
+    const QPointF at = bd_.world_tl - view_tl;
+    p.save();
+    p.setRenderHint(QPainter::SmoothPixmapTransform, false);
+    p.drawPixmap(QPointF(std::round(at.x()), std::round(at.y())), bd_.pm);
+    p.restore();
+}
+
+void MapView::paintTiles(QPainter& p, const QPointF& world_tl, const QSizeF& size) {
     const int maxz = TileCache::maxZoom(layer_);
     const int z = std::clamp(static_cast<int>(std::floor(zoom_ + 0.25)), TileCache::kMinZoom, maxz);
     const double scale = std::exp2(zoom_ - z);
     const double ts = kTile * scale;
-    const QPointF cw = worldPx(clat_, clon_, z) * scale;
-    const QPointF origin = QPointF(width() / 2.0, height() / 2.0) - cw;
+    const QPointF origin = -world_tl;  // world px at zoom_ == worldPx(z) * scale
     const int n = 1 << z;
 
     const int x0 = static_cast<int>(std::floor(-origin.x() / ts));
-    const int x1 = static_cast<int>(std::floor((width() - origin.x()) / ts));
+    const int x1 = static_cast<int>(std::floor((size.width() - origin.x()) / ts));
     const int y0 = std::max(0, static_cast<int>(std::floor(-origin.y() / ts)));
-    const int y1 = std::min(n - 1, static_cast<int>(std::floor((height() - origin.y()) / ts)));
+    const int y1 = std::min(n - 1, static_cast<int>(std::floor((size.height() - origin.y()) / ts)));
+    bd_.missing = 0;
 
     p.save();
     p.setRenderHint(QPainter::Antialiasing, false);
     p.setRenderHint(QPainter::SmoothPixmapTransform, std::abs(scale - 1.0) > 1e-3);
     // request the centre tiles first so the area under the aircraft fills in first
-    const double cx = (width() / 2.0 - origin.x()) / ts;
-    const double cy = (height() / 2.0 - origin.y()) / ts;
+    const double cx = (size.width() / 2.0 - origin.x()) / ts;
+    const double cy = (size.height() / 2.0 - origin.y()) / ts;
     std::vector<std::pair<int, int>> order;
     for (int ty = y0; ty <= y1; ++ty) {
         for (int tx = x0; tx <= x1; ++tx) {
@@ -833,6 +921,7 @@ void MapView::paintTiles(QPainter& p) {
             p.drawPixmap(dst, *pm, QRectF(pm->rect()));
             continue;
         }
+        ++bd_.missing;
         // fall back to a scaled-up ancestor already in memory
         for (int dz = 1; dz <= 5 && z - dz >= 0; ++dz) {
             const int px = wx >> dz;

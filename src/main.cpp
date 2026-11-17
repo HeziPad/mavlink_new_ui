@@ -5,9 +5,16 @@
 #include <QCommandLineParser>
 #include <QDir>
 #include <QFont>
+#include <QThreadPool>
 
 int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
+    // Qt's raster engine splits large fills, gradients and scaling across the
+    // global thread pool (one thread per core). Measured at 1920x1200: two
+    // threads paint a frame as fast as sixteen, and the other fourteen only
+    // burned ~40 % CPU waking up. GCS_PAINT_THREADS overrides.
+    const int paint_threads = qEnvironmentVariableIntValue("GCS_PAINT_THREADS");
+    QThreadPool::globalInstance()->setMaxThreadCount(paint_threads > 0 ? paint_threads : 2);
     QApplication::setApplicationName(QStringLiteral("mavlink_gcs_ui"));
     QApplication::setOrganizationName(QStringLiteral("mavlink_gcs_ui"));
     QApplication::setStyle(QStringLiteral("Fusion"));

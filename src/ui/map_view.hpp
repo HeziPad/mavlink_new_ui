@@ -124,7 +124,13 @@ private:
     void handleTouch(QTouchEvent* e);
     void updateCursor();
 
-    void paintTiles(QPainter& p);
+    // the slow-changing background (grid, tiles, the trail but its newest
+    // points) is drawn into bd_ with a margin and only shifted per frame
+    void paintBackdrop(QPainter& p);
+    void buildBackdrop(const QPointF& world_tl, const QSize& size);
+    void paintTiles(QPainter& p, const QPointF& world_tl, const QSizeF& size);
+    void paintTrail(QPainter& p, const QPointF& world_tl, size_t from, size_t to, size_t first, size_t span);
+    size_t trailFirst() const;  // first trail point inside the time window
     void paintRoute(QPainter& p, const MissionPlan& plan, const QColor& c, bool editable, int active_index);
     void paintAircraft(QPainter& p);
     void paintOrbit(QPainter& p);
@@ -138,6 +144,13 @@ private:
     TileCache* tiles_;
     ElevationCache* elev_ = nullptr;
     std::optional<QPointF> hover_pos_;  // mouse over the map (never set by touch)
+    // last ground-height lookup, redone only when the point or the data changes
+    struct HoverElev {
+        double lat = 1e9, lon = 1e9;
+        quint64 gen = ~0ull;
+        std::optional<double> h;
+    } hover_elev_;
+    quint64 elev_gen_ = 0;
     VehicleState s_;
     MissionPlan vehicle_plan_;
     bool centred_ = false;
@@ -197,6 +210,22 @@ private:
     double ball_open_ = 1.0;  // 0 collapsed .. 1 open, animated
 
     AngleTween heading_;
+
+    struct Backdrop {
+        QPixmap pm;
+        QPointF world_tl;          // world px (at `zoom`) of the pixmap's top-left
+        double zoom = -1.0;
+        int layer = -1;
+        quint64 tiles_gen = 0;
+        int missing = 0;           // tiles not available when it was drawn
+        qint64 built_ms = 0;
+        size_t trail_n = 0;        // trail points baked in
+        size_t trail_first = 0;
+        bool trail_on = false;
+        int trail_secs = -1;
+    } bd_;
+    quint64 tiles_gen_ = 0;        // bumped when a tile arrives
+    static constexpr int kBackdropMargin = 320;
 };
 
 }  // namespace gcs::ui

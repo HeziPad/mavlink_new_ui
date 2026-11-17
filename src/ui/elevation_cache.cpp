@@ -55,6 +55,17 @@ const QImage* ElevationCache::tile(int z, int x, int y, bool fetch) {
     if (const QImage* img = memory_.object(k)) {
         return img;
     }
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (auto it = absent_.find(k); it != absent_.end()) {
+        // looked on disk a moment ago and it wasn't there (a fetch is pending or failed)
+        if (now < it.value()) {
+            if (fetch) {
+                request(z, x, y);
+            }
+            return nullptr;
+        }
+        absent_.erase(it);
+    }
     for (const QString& path : {offline::find(offline::Elevation, z, x, y), cachePath(z, x, y)}) {
         if (path.isEmpty() || !QFileInfo::exists(path)) {
             continue;
@@ -66,6 +77,10 @@ const QImage* ElevationCache::tile(int z, int x, int y, bool fetch) {
             return memory_.object(k);
         }
     }
+    if (absent_.size() > 4096) {
+        absent_.clear();
+    }
+    absent_.insert(k, now + 3000);
     if (fetch) {
         request(z, x, y);
     }

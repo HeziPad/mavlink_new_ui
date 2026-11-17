@@ -217,37 +217,55 @@ void CameraView::paintEvent(QPaintEvent*) {
         paintSynthetic(p);
     }
 
-    // vignette + scanlines make it read as a sensor feed
-    QRadialGradient vg(r.center(), std::hypot(r.width(), r.height()) / 2.0);
-    vg.setColorAt(0.55, QColor(0, 0, 0, 0));
-    vg.setColorAt(1.0, QColor(0, 0, 0, 150));
-    p.fillRect(r, vg);
-    if (!reducedMotion() && !compact_) {
-        drawScanlines(p, r, 0.6);
+    // vignette + scanlines make it read as a sensor feed (one cached layer)
+    const bool scan = !reducedMotion() && !compact_;
+    const qreal dpr = devicePixelRatioF();
+    if (overlay_.isNull() || overlay_size_ != size() || overlay_scan_ != scan || overlay_.devicePixelRatio() != dpr) {
+        overlay_ = QPixmap((QSizeF(size()) * dpr).toSize());
+        overlay_.setDevicePixelRatio(dpr);
+        overlay_.fill(Qt::transparent);
+        QPainter op(&overlay_);
+        QRadialGradient vg(r.center(), std::hypot(r.width(), r.height()) / 2.0);
+        vg.setColorAt(0.55, QColor(0, 0, 0, 0));
+        vg.setColorAt(1.0, QColor(0, 0, 0, 150));
+        op.fillRect(r, vg);
+        if (scan) {
+            drawScanlines(op, r, 0.6);
+        }
+        overlay_size_ = size();
+        overlay_scan_ = scan;
     }
+    p.drawPixmap(QPointF(0, 0), overlay_);
 
     if (live() && !compact_) {
         // Over real video the thin green symbology vanishes on bright scenes:
         // render it once, then stamp a dark copy at +-1 px underneath as an outline.
-        const qreal dpr = devicePixelRatioF();
-        QImage hud((QSizeF(size()) * dpr).toSize(), QImage::Format_ARGB32_Premultiplied);
-        hud.setDevicePixelRatio(dpr);
-        hud.fill(Qt::transparent);
+        const QSize px = (QSizeF(size()) * dpr).toSize();
+        if (hud_img_.size() != px) {
+            hud_img_ = QImage(px, QImage::Format_ARGB32_Premultiplied);
+            hud_shadow_ = QImage(px, QImage::Format_ARGB32_Premultiplied);
+        }
+        hud_img_.setDevicePixelRatio(dpr);
+        hud_shadow_.setDevicePixelRatio(dpr);
+        hud_img_.fill(Qt::transparent);
         {
-            QPainter hp(&hud);
+            QPainter hp(&hud_img_);
             hp.setRenderHint(QPainter::Antialiasing);
             paintHud(hp);
         }
-        QImage shadow = hud;
         {
-            QPainter sp(&shadow);
+            // the same shapes in near-black: copy, then recolour keeping alpha
+            QPainter sp(&hud_shadow_);
+            sp.setCompositionMode(QPainter::CompositionMode_Source);
+            sp.drawImage(QPointF(0, 0), hud_img_);
             sp.setCompositionMode(QPainter::CompositionMode_SourceIn);
             sp.fillRect(QRectF(QPointF(0, 0), QSizeF(size())), QColor(0, 0, 0, 210));
         }
-        for (const QPointF off : {QPointF(-1, 0), QPointF(1, 0), QPointF(0, -1), QPointF(0, 1)}) {
-            p.drawImage(off, shadow);
+        // a diagonal pair of offsets outlines every edge well enough, at half the cost of four
+        for (const QPointF off : {QPointF(-1, -1), QPointF(1, 1)}) {
+            p.drawImage(off, hud_shadow_);
         }
-        p.drawImage(QPointF(0, 0), hud);
+        p.drawImage(QPointF(0, 0), hud_img_);
     } else {
         paintHud(p);
     }

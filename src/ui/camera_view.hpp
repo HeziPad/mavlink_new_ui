@@ -5,6 +5,7 @@
 #include "view_host.hpp"
 
 #include <QImage>
+#include <QPixmap>
 
 namespace gcs::ui {
 
@@ -90,6 +91,12 @@ private:
     uint64_t frame_seq_ = 0;
     QImage scaled_;             // frame_ scaled to the widget, redone per new frame / resize
     uint64_t scaled_seq_ = 0;
+    // vignette + scanlines: the same every frame for a given size, so drawn once
+    QPixmap overlay_;
+    QSize overlay_size_;
+    bool overlay_scan_ = false;
+    // the HUD over live video and its dark outline, reused between frames
+    QImage hud_img_, hud_shadow_;
     double frame_age_ = 1e9;
 
     VehicleState s_;

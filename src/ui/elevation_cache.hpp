@@ -40,6 +40,7 @@ private:
     QCache<QString, QImage> memory_;
     QSet<QString> pending_;
     QHash<QString, qint64> failed_;  // retry-after, ms since epoch
+    QHash<QString, qint64> absent_;  // not on disk: don't stat again until (ms since epoch)
     QString dir_;
 };
 
