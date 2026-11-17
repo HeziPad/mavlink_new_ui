@@ -64,6 +64,9 @@ add_executable(mavlink_gcs_ui
     src/ui/orbit_panel.cpp
     src/ui/map_view.cpp
     src/ui/plan_strip.cpp
+    src/ui/preflight_art.cpp
+    src/ui/preflight_runner.cpp
+    src/ui/preflight_screen.cpp
     src/ui/telemetry_bar.cpp
     src/ui/theme.cpp
     src/ui/settings_screen.cpp

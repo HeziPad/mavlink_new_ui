@@ -10,6 +10,8 @@
 #include "map_view.hpp"
 #include "orbit_panel.hpp"
 #include "plan_strip.hpp"
+#include "preflight_runner.hpp"
+#include "preflight_screen.hpp"
 #include "settings_screen.hpp"
 #include "telemetry_bar.hpp"
 #include "theme.hpp"
@@ -133,6 +135,19 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
     fx_ = new FxOverlay(this);
     fx_->setTopInset(58);
     alerts_ = new AlertsPanel(this);
+    pf_ = std::make_unique<PreflightRunner>(client_.get());
+    preflight_ = new PreflightScreen(this, pf_.get());
+    pf_->onToast = [this](const QString& t, bool good) { fx_->toast(t, good ? kGreen : kRed, QStringLiteral("Preflight")); };
+    pf_->onSafety = [this](bool make_safe) {
+        client_->runSequence("safety", {link::makeSetSafety(make_safe)});
+        fx_->toast(make_safe ? QStringLiteral("Safety ON: motors cut") : QStringLiteral("Safety OFF: motors live"),
+                   make_safe ? kAmber : kRed, QStringLiteral("Safety"));
+    };
+    pf_->onComplete = [this] { fx_->banner(QStringLiteral("Preflight complete · ready to launch"), kGreen); };
+    connect(preflight_, &PreflightScreen::launchOverride, this, [this] {
+        pf_->overrideLaunch(Clock::now());
+        fx_->toast(QStringLiteral("Launch allowed without a complete preflight (logged)"), kAmber, QStringLiteral("Preflight"));
+    });
     settings_screen_ = new SettingsScreen(this);
 
     connect(bar_, &TelemetryBar::systemsTapped, this, [this] { showAlerts(!alerts_->isVisible()); });
@@ -266,6 +281,9 @@ void MainWindow::layoutOverlays() {
     if (settings_screen_->isVisible()) {
         settings_screen_->setGeometry(rect());
     }
+    if (preflight_->isVisible()) {
+        preflight_->setGeometry(rect());
+    }
     if (alerts_->isVisible()) {
         alerts_->place(alertsArea());
     }
@@ -278,6 +296,9 @@ void MainWindow::layoutOverlays() {
     fx_->raise();
     if (settings_screen_->isVisible()) {
         settings_screen_->raise();
+    }
+    if (preflight_->isVisible()) {
+        preflight_->raise();
     }
 }
 
@@ -304,6 +325,11 @@ void MainWindow::frame() {
     fx_->tick(dt);
     settings_screen_->tick(dt);
     alerts_->tick(dt);
+    pf_->update(s_, Clock::now(), video_->frameAge());
+    preflight_->tick(dt);
+    if (preflight_->isOpen() && isAirborne(s_)) {
+        preflight_->close();  // ground only
+    }
 }
 
 int MainWindow::orbitPanelX() const {
@@ -331,6 +357,13 @@ void MainWindow::showAlerts(bool on) {
     alerts_->show();
     alerts_->raise();
     fx_->setRightInset(alerts_->width() + 8.0);
+}
+
+void MainWindow::openPreflight() {
+    showAlerts(false);
+    preflight_->setGeometry(rect());
+    preflight_->open(flew_ && pf_->session().active());
+    preflight_->raise();
 }
 
 void MainWindow::applyAltUnit(int unit) {
@@ -376,6 +409,11 @@ void MainWindow::pullState() {
 
     checkTakeoffHandoff();
     updateOrbitTrim();
+    // a flight happened: the preflight no longer holds; offer the turnaround one
+    if (isAirborne(s_) && s_.armed && !flew_) {
+        flew_ = true;
+        pf_->noteFlight();
+    }
     const LiftRotors lift = liftRotorState(s_, now);
     if (lift == LiftRotors::Assist && last_lift_ != LiftRotors::Assist) {
         fx_->toast(QStringLiteral("Lift rotors assisting (Q_ASSIST): low airspeed, steep bank or low altitude"),
@@ -452,6 +490,16 @@ void MainWindow::updateAlerts() {
     const std::vector<Advisory> state = assess(s_, now, ever_connected_);
     advisories_ = mergeAdvisories(state, book_.current());
     reconcileLandedMode(advisories_, s_);
+    {
+        // the vehicle's own words for why it won't arm, for the preflight's final step
+        std::vector<std::string> reasons;
+        for (const auto& adv : advisories_) {
+            if (adv.id.rfind("prearm.", 0) == 0 && adv.id != "prearm.mode") {
+                reasons.push_back(adv.detail.empty() ? adv.title : adv.detail);
+            }
+        }
+        pf_->setPrearmReasons(std::move(reasons));
+    }
     bar_->setAdvisories(advisories_);
     if (alerts_->isVisible()) {
         alerts_->setAdvisories(advisories_, alive);
@@ -526,6 +574,10 @@ void MainWindow::handleEvent(const link::LinkEvent& ev) {
     case T::CommandStep:
         break;
     case T::CommandResult: {
+        if (ev.tag.rfind("pf:", 0) == 0) {
+            pf_->onEvent(ev);  // the preflight window shows these itself
+            break;
+        }
         if (ev.tag == "orbit-trim") {
             if (!ev.ok) {
                 fx_->toast(QStringLiteral("Orbit radius trim: %1").arg(text), kAmber, QStringLiteral("Orbit"));
@@ -606,6 +658,7 @@ void MainWindow::handleEvent(const link::LinkEvent& ev) {
         fx_->toast(text, kRed, QStringLiteral("Error"));
         break;
     case T::ParamSet:
+        pf_->onEvent(ev);
         fx_->toast(ev.ok ? QStringLiteral("%1 = %2 (confirmed)").arg(QString::fromStdString(ev.tag), text)
                          : QStringLiteral("%1 not set: %2").arg(QString::fromStdString(ev.tag), text),
                    ev.ok ? kGreen : kRed, QStringLiteral("Param"));
@@ -692,6 +745,9 @@ void MainWindow::refreshDock() {
             if (!alive) {
                 spec.enabled = false;
                 spec.reason = no_link;
+            } else if (!pf_->launchAllowed(s_, Clock::now())) {
+                spec.enabled = false;
+                spec.reason = pf_->launchBlockReason(s_, Clock::now());
             } else if (safetyState(s_) == SafetyState::Safe) {
                 spec.enabled = false;
                 spec.reason = QStringLiteral("Safety ON: motors cut. Hold SAFETY in the top bar for 1 s to turn it off");
@@ -728,8 +784,28 @@ void MainWindow::refreshDock() {
         dock_->setSlot(kLaunch, spec);
     }
 
-    // 4 guide
-    {
+    // 4 guide (airborne) / preflight (on the ground)
+    if (!airborne && !s_.armed) {
+        DockSlotSpec spec;
+        spec.label = QStringLiteral("Preflight");
+        spec.icon = DockIcon::Preflight;
+        const bool ok = pf_->launchAllowed(s_, Clock::now());
+        spec.accent = ok ? kGreen : (pf_->session().active() && pf_->session().failCount() ? kRed : kAmber);
+        spec.active = preflight_->isOpen();
+        spec.hint = ok ? QStringLiteral("Preflight passed · tap to review")
+                       : QStringLiteral("Every check, test and calibration before launch");
+        if (!alive) {
+            spec.enabled = false;
+            spec.reason = no_link;
+        }
+        dock_->setSlot(kGuide, spec);
+        const auto& ses = pf_->session();
+        dock_->setProgress(kGuide, ses.active() && !ok ? static_cast<double>(ses.doneCount()) / std::max(1, ses.totalCount()) : -1.0);
+        if (guiding_) {
+            setGuide(false);
+        }
+    } else {
+        dock_->setProgress(kGuide, -1.0);
         DockSlotSpec spec;
         spec.label = QStringLiteral("Guide");
         spec.icon = DockIcon::Guide;
@@ -830,7 +906,11 @@ void MainWindow::onTriggered(int slot) {
         launchOrAuto();
         break;
     case kGuide:
-        setGuide(!guiding_);
+        if (!isAirborne(s_) && !s_.armed) {
+            openPreflight();
+        } else {
+            setGuide(!guiding_);
+        }
         break;
     case kHold:
         hold();
@@ -1236,6 +1316,12 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* e) {
     if ((e->type() == QEvent::KeyPress || e->type() == QEvent::KeyRelease) && isActiveWindow()) {
         auto* ke = static_cast<QKeyEvent*>(e);
         const int key = ke->key();
+        if (preflight_->isOpen()) {
+            if (key == Qt::Key_Escape && e->type() == QEvent::KeyPress) {
+                preflight_->close();
+            }
+            return true;
+        }
         if (settings_screen_->isOpen()) {
             // the menu is modal: Esc closes it, nothing reaches the dock
             if (key == Qt::Key_Escape && e->type() == QEvent::KeyPress) {

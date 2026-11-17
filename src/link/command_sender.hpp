@@ -29,7 +29,9 @@ struct CommandRequest {
 };
 
 CommandRequest makeSetMode(uint32_t custom_mode, const std::string& label);
-CommandRequest makeArm(bool arm);
+// force: ArduPilot's magic 21196 (skip checks). Used only to disarm on the
+// ground after a GCS-driven test, where a refused disarm would leave it armed.
+CommandRequest makeArm(bool arm, bool force = false);
 CommandRequest makeVtolTakeoff(float alt_rel);
 // MAV_CMD_DO_SET_MISSION_CURRENT: continue the mission from `seq`.
 // reset: also restart the mission (jump counters, completed -> active)

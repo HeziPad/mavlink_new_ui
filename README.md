@@ -185,6 +185,35 @@ The approach is laid out like this:
 The map draws the circle, the leg and a wind arrow. They are faint while
 circling the loop and bright while landing.
 
+## Preflight
+
+On the ground, dock slot 3 is **PREFLIGHT** (a progress ring shows how far
+you are). **Launch stays locked until it passes.** A 3 s hold on "launch
+without preflight" overrides that, and the override is written to the report.
+
+It is a full-window checklist in 12 stages:
+
+| Stage | What happens |
+|---|---|
+| Aircraft | Firmware, frame (`Q_FRAME_CLASS/TYPE`) and output map are read; you set the battery chemistry, cells, capacity and typical flight time once |
+| Site | Airspace, weather, a clear 10 m takeoff circle, the landing point, bystanders, GCS power |
+| Airframe | Wing and booms, props (CW/CCW per position shown), linkages, **pitot cover off**, CG, battery, antennas |
+| Power | Charge per cell for the chemistry, cell balance, current sensor, autopilot supply |
+| Links & RC | Telemetry rate and radio margin; move each stick to both ends; mode-switch positions with their modes; **RC failsafe test** (turn the transmitter off) |
+| Sensors | Gyro, level, accelerometer (simple or 6-position with each pose drawn), **compass** (from a known heading, or rotate it while a sphere fills in), baro/airspeed zero, pitot blow test, attitude follows the aircraft, heading matches; health, EKF, GPS, home, logging, vibration |
+| Surfaces | The GCS sweeps ailerons, elevator and rudder in MANUAL (disarmed) while the picture shows which way each must move; a wrong one can be reversed with one tap; stabilisation check in FBWA |
+| Motors | Props off (or tied down), safety OFF, then each lift motor A–D spins 2 s at 15 %: the picture lights the position and spin direction it must have, and the GCS checks the right output moved. The pusher spins 2 s at 12 % in MANUAL and is force-disarmed |
+| Payload | Gimbal sweep, video frames arriving |
+| Settings | 17 parameter checks (Q_GUIDED_MODE, Q_ASSIST_SPEED, airspeed limits, arming checks, RC/GCS/battery failsafes and voltages for your pack, fence, loiter radius vs bank limit, ...), each with the reason and a one-tap fix (confirmed, read back, logged) where there is a safe value |
+| Mission | On the vehicle, landing point, altitudes, range, laps per pack |
+| Ready | The GCS selects AUTO, resets the mission to its takeoff and runs the pre-arm checks (their messages are listed if any fail); then safety OFF and **READY TO LAUNCH** |
+
+Tests that move or spin anything need a 1 s hold, have a **STOP ALL** button,
+and have vehicle-side timeouts as well. A pass stays valid until the autopilot
+reboots, the battery is swapped, a parameter is changed elsewhere, an hour
+passes, or it flies; after a flight a short **turnaround** preflight is offered.
+Every run is saved as JSON under `~/.local/share/mavlink_gcs_ui/preflight/`.
+
 ## Settings
 
 The in-app settings screen (⚙) switches altitudes between metres and feet

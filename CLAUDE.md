@@ -10,7 +10,7 @@ Game-style ground control station for an ArduPilot **QuadPlane**: C++17, Qt 6 Wi
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo   # -DGCS_WITH_GSTREAMER=OFF to skip video
 cmake --build build
 ctest --test-dir build --output-on-failure      # all tests
-ctest --test-dir build -R mission_transfer      # one test (geo, mission_builder, mission_transfer, command_sender, lift_rotors, health, orbit_trim)
+ctest --test-dir build -R mission_transfer      # one test (geo, mission_builder, mission_transfer, command_sender, lift_rotors, health, orbit_trim, preflight)
 ./build/test_geo                                # or run a test binary directly
 ./build/mavlink_gcs_ui                          # listens on udp 127.0.0.1:14551
 ```
@@ -58,6 +58,7 @@ Three layers with a strict dependency direction: `core` ← `link` ← `ui`.
 - After a VTOL landing the mission stays on the land item and AUTO won't arm ("In landing sequence", "missing takeoff waypoint"). Launch sends `SET_MISSION_CURRENT(1, reset)` before AUTO + arm.
 - Safety switch: `SYS_STATUS` `MOTOR_OUTPUTS` is always present and *enabled* unless safety is engaged (`safetyState()`). Toggle with `MAV_CMD_DO_SET_SAFETY_SWITCH_STATE`; SITL implements it. Never while armed: it cuts every output, the pusher and servos included.
 - RTL, QRTL and QLAND refuse arming ("mode not armable"), so after a QRTL landing the pre-arm bit fails although nothing is wrong. `reconcileLandedMode` turns that into an info card.
+- Preflight (`core/preflight`, `ui/preflight_runner`, `ui/preflight_screen`): `MAV_CMD_DO_MOTOR_TEST` spins only the lift motors (test order A.. clockwise from front-right, `core/frame_layout` mirrors `AP_MotorsMatrix`); below ~15 % it doesn't pass spin-min. `DO_SET_SERVO` can't move assigned surfaces, so the surface test uses `MANUAL_CONTROL` in MANUAL (x = pitch, + is nose down). Calibrations ACK only when done: send once with a long timeout (`max_attempts`, `ack_timeout`). Disarm after a GCS-driven ground test with force (21196). Never one-tap `FENCE_ENABLE=1`: with no fence defined it fails pre-arm. ArduPilot after 4.6 has `ARMING_SKIPCHK` instead of `ARMING_CHECK`.
 - Don't gate Launch on the prearm-healthy bit. It is evaluated for the *current* mode (e.g. "QRTL mode not armable") and doesn't apply to the mode Launch switches to.
 
 ## UI motion

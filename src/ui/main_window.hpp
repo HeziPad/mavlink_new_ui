@@ -29,6 +29,8 @@ class ControlDock;
 class FxOverlay;
 class OrbitPanel;
 class PlanStrip;
+class PreflightRunner;
+class PreflightScreen;
 class SettingsScreen;
 class TelemetryBar;
 class TileCache;
@@ -131,6 +133,10 @@ private:
     FxOverlay* fx_ = nullptr;
     SettingsScreen* settings_screen_ = nullptr;
     AlertsPanel* alerts_ = nullptr;
+    std::unique_ptr<PreflightRunner> pf_;
+    PreflightScreen* preflight_ = nullptr;
+    bool flew_ = false;  // airborne since the last preflight (offers the turnaround)
+    void openPreflight();
 
     QTimer* timer_ = nullptr;
     QElapsedTimer clock_;

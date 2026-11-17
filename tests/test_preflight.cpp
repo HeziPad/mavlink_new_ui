@@ -156,6 +156,9 @@ void testParams() {
     // and the step evaluator maps critical failures to Fail
     s.params["Q_GUIDED_MODE"] = 1.0f;
     CHECK(st("param.Q_GUIDED_MODE", s) == Status::Fail);
+    s.params["FENCE_ENABLE"] = 0.0f;
+    v = check("param.FENCE_ENABLE");
+    CHECK(v.known && !v.ok && !v.recommended);  // advice only: no blind write
     const auto names = paramsToFetch();
     CHECK(std::find(names.begin(), names.end(), "Q_FRAME_CLASS") != names.end());
 }

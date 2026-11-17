@@ -235,7 +235,7 @@ const std::vector<StepDef>& steps() {
             {"fin.ready", Stage::Final, Kind::Auto, "Vehicle set for launch",
              "Launch must start the mission from its takeoff, with every pre-arm check passing.",
              "The GCS selects AUTO, resets the mission to the takeoff and runs the pre-arm checks.", true, true},
-            {"fin.safety", Stage::Final, Kind::Test, "Safety OFF",
+            {"fin.safety", Stage::Final, Kind::Auto, "Safety OFF",
              "With safety on, the motors can't spin and Launch can't arm.",
              "Hold SAFETY until it reads OFF. From now on the props are live.", true, true},
         };
@@ -804,7 +804,18 @@ ParamVerdict checkParam(const ParamCheck& c, const VehicleState& s, const Profil
         v.detail = "BATT_ARM_VOLT = " + num(*cur) + " V" + (v.ok ? " ✓" : " → recommended " + num(want) + " V");
         return v;
     }
-    if (c.id == "param.FENCE_ENABLE") return simple("FENCE_ENABLE", 1.0f, "set the fence (and its altitude) in your planner first");
+    if (c.id == "param.FENCE_ENABLE") {
+        // advice only: enabling a fence that has no boundary or altitude set up
+        // makes the pre-arm checks fail, so never a one-tap write
+        const auto cur = get("FENCE_ENABLE");
+        if (!cur) return v;
+        v.known = true;
+        v.current = *cur;
+        v.ok = *cur >= 1.0f;
+        v.detail = "FENCE_ENABLE = " + num(*cur) +
+                   (v.ok ? " ✓" : ": set up a fence (boundary and maximum altitude) in your planner, then enable it there");
+        return v;
+    }
     if (c.id == "param.LOG_DISARMED") return simple("LOG_DISARMED", 0.0f, "log only when armed");
     if (c.id == "param.Q_ASSIST_SPEED") {
         const auto cur = get("Q_ASSIST_SPEED"), mn = get("AIRSPEED_MIN");

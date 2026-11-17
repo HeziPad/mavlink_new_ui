@@ -15,10 +15,11 @@ CommandRequest makeSetMode(uint32_t custom_mode, const std::string& label) {
     return r;
 }
 
-CommandRequest makeArm(bool arm) {
+CommandRequest makeArm(bool arm, bool force) {
     CommandRequest r;
     r.command = MAV_CMD_COMPONENT_ARM_DISARM;
     r.params[0] = arm ? 1.0f : 0.0f;
+    r.params[1] = force ? 21196.0f : 0.0f;
     r.label = arm ? "ARM" : "DISARM";
     return r;
 }
