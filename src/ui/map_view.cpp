@@ -52,6 +52,95 @@ void worldToLatLon(const QPointF& p, double zoom, double& lat, double& lon) {
     lat = std::atan(std::sinh(yy)) * geo::kRadToDeg;
 }
 
+// Map lines must be clipped before they're stroked: a leg to a point far off
+// screen (an old mission on the other side of the world, zoomed in) is
+// millions of pixels long, and Qt rasterises every dash of it. One such line
+// held the UI thread for ~3 s per frame.
+bool clipSegment(QPointF& a, QPointF& b, const QRectF& r) {
+    // Liang-Barsky
+    const double dx = b.x() - a.x(), dy = b.y() - a.y();
+    double t0 = 0.0, t1 = 1.0;
+    const double pp[4] = {-dx, dx, -dy, dy};
+    const double qq[4] = {a.x() - r.left(), r.right() - a.x(), a.y() - r.top(), r.bottom() - a.y()};
+    for (int i = 0; i < 4; ++i) {
+        if (pp[i] == 0.0) {
+            if (qq[i] < 0.0) {
+                return false;
+            }
+            continue;
+        }
+        const double t = qq[i] / pp[i];
+        if (pp[i] < 0.0) {
+            t0 = std::max(t0, t);
+        } else {
+            t1 = std::min(t1, t);
+        }
+        if (t0 > t1) {
+            return false;
+        }
+    }
+    const QPointF a0 = a;
+    a = a0 + QPointF(dx, dy) * t0;
+    b = a0 + QPointF(dx, dy) * t1;
+    return true;
+}
+
+// Draws the visible runs of a polyline (or closed polygon outline) only.
+void drawClipped(QPainter& p, const QPolygonF& line, bool closed, const QRectF& r) {
+    const int n = line.size();
+    if (n < 2) {
+        return;
+    }
+    QPolygonF run;
+    const int segs = closed ? n : n - 1;
+    for (int i = 0; i < segs; ++i) {
+        QPointF a = line[i], b = line[(i + 1) % n];
+        const QPointF a_in = a;
+        if (!clipSegment(a, b, r)) {
+            if (run.size() > 1) {
+                p.drawPolyline(run);
+            }
+            run.clear();
+            continue;
+        }
+        if (run.isEmpty() || a != a_in || run.back() != a) {
+            if (run.size() > 1) {
+                p.drawPolyline(run);
+            }
+            run.clear();
+            run << a;
+        }
+        run << b;
+        if (b != line[(i + 1) % n]) {  // left the view: end this run
+            p.drawPolyline(run);
+            run.clear();
+        }
+    }
+    if (run.size() > 1) {
+        p.drawPolyline(run);
+    }
+}
+
+void drawLineClipped(QPainter& p, QPointF a, QPointF b, const QRectF& r) {
+    if (clipSegment(a, b, r)) {
+        p.drawLine(a, b);
+    }
+}
+
+// a circle worth drawing: it crosses the view (not wholly outside, and the
+// view not wholly inside it)
+bool circleVisible(const QPointF& c, double rad, const QRectF& r) {
+    const double nx = std::clamp(c.x(), r.left(), r.right()), ny = std::clamp(c.y(), r.top(), r.bottom());
+    if (std::hypot(c.x() - nx, c.y() - ny) > rad) {
+        return false;  // outside
+    }
+    double far = 0.0;
+    for (const QPointF q : {r.topLeft(), r.topRight(), r.bottomLeft(), r.bottomRight()}) {
+        far = std::max(far, std::hypot(q.x() - c.x(), q.y() - c.y()));
+    }
+    return far > rad;  // otherwise the view is inside the circle: no edge to see
+}
+
 QString formatDistance(double m) {
     if (m >= 1000.0) {
         return QStringLiteral("%1 km").arg(m / 1000.0, 0, 'f', m >= 10000.0 ? 1 : 2);
@@ -710,6 +799,7 @@ void MapView::wheelEvent(QWheelEvent* e) {
 // ---- painting --------------------------------------------------------------------
 
 void MapView::paintEvent(QPaintEvent*) {
+    ++paints_;
     QPainter p(this);
     beginView(p);
     paintBackdrop(p);
@@ -789,6 +879,10 @@ void MapView::paintTrail(QPainter& p, const QPointF& world_tl, size_t from, size
     }
     p.save();
     p.setBrush(Qt::NoBrush);
+    // the device the painter draws on: the view, or the backdrop pixmap
+    const QRectF clip = QRectF(QPointF(0, 0), QSizeF(p.device()->width(), p.device()->height()) /
+                                                  p.device()->devicePixelRatioF())
+                            .adjusted(-16, -16, 16, 16);
     constexpr int kBuckets = 10;  // alpha steps along the trail
     QPolygonF poly;
     int bucket = -1;
@@ -797,7 +891,7 @@ void MapView::paintTrail(QPainter& p, const QPointF& world_tl, size_t from, size
         if (poly.size() > 1) {
             const double a = 0.08 + 0.75 * (bucket + 1.0) / kBuckets;
             p.setPen(QPen(alpha(kCyan, a), compact_ ? 1.5 : 2.2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-            p.drawPolyline(poly);
+            drawClipped(p, poly, false, clip);
         }
     };
     for (size_t k = from; k < to; ++k) {
@@ -943,12 +1037,13 @@ void MapView::paintRoute(QPainter& p, const MissionPlan& plan, const QColor& c, 
         // glow underlay + marching ants showing the direction of travel
         p.setBrush(Qt::NoBrush);
         p.setPen(QPen(alpha(c, 0.22 * opacity), 6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-        closed ? p.drawPolygon(line) : p.drawPolyline(line);
+        const QRectF view = QRectF(rect()).adjusted(-16, -16, 16, 16);
+        drawClipped(p, line, closed, view);
         QPen ants(alpha(c, opacity), 2.0, Qt::CustomDashLine, Qt::FlatCap, Qt::RoundJoin);
         ants.setDashPattern({5, 4});
         ants.setDashOffset(reducedMotion() ? 0.0 : -std::fmod(time_ * 14.0, 9.0));
         p.setPen(ants);
-        closed ? p.drawPolygon(line) : p.drawPolyline(line);
+        drawClipped(p, line, closed, view);
     };
 
     // takeoff leg: home -> WP1, fainter (flown once)
@@ -1059,10 +1154,10 @@ void MapView::paintOrbit(QPainter& p) {
             QPen dash(alpha(col, 0.5), 1.2, Qt::DashLine);
             dash.setDashOffset(-time_ * 8.0);
             p.setPen(dash);
-            p.drawLine(a, c);
+            drawLineClipped(p, a, c, QRectF(rect()).adjusted(-16, -16, 16, 16));
         }
     }
-    if (rpx > 4.0) {
+    if (rpx > 4.0 && circleVisible(c, rpx, QRectF(rect()).adjusted(-40, -40, 40, 40))) {
         QPen ring(alpha(col, 0.75), compact_ ? 1.2 : 1.8, Qt::CustomDashLine);
         ring.setDashPattern({6, 5});
         // the dashes march in the direction of the turn
@@ -1077,7 +1172,9 @@ void MapView::paintOrbit(QPainter& p) {
             QPen flown(alpha(kMuted, 0.6), 1.0, Qt::DotLine);
             p.setPen(flown);
             p.setBrush(Qt::NoBrush);
-            p.drawEllipse(c, fpx, fpx);
+            if (circleVisible(c, fpx, QRectF(rect()).adjusted(-40, -40, 40, 40))) {
+                p.drawEllipse(c, fpx, fpx);
+            }
             drawText(p, QRectF(c.x() - 80, c.y() + fpx + 2, 160, 14), Qt::AlignCenter,
                      QStringLiteral("flown %1 · trimming").arg(formatDistance(orbit_->flown)), labelFont(9),
                      alpha(kMuted, 0.9));
@@ -1124,12 +1221,15 @@ void MapView::paintApproach(QPainter& p) {
     QPen ring(alpha(kGreen, 0.6 * op), 1.4, Qt::DashLine);
     p.setPen(ring);
     p.setBrush(Qt::NoBrush);
-    p.drawEllipse(c, rpx, rpx);
+    const QRectF view = QRectF(rect()).adjusted(-16, -16, 16, 16);
+    if (circleVisible(c, rpx, view)) {
+        p.drawEllipse(c, rpx, rpx);
+    }
     QPen leg(alpha(kGreen, 0.9 * op), 2.0, Qt::CustomDashLine, Qt::FlatCap);
     leg.setDashPattern({5, 4});
     leg.setDashOffset(reducedMotion() ? 0.0 : -std::fmod(time_ * 14.0, 9.0));
     p.setPen(leg);
-    p.drawLine(e, l);
+    drawLineClipped(p, e, l, view);
     p.setPen(Qt::NoPen);
     p.setBrush(alpha(kGreen, op));
     p.drawEllipse(e, 3.5, 3.5);

@@ -201,6 +201,7 @@ void CameraView::mousePressEvent(QMouseEvent* e) {
 }
 
 void CameraView::paintEvent(QPaintEvent*) {
+    ++paints_;
     QPainter p(this);
     beginView(p);
     const QRectF r = rect();

@@ -190,6 +190,24 @@ void testParams() {
     CHECK(std::find(names.begin(), names.end(), "Q_FRAME_CLASS") != names.end());
 }
 
+void testMissionElsewhere() {
+    // SITL restarted at another location keeps its old mission: 13,000 km away
+    VehicleState s = live();
+    s.has_home = true;
+    s.home_lat = 32.33;
+    s.home_lon = 34.86;
+    MissionPlan plan;
+    plan.wps = {{-35.36, 149.16, 80.0f}, {-35.35, 149.17, 80.0f}};
+    s.mission = buildLoopMission(-35.363, 149.165, 584.0, plan, 40.0f);
+    s.mission_known = true;
+    CHECK(st("mis.range", s) == Status::Fail);
+    for (const auto& d : steps()) {
+        if (d.id == "mis.range") {
+            CHECK(d.critical);
+        }
+    }
+}
+
 void testFinal() {
     VehicleState s = live();
     s.custom_mode = plane::AUTO;
@@ -265,6 +283,7 @@ void testSession() {
 }  // namespace
 
 int main() {
+    testMissionElsewhere();
     testCatalogue();
     testFrames();
     testPower();

@@ -56,6 +56,11 @@ signals:
 
 protected:
     void paintEvent(QPaintEvent* e) override;
+
+public:
+    int paints_ = 0;  // paint events since the last GCS_FPS report
+
+protected:
     void mousePressEvent(QMouseEvent* e) override;
     void compactChanged() override { setGuideMode(guide_); }
 

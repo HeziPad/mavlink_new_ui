@@ -37,6 +37,11 @@ ctest --test-dir build        # geo, mission builder, mission transfer, command 
 The GCS listens on the UDP port and replies to whichever address the vehicle
 sends from. Point the autopilot or MAVProxy output at it.
 
+If it feels slow, run it with `GCS_FPS=1`. Once a second it prints how often it
+redrew, its longest stall, and the attitude/position telemetry rates. That
+tells a slow UI apart from slow telemetry. Through MAVProxy, use
+`--streamrate=-1`; otherwise MAVProxy forces every stream to 4 Hz.
+
 ### With SITL
 
 ```sh

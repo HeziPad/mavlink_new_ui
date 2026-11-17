@@ -75,7 +75,8 @@ Everything repaints at 60 Hz in software, so each frame's full-window repaint mu
 - Anything that doesn't change every frame goes into a cached pixmap: `MapView` draws grid + tiles + the trail into a backdrop with a margin (`paintBackdrop`) and only shifts it; `CameraView` caches its vignette + scanlines.
 - Don't keep transparent full-window widgets visible when idle: `FxOverlay` hides itself, because a visible one forces a full recomposite every frame.
 - Qt 6's raster engine splits big fills over the global `QThreadPool`; `main.cpp` caps it at 2 threads (same frame time as 16, ~40 % less CPU). `GCS_PAINT_THREADS` overrides.
-- Measure with a driver that `repaint()`s widgets and times them, not by eye.
+- Clip every line drawn from map coordinates to the view first (`drawClipped`, `drawLineClipped`, `circleVisible` in `map_view.cpp`). A leg to a far-off point (SITL restarted elsewhere keeps its old mission: 13 000 km) is millions of pixels long when zoomed in, and Qt rasterises every dash of it. That held the UI thread for ~3 s per frame.
+- Measure with a driver that `repaint()`s widgets and times them, not by eye. `GCS_FPS=1` prints ticks, paints, stalls and telemetry rates live.
 
 ## Qt gotchas
 

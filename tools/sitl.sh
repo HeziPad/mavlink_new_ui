@@ -52,5 +52,8 @@ fi
 echo "SITL start: $location  [$why]"
 
 cd "$ardupilot"
+# --streamrate=-1: MAVProxy otherwise forces every stream to 4 Hz, overriding
+# the rates the GCS asks for (the HUD then moves in visible steps)
 exec Tools/autotest/sim_vehicle.py -v ArduPlane -f quadplane -l "$location" \
-    --out=udp:127.0.0.1:14551 --add-param-file="$here/sitl_extra.parm" "${args[@]}"
+    --out=udp:127.0.0.1:14551 --add-param-file="$here/sitl_extra.parm" \
+    --mavproxy-args="--streamrate=-1" "${args[@]}"

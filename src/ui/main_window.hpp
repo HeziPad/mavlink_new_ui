@@ -152,6 +152,13 @@ private:
     QElapsedTimer clock_;
     qint64 last_ms_ = 0;
     int frame_count_ = 0;
+    // GCS_FPS=1 diagnostics
+    bool diag_ = false;
+    int diag_ticks_ = 0;
+    qint64 diag_t0_ = 0, diag_last_tick_ = 0, diag_gap_max_ = 0, diag_work_max_ = 0;
+    int diag_att_ = 0, diag_pos_ = 0;
+    Clock::time_point diag_att_rx_{}, diag_pos_rx_{};
+    void diagFrame(qint64 now_ms);
 
     VehicleState s_;
     bool planning_ = false;

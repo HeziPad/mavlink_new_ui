@@ -225,7 +225,7 @@ const std::vector<StepDef>& steps() {
              "Every waypoint between the takeoff altitude and 120 m (or the fence).", false, true},
             {"mis.range", Stage::Mission, Kind::Auto, "Distances",
              "Far waypoints eat the reserve for the vertical landing.",
-             "Waypoints and L within a sensible range of home.", false, true},
+             "Waypoints and L within a sensible range of home.", true, true},
             {"mis.endurance", Stage::Mission, Kind::Auto, "Endurance",
              "Running out of battery on a loop that flies forever.",
              "Enough battery for the laps you plan, plus the landing reserve.", false, true},
@@ -585,6 +585,11 @@ std::optional<Eval> evaluate(const std::string& id, const VehicleState& s, const
             }
             if (plan.land) {
                 far = std::max(far, geo::distance(s.home_lat, s.home_lon, plan.land->lat, plan.land->lon));
+            }
+            if (far > 50000.0) {
+                // not a long mission: a mission left over from another place (e.g. SITL restarted elsewhere)
+                return ev(Status::Fail, "the mission is " + std::to_string(static_cast<int>(far / 1000.0)) +
+                                            " km from home: it was planned somewhere else. Plan a new one here and Sync");
             }
             const std::string d = "farthest point " + std::to_string(static_cast<int>(far)) + " m from home";
             return ev(far <= 3000.0 ? Status::Pass : Status::Warn, far <= 3000.0 ? d : d + ": keep it in range of the link");

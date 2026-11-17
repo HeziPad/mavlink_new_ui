@@ -34,6 +34,7 @@
 #include <QTimer>
 
 #include <algorithm>
+#include <cstdio>
 
 namespace gcs::ui {
 
@@ -287,6 +288,7 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
     client_->start();
     video_->start();
 
+    diag_ = qEnvironmentVariableIntValue("GCS_FPS") > 0;
     timer_ = new QTimer(this);
     timer_->setTimerType(Qt::PreciseTimer);
     connect(timer_, &QTimer::timeout, this, &MainWindow::frame);
@@ -380,6 +382,42 @@ void MainWindow::frame() {
     preflight_->tick(dt);
     if (preflight_->isOpen() && isAirborne(s_)) {
         preflight_->close();  // ground only
+    }
+    if (diag_) {
+        diagFrame(now_ms);
+    }
+}
+
+void MainWindow::diagFrame(qint64 now_ms) {
+    // GCS_FPS=1: once a second, how often frame() ran, how often the map and
+    // camera actually painted, and the worst stalls. Low paint counts with a
+    // normal tick count mean the window system is throttling presentation.
+    const qint64 work = clock_.elapsed() - now_ms;
+    diag_work_max_ = std::max(diag_work_max_, work);
+    if (diag_last_tick_ > 0) {
+        diag_gap_max_ = std::max(diag_gap_max_, now_ms - diag_last_tick_);
+    }
+    diag_last_tick_ = now_ms;
+    ++diag_ticks_;
+    if (s_.att_rx != diag_att_rx_) {
+        diag_att_rx_ = s_.att_rx;
+        ++diag_att_;
+    }
+    if (s_.pos_rx != diag_pos_rx_) {
+        diag_pos_rx_ = s_.pos_rx;
+        ++diag_pos_;
+    }
+    if (now_ms - diag_t0_ >= 1000) {
+        std::fprintf(stderr,
+                     "fps: ticks %d · map paints %d · camera paints %d · longest gap %lld ms · longest frame() %lld ms"
+                     " · attitude %d Hz · position %d Hz\n",
+                     diag_ticks_, map_->paints_, camera_->paints_, static_cast<long long>(diag_gap_max_),
+                     static_cast<long long>(diag_work_max_), diag_att_, diag_pos_);
+        diag_att_ = diag_pos_ = 0;
+        map_->paints_ = camera_->paints_ = 0;
+        diag_ticks_ = 0;
+        diag_gap_max_ = diag_work_max_ = 0;
+        diag_t0_ = now_ms;
     }
 }
 
