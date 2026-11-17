@@ -199,4 +199,24 @@ GroundTarget cameraRayToGround(const CameraModel& cam, const Attitude& att, doub
     return t;
 }
 
+Footprint cameraFootprint(const CameraModel& cam, const Attitude& att, double alt_agl, double max_range,
+                          int per_edge) {
+    Footprint fp;
+    per_edge = std::max(1, per_edge);
+    const double w = cam.width, h = cam.height;
+    auto cast = [&](double px, double py) {
+        const GroundTarget t = cameraRayToGround(cam, att, px, py, alt_agl, max_range, max_range);
+        fp.outline.push_back({t.north, t.east});
+        fp.open.push_back(!t.hit_ground);
+        fp.valid = fp.valid || t.hit_ground;
+    };
+    // top edge left->right, right edge top->bottom, bottom right->left, left bottom->top
+    for (int i = 0; i < per_edge; ++i) cast(w * i / per_edge, 0.0);
+    for (int i = 0; i < per_edge; ++i) cast(w, h * i / per_edge);
+    for (int i = 0; i < per_edge; ++i) cast(w - w * i / per_edge, h);
+    for (int i = 0; i < per_edge; ++i) cast(0.0, h - h * i / per_edge);
+    fp.center = cameraRayToGround(cam, att, w / 2.0, h / 2.0, alt_agl, max_range, max_range);
+    return fp;
+}
+
 }  // namespace gcs::geo

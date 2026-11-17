@@ -1,7 +1,9 @@
 #include "camera_view.hpp"
 
+#include "attitude_ball.hpp"
 #include "core/geo.hpp"
 #include "theme.hpp"
+#include "units.hpp"
 #include "video_receiver.hpp"
 
 #include <QFontMetricsF>
@@ -37,6 +39,13 @@ CameraView::CameraView(VideoReceiver* video, QWidget* parent) : HudView(parent),
 
 bool CameraView::live() const {
     return frame_age_ < kNoVideoAfter;
+}
+
+double CameraView::aspect() const {
+    if (live() && !frame_.isNull() && frame_.height() > 0) {
+        return static_cast<double>(frame_.width()) / frame_.height();
+    }
+    return 16.0 / 9.0;
 }
 
 QString CameraView::pipTag() const {
@@ -88,6 +97,13 @@ void CameraView::tick(double dt) {
     as_.step(dt);
     alt_.step(dt);
     travelled_ += s_.groundspeed * dt;
+    const double target = ref_ == HudRef::Body ? 1.0 : 0.0;
+    if (reducedMotion()) {
+        ref_blend_ = target;
+    } else {
+        ref_blend_ += std::clamp(target - ref_blend_, -dt * 3.5, dt * 3.5);
+    }
+    ref_glitch_ = std::max(0.0, ref_glitch_ - dt * 3.0);
     if (click_t_ >= 0.0) {
         click_t_ += dt;
         if (click_t_ > 1.2) {
@@ -114,8 +130,45 @@ double CameraView::elevationToY(double elevation_deg) const {
     return -focal() * tanDeg(rel);
 }
 
+double CameraView::hudY(double elevation_deg) const {
+    const double rel = std::clamp(elevation_deg - refPitch(), -89.0, 89.0);
+    return -focal() * tanDeg(rel);
+}
+
+// eased so the ladder sweeps from one reference to the other
+double CameraView::refRoll() const {
+    return cam_roll_.value + (roll_.value - cam_roll_.value) * easeInOutCubic(ref_blend_);
+}
+double CameraView::refPitch() const {
+    return cam_el_.value + (pitch_.value - cam_el_.value) * easeInOutCubic(ref_blend_);
+}
+double CameraView::refYaw() const {
+    return geo::wrap360(cam_az_.value + geo::wrap180(yaw_.value - cam_az_.value) * easeInOutCubic(ref_blend_));
+}
+
+void CameraView::setHudReference(HudRef ref, bool animate) {
+    if (ref == ref_) {
+        return;
+    }
+    ref_ = ref;
+    if (!animate || reducedMotion()) {
+        ref_blend_ = ref == HudRef::Body ? 1.0 : 0.0;
+    } else {
+        ref_glitch_ = 1.0;
+    }
+    update();
+}
+
 void CameraView::mousePressEvent(QMouseEvent* e) {
-    if (compact_ || !guide_ || e->button() != Qt::LeftButton) {
+    if (compact_ || e->button() != Qt::LeftButton) {
+        return;
+    }
+    if (ref_chip_.contains(e->position())) {
+        setHudReference(ref_ == HudRef::Los ? HudRef::Body : HudRef::Los, true);
+        emit hudReferenceChanged(static_cast<int>(ref_));
+        return;
+    }
+    if (!guide_) {
         return;
     }
     click_ = e->position();
@@ -254,8 +307,8 @@ void CameraView::paintHud(QPainter& p) {
     p.save();
     p.setClipRect(QRectF(c.x() - r.width() * 0.32, c.y() - r.height() * 0.30, r.width() * 0.64, r.height() * 0.57));
     p.translate(c);
-    p.rotate(-cam_roll_.value);
-    const double hy = elevationToY(0.0);
+    p.rotate(-refRoll());
+    const double hy = hudY(0.0);
     p.setPen(QPen(alpha(hud, 0.9), compact_ ? 1.2 : 1.6));
     p.drawLine(QPointF(-r.width() * 0.4, hy), QPointF(-60, hy));
     p.drawLine(QPointF(60, hy), QPointF(r.width() * 0.4, hy));
@@ -266,7 +319,7 @@ void CameraView::paintHud(QPainter& p) {
             if (e == 0) {
                 continue;
             }
-            const double y = elevationToY(e);
+            const double y = hudY(e);
             if (std::abs(y) > r.height() * 0.45) {
                 continue;
             }
@@ -293,9 +346,9 @@ void CameraView::paintHud(QPainter& p) {
         // flight path marker: where the aircraft is actually going
         if (s_.has_position && s_.groundspeed > 2.0) {
             const double track = std::atan2(s_.ve, s_.vn) * geo::kRadToDeg;
-            const double drift = std::clamp(geo::wrap180(track - cam_az_.value), -40.0, 40.0);
+            const double drift = std::clamp(geo::wrap180(track - refYaw()), -40.0, 40.0);
             const double gamma = std::atan2(-s_.vd, std::hypot(s_.vn, s_.ve)) * geo::kRadToDeg;
-            const QPointF fpm(f * tanDeg(drift), elevationToY(gamma));
+            const QPointF fpm(f * tanDeg(drift), hudY(gamma));
             p.setPen(QPen(hud, 1.6));
             p.setBrush(Qt::NoBrush);
             p.drawEllipse(fpm, 7, 7);
@@ -303,50 +356,56 @@ void CameraView::paintHud(QPainter& p) {
             p.drawLine(fpm + QPointF(7, 0), fpm + QPointF(18, 0));
             p.drawLine(fpm + QPointF(0, -7), fpm + QPointF(0, -14));
         }
+
+        // body reference: where the camera looks, relative to the nose
+        if (ref_blend_ > 0.02) {
+            const double dx = geo::wrap180(cam_az_.value - refYaw());
+            if (std::abs(dx) < 60.0) {
+                const QPointF cb(f * tanDeg(dx), hudY(cam_el_.value));
+                p.setPen(QPen(alpha(kAmber, 0.9 * ref_blend_), 1.6));
+                p.setBrush(Qt::NoBrush);
+                p.drawRect(QRectF(cb.x() - 9, cb.y() - 9, 18, 18));
+                drawText(p, QRectF(cb.x() + 12, cb.y() - 8, 40, 16), Qt::AlignLeft | Qt::AlignVCenter,
+                         QStringLiteral("CAM"), labelFont(9.5), alpha(kAmber, 0.9 * ref_blend_));
+            }
+        }
     }
     p.restore();
 
     // ---- boresight crosshair ------------------------------------------------
-    p.setPen(QPen(hud, 1.6));
-    const double g = compact_ ? 4 : 8, l = compact_ ? 10 : 22;
-    p.drawLine(QPointF(c.x() - l, c.y()), QPointF(c.x() - g, c.y()));
-    p.drawLine(QPointF(c.x() + g, c.y()), QPointF(c.x() + l, c.y()));
-    p.drawLine(QPointF(c.x(), c.y() - l), QPointF(c.x(), c.y() - g));
-    p.drawLine(QPointF(c.x(), c.y() + g), QPointF(c.x(), c.y() + l));
-    p.drawPoint(c);
+    const double body = compact_ ? 0.0 : ref_blend_;
+    if (body < 0.98) {
+        p.setPen(QPen(alpha(hud, 1.0 - body), 1.6));
+        const double g = compact_ ? 4 : 8, l = compact_ ? 10 : 22;
+        p.drawLine(QPointF(c.x() - l, c.y()), QPointF(c.x() - g, c.y()));
+        p.drawLine(QPointF(c.x() + g, c.y()), QPointF(c.x() + l, c.y()));
+        p.drawLine(QPointF(c.x(), c.y() - l), QPointF(c.x(), c.y() - g));
+        p.drawLine(QPointF(c.x(), c.y() + g), QPointF(c.x(), c.y() + l));
+        p.drawPoint(c);
+    }
+    if (body > 0.02) {
+        // waterline "W": the aircraft nose
+        p.setPen(QPen(alpha(hud, body), 2.0));
+        p.setBrush(Qt::NoBrush);
+        p.drawPolyline(QPolygonF({c + QPointF(-30, 0), c + QPointF(-14, 0), c + QPointF(-7, 9), c + QPointF(0, 0),
+                                  c + QPointF(7, 9), c + QPointF(14, 0), c + QPointF(30, 0)}));
+    }
 
     if (compact_) {
         return;
     }
 
-    // bank indicator arc
-    {
-        p.save();
-        p.translate(c.x(), c.y());
-        const double rad = std::min(r.width(), r.height()) * 0.30;
-        p.setPen(QPen(alpha(hud, 0.6), 1.2));
-        p.drawArc(QRectF(-rad, -rad, 2 * rad, 2 * rad), (90 - 45) * 16, 90 * 16);
-        for (int b : {-45, -30, -20, -10, 0, 10, 20, 30, 45}) {
-            p.save();
-            p.rotate(b);
-            p.drawLine(QPointF(0, -rad), QPointF(0, -rad - (b % 30 == 0 ? 10 : 6)));
-            p.restore();
-        }
-        p.rotate(-roll_.value);
-        QPolygonF caret({QPointF(0, -rad + 2), QPointF(-6, -rad + 12), QPointF(6, -rad + 12)});
-        p.setBrush(hud);
-        p.setPen(Qt::NoPen);
-        p.drawPolygon(caret);
-        p.restore();
-    }
+    paintRollScale(p, c, std::min(r.width(), r.height()) * 0.30);
 
     paintHeadingTape(p, QRectF(c.x() - r.width() * 0.22, 66, r.width() * 0.44, 38));
     paintReadouts(p);
+    paintRefChip(p);
     const double tape_h = std::min(r.height() * 0.46, 360.0);
     paintVerticalTape(p, QRectF(c.x() - r.width() * 0.36 - 70, c.y() - tape_h / 2, 70, tape_h), as_.value, 2.0, true,
                       QStringLiteral("AS"));
-    paintVerticalTape(p, QRectF(c.x() + r.width() * 0.36, c.y() - tape_h / 2, 70, tape_h), alt_.value, 5.0, false,
-                      QStringLiteral("ALT"));
+    paintVerticalTape(p, QRectF(c.x() + r.width() * 0.36, c.y() - tape_h / 2, 70, tape_h),
+                      units::altToDisplay(alt_.value), units::feet() ? 20.0 : 5.0, false,
+                      QStringLiteral("ALT %1").arg(units::altUnitLabel()));
 
     // status line under the crosshair
     {
@@ -370,11 +429,97 @@ void CameraView::paintHud(QPainter& p) {
         drawText(p, box, Qt::AlignCenter, text, fnt, kCyan);
         drawBrackets(p, r.adjusted(8, 8, -8, -8), 28, alpha(kCyan, 0.7), 2.0);
     }
+    if (ref_glitch_ > 0.0 && !reducedMotion()) {
+        // short tear across the rulers while the reference switches
+        for (int i = 0; i < 7; ++i) {
+            const double fy = std::fmod(std::sin(i * 12.9898 + time_ * 31.0) * 43758.5453, 1.0);
+            const double y = c.y() + (std::abs(fy) - 0.5) * r.height() * 0.6;
+            p.fillRect(QRectF(c.x() - r.width() * 0.32 + fy * 30.0, y, r.width() * 0.64, 2.0 + 6.0 * ref_glitch_),
+                       alpha(i % 2 ? kGreen : kAmber, 0.25 * ref_glitch_));
+        }
+    }
     if (click_t_ >= 0.0) {
         const double e = easeOutCubic(std::min(1.0, click_t_ / 0.25));
         const double a = 1.0 - std::clamp((click_t_ - 0.6) / 0.6, 0.0, 1.0);
         const double s = 34 - 16 * e;
         drawBrackets(p, QRectF(click_.x() - s, click_.y() - s, 2 * s, 2 * s), 8, alpha(kCyan, a), 2.0);
+    }
+}
+
+void CameraView::paintRollScale(QPainter& p, const QPointF& c, double rad) {
+    const QColor hud = kGreen;
+    const double roll = refRoll();
+    p.save();
+    p.translate(c);
+    p.setPen(QPen(alpha(hud, 0.6), 1.2));
+    p.setBrush(Qt::NoBrush);
+    p.drawArc(QRectF(-rad, -rad, 2 * rad, 2 * rad), (90 - 60) * 16, 120 * 16);
+    const QFont lf = monoFont(10.5, true);
+    for (int b : {-60, -45, -30, -20, -10, 0, 10, 20, 30, 45, 60}) {
+        p.save();
+        p.rotate(b);
+        const bool major = b % 30 == 0 || std::abs(b) == 45;
+        p.setPen(QPen(alpha(hud, 0.8), major ? 1.6 : 1.2));
+        p.drawLine(QPointF(0, -rad), QPointF(0, -rad - (major ? 11 : 6)));
+        if (b != 0) {
+            // numbers ride along the arc, just outside the ticks
+            drawText(p, QRectF(-16, -rad - 28, 32, 15), Qt::AlignCenter, QString::number(std::abs(b)), lf,
+                     alpha(hud, 0.85));
+        } else {
+            p.setPen(Qt::NoPen);
+            p.setBrush(alpha(hud, 0.8));
+            p.drawPolygon(QPolygonF({QPointF(0, -rad - 12), QPointF(-5, -rad - 21), QPointF(5, -rad - 21)}));
+        }
+        p.restore();
+    }
+    // pointer rides with the horizon (sky pointer)
+    const bool steep = std::abs(roll) > 45.0;
+    const QColor pc = steep ? kAmber : hud;
+    p.save();
+    p.rotate(-std::clamp(roll, -70.0, 70.0));
+    p.setBrush(pc);
+    p.setPen(Qt::NoPen);
+    p.drawPolygon(QPolygonF({QPointF(0, -rad + 2), QPointF(-7, -rad + 14), QPointF(7, -rad + 14)}));
+    p.restore();
+    // live readout under the pointer
+    const int deg = static_cast<int>(std::lround(std::abs(roll)));
+    const QString text = deg == 0 ? QStringLiteral("0°")
+                                   : QStringLiteral("%1 %2°").arg(roll > 0 ? QLatin1Char('R') : QLatin1Char('L')).arg(deg);
+    const QRectF box(-30, -rad + 18, 60, 20);
+    p.setPen(QPen(alpha(pc, 0.9), 1.2));
+    p.setBrush(alpha(kBg, 0.7));
+    p.drawRect(box);
+    drawText(p, box, Qt::AlignCenter, text, monoFont(12, true), pc);
+    drawText(p, QRectF(-50, -rad + 40, 100, 14), Qt::AlignCenter,
+             ref_ == HudRef::Body ? QStringLiteral("BANK") : QStringLiteral("LOS ROLL"), labelFont(9),
+             alpha(hud, 0.55));
+    p.restore();
+}
+
+void CameraView::paintRefChip(QPainter& p) {
+    // under the AIRCRAFT box (see paintReadouts)
+    const bool body = ref_ == HudRef::Body;
+    const QColor col = body ? kAmber : kGreen;
+    // narrow: the airspeed tape's label sits just right of it
+    ref_chip_ = QRectF(16, 120 + 92 + 8, 108, 48);
+    drawGlass(p, chamferPath(ref_chip_, 7), col, 0.85, kGlassDeep);
+    drawText(p, QRectF(ref_chip_.left() + 10, ref_chip_.top() + 5, 90, 14), Qt::AlignLeft | Qt::AlignVCenter,
+             QStringLiteral("HUD RULERS"), labelFont(9), alpha(kMuted, 0.95));
+    drawText(p, QRectF(ref_chip_.left() + 10, ref_chip_.top() + 20, 70, 22), Qt::AlignLeft | Qt::AlignVCenter,
+             body ? QStringLiteral("BODY") : QStringLiteral("LOS"), labelFont(14), col);
+    // two-position indicator on the right
+    const QRectF track(ref_chip_.right() - 38, ref_chip_.top() + 25, 28, 12);
+    p.setPen(QPen(alpha(col, 0.6), 1));
+    p.setBrush(alpha(kBg, 0.6));
+    p.drawRoundedRect(track, 6, 6);
+    const double kx = track.left() + 6 + (track.width() - 12) * easeInOutCubic(ref_blend_);
+    p.setPen(Qt::NoPen);
+    p.setBrush(col);
+    p.drawEllipse(QPointF(kx, track.center().y()), 5, 5);
+    if (body && live()) {
+        drawText(p, QRectF(ref_chip_.left() + 2, ref_chip_.bottom() + 4, ref_chip_.width(), 28),
+                 Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, QStringLiteral("not aligned with the video"),
+                 labelFont(9), alpha(kAmber, 0.8));
     }
 }
 
@@ -384,7 +529,7 @@ void CameraView::paintHeadingTape(QPainter& p, const QRectF& r) {
     const QColor hud = kGreen;
     const double span = 60.0;
     const double ppd = r.width() / span;
-    const double hdg = cam_az_.value;  // the tape follows what the camera sees
+    const double hdg = refYaw();  // LOS: what the camera sees; body: the nose
     p.setPen(QPen(alpha(hud, 0.6), 1));
     p.drawLine(QPointF(r.left(), r.bottom()), QPointF(r.right(), r.bottom()));
     const QFont f = monoFont(11);
@@ -406,17 +551,19 @@ void CameraView::paintHeadingTape(QPainter& p, const QRectF& r) {
             drawText(p, QRectF(x - 16, r.top(), 32, 16), Qt::AlignCenter, label, f, alpha(hud, 0.85));
         }
     }
-    // aircraft nose on the LOS tape (when it's in view)
-    const double nose = geo::wrap180(yaw_.value - hdg);
-    if (std::abs(nose) < span / 2) {
-        const double x = r.center().x() + nose * ppd;
+    // the other reference on the tape (when it's in view): the nose on the LOS
+    // tape, the camera on the body tape
+    const bool body = ref_ == HudRef::Body;
+    const double other = geo::wrap180((body ? cam_az_.value : yaw_.value) - hdg);
+    if (std::abs(other) < span / 2) {
+        const double x = r.center().x() + other * ppd;
         p.setPen(Qt::NoPen);
-        p.setBrush(alpha(kCyan, 0.9));
+        p.setBrush(alpha(body ? kAmber : kCyan, 0.9));
         p.drawPolygon(QPolygonF({QPointF(x, r.top() + 2), QPointF(x - 5, r.top() - 6), QPointF(x + 5, r.top() - 6)}));
     }
     p.restore();
     drawText(p, QRectF(r.left() - 48, r.bottom() - 16, 44, 14), Qt::AlignRight | Qt::AlignVCenter,
-             QStringLiteral("LOS"), labelFont(10), alpha(hud, 0.7));
+             ref_ == HudRef::Body ? QStringLiteral("HDG") : QStringLiteral("LOS"), labelFont(10), alpha(hud, 0.7));
     // boxed readout + caret
     const QRectF box(r.center().x() - 28, r.bottom() + 2, 56, 20);
     p.setPen(QPen(kGreen, 1.2));
@@ -459,24 +606,9 @@ void CameraView::paintReadouts(QPainter& p) {
         row(box, 1, QStringLiteral("PITCH"), signedDeg(pitch_.value), hud);
         row(box, 2, QStringLiteral("HDG"),
             QStringLiteral("%1°").arg(static_cast<int>(std::lround(yaw_.value)) % 360, 3, 10, QLatin1Char('0')), hud);
-        // mini attitude: aircraft symbol over a horizon that rolls/pitches
-        const QPointF ac(box.right() + 34, box.center().y());
-        const double rad = 26;
-        p.save();
-        p.setClipRect(QRectF(ac.x() - rad, ac.y() - rad, 2 * rad, 2 * rad));
-        p.translate(ac);
-        p.setPen(QPen(alpha(hud, 0.4), 1));
-        p.setBrush(alpha(kBg, 0.55));
-        p.drawEllipse(QPointF(0, 0), rad, rad);
-        p.rotate(-roll_.value);
-        const double py = std::clamp(pitch_.value, -30.0, 30.0) * rad / 30.0;
-        p.setPen(QPen(hud, 1.4));
-        p.drawLine(QPointF(-rad, py), QPointF(rad, py));
-        p.restore();
-        p.setPen(QPen(kCyan, 2));
-        p.drawLine(ac + QPointF(-14, 0), ac + QPointF(-5, 0));
-        p.drawLine(ac + QPointF(5, 0), ac + QPointF(14, 0));
-        p.drawPoint(ac);
+        // mini attitude ball
+        paintAttitudeBall(p, QPointF(box.right() + 34, box.center().y()), 26, roll_.value, pitch_.value, yaw_.value,
+                          true);
     }
 
     // ---- line of sight ------------------------------------------------------------

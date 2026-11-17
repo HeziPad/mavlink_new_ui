@@ -15,6 +15,11 @@ inline double easeOutCubic(double t) {
     return 1.0 - u * u * u;
 }
 
+inline double easeInOutCubic(double t) {
+    t = std::clamp(t, 0.0, 1.0);
+    return t < 0.5 ? 4.0 * t * t * t : 1.0 - std::pow(-2.0 * t + 2.0, 3.0) / 2.0;
+}
+
 inline double lerp(double a, double b, double t) {
     return a + (b - a) * t;
 }

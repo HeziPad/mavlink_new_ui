@@ -189,7 +189,54 @@ static void testCameraLos() {
     CHECK(!los.gimbal);
 }
 
+static void testFootprint() {
+    // straight down, square image, 90 deg FOV, 100 m up: a 200 m square
+    CameraModel cam;
+    cam.hfov_deg = 90.0;
+    cam.mount_pitch_deg = 0.0;
+    cam.width = cam.height = 1000.0;
+    Attitude down{0.0, -90.0, 0.0};
+    Footprint fp = cameraFootprint(cam, down, 100.0, 3000.0);
+    CHECK(fp.valid);
+    CHECK(fp.outline.size() == 32);
+    double maxn = 0, maxe = 0;
+    for (size_t i = 0; i < fp.outline.size(); ++i) {
+        CHECK(!fp.open[i]);
+        maxn = std::max(maxn, std::abs(fp.outline[i].north));
+        maxe = std::max(maxe, std::abs(fp.outline[i].east));
+    }
+    CHECK_NEAR(maxn, 100.0, 1.0);
+    CHECK_NEAR(maxe, 100.0, 1.0);
+    CHECK_NEAR(fp.center.range, 0.0, 0.5);
+
+    // 30 deg down looking north, 16:9: a trapezoid, wider far than near
+    cam.hfov_deg = 60.0;
+    cam.width = 1600.0;
+    cam.height = 900.0;
+    Attitude tilted{0.0, -30.0, 0.0};
+    fp = cameraFootprint(cam, tilted, 100.0, 3000.0, 4);
+    CHECK(fp.valid);
+    CHECK_NEAR(fp.center.range, 100.0 / std::tan(30.0 * kDegToRad), 1.0);
+    // corners: 0 = top-left (far), 4 = top-right, 8 = bottom-right (near), 12 = bottom-left
+    const double far_w = fp.outline[4].east - fp.outline[0].east;
+    const double near_w = fp.outline[8].east - fp.outline[12].east;
+    CHECK(far_w > near_w * 1.5);
+    CHECK(fp.outline[0].north > fp.outline[12].north);
+    for (bool o : fp.open) {
+        CHECK(!o);
+    }
+
+    // looking just above the horizon: the top edge is open at max range
+    Attitude level{0.0, 0.0, 90.0};
+    fp = cameraFootprint(cam, level, 100.0, 1500.0, 4);
+    CHECK(fp.valid);  // the lower half still sees the ground
+    CHECK(fp.open[0] && fp.open[2]);
+    CHECK(!fp.open[8]);
+    CHECK_NEAR(std::hypot(fp.outline[0].north, fp.outline[0].east), 1500.0, 1.0);
+}
+
 int main() {
+    testFootprint();
     testMountComposition();
     testPrediction();
     testCameraLos();

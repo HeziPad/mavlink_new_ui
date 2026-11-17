@@ -64,6 +64,14 @@ bool hasFlyableMission(const VehicleState& s) {
     return s.mission_known && s.mission.size() > 1;
 }
 
+bool isLandingInMission(const VehicleState& s) {
+    if (s.custom_mode != plane::AUTO || !s.mission_known) {
+        return false;
+    }
+    const int seq = landSeq(s.mission);  // the approach circle when there is one
+    return seq >= 0 && s.mission_current >= seq;
+}
+
 bool prearmHealthy(const VehicleState& s) {
     if (!s.has_sys_status) {
         return false;

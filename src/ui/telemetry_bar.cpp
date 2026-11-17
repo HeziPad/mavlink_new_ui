@@ -1,6 +1,7 @@
 #include "telemetry_bar.hpp"
 
 #include "theme.hpp"
+#include "units.hpp"
 
 #include <QFontMetricsF>
 #include <QMouseEvent>
@@ -12,54 +13,6 @@ namespace gcs::ui {
 
 using namespace theme;
 
-// Small panel shown under the SYSTEMS chip.
-class ChecklistPanel : public QWidget {
-public:
-    struct Row {
-        QString name;
-        QString detail;
-        QColor color;
-        QString mark;
-    };
-
-    explicit ChecklistPanel(QWidget* parent) : QWidget(parent) {
-        setAttribute(Qt::WA_TransparentForMouseEvents);
-        hide();
-    }
-
-    void setRows(std::vector<Row> rows) {
-        rows_ = std::move(rows);
-        resize(250, 40 + static_cast<int>(rows_.size()) * 24);
-        update();
-    }
-
-protected:
-    void paintEvent(QPaintEvent*) override {
-        QPainter p(this);
-        p.setRenderHint(QPainter::Antialiasing);
-        const QRectF r = QRectF(rect()).adjusted(1, 1, -1, -1);
-        drawGlass(p, chamferPath(r, 10), kCyan, 0.5, kGlassDeep);
-        drawText(p, QRectF(14, 8, r.width() - 28, 18), Qt::AlignLeft | Qt::AlignVCenter,
-                 QStringLiteral("Pre-flight systems"), labelFont(10.5), kMuted);
-        double y = 32;
-        for (const auto& row : rows_) {
-            const QRectF line(14, y, r.width() - 28, 22);
-            p.setPen(Qt::NoPen);
-            p.setBrush(row.color);
-            p.drawRect(QRectF(line.left(), line.center().y() - 4, 3, 8));
-            drawText(p, line.adjusted(10, 0, 0, 0), Qt::AlignLeft | Qt::AlignVCenter, row.name,
-                     labelFont(11), kText);
-            drawText(p, line.adjusted(70, 0, -24, 0), Qt::AlignLeft | Qt::AlignVCenter, row.detail,
-                     monoFont(11.5), kMuted);
-            drawText(p, line, Qt::AlignRight | Qt::AlignVCenter, row.mark, monoFont(13, true),
-                     row.color);
-            y += 24;
-        }
-    }
-
-private:
-    std::vector<Row> rows_;
-};
 
 namespace {
 
@@ -126,8 +79,7 @@ void chip(QPainter& p, const QRectF& r, const QString& label, const QString& val
 }  // namespace
 
 TelemetryBar::TelemetryBar(QWidget* parent) : QWidget(parent) {
-    setMouseTracking(true);
-    panel_ = new ChecklistPanel(parent);
+    (void)parent;
     alt_.rate = as_.rate = gs_.rate = 9.0;
     batt_.rate = 4.0;
 }
@@ -172,9 +124,21 @@ void TelemetryBar::setState(const VehicleState& s, Clock::time_point now) {
         last_vtol_ = v;
     }
 
-    if (sys_hover_) {
-        showChecklist(true);  // refresh rows
+    update();
+}
+
+void TelemetryBar::setAdvisories(const std::vector<Advisory>& list) {
+    adv_bad_ = adv_warn_ = 0;
+    adv_critical_ = false;
+    for (const auto& a : list) {
+        adv_bad_ += a.severity >= Severity::Warning;
+        adv_warn_ += a.severity == Severity::Caution;
+        adv_critical_ = adv_critical_ || a.severity == Severity::Critical;
     }
+}
+
+void TelemetryBar::setSystemsOpen(bool open) {
+    sys_open_ = open;
     update();
 }
 
@@ -187,98 +151,24 @@ void TelemetryBar::tick(double dt) {
     moving |= batt_.step(dt);
     moving |= mode_flash_.step(dt);
     moving |= vtol_flash_.step(dt);
+    if (gear_spin_ > 0.0) {
+        gear_spin_ = std::max(0.0, gear_spin_ - dt * 2.5);
+        moving = true;
+    }
     if (moving || !alive_) {
         update();
     }
 }
 
-std::vector<TelemetryBar::CheckItem> TelemetryBar::checklist() const {
-    std::vector<CheckItem> items;
-    items.push_back({QStringLiteral("Link"),
-                     alive_ ? QStringLiteral("%1 msg/s").arg(msg_rate_, 0, 'f', 0)
-                            : QStringLiteral("no heartbeat"),
-                     alive_ ? Check::Ok : Check::Bad});
-    if (!s_.has_gps) {
-        items.push_back({QStringLiteral("GPS"), QStringLiteral("no data"), Check::Bad});
-    } else {
-        items.push_back({QStringLiteral("GPS"),
-                         QStringLiteral("%1 · %2 sats").arg(QLatin1String(fixName(s_.gps_fix))).arg(s_.gps_sats),
-                         gpsHealthy(s_) ? Check::Ok : Check::Bad});
-    }
-    items.push_back({QStringLiteral("EKF"), s_.has_ekf ? QStringLiteral("flags 0x%1").arg(s_.ekf_flags, 0, 16)
-                                                       : QStringLiteral("no report"),
-                     !s_.has_ekf ? Check::Warn : (ekfHealthy(s_) ? Check::Ok : Check::Bad)});
-    items.push_back({QStringLiteral("PreArm"),
-                     s_.has_sys_status ? (prearmHealthy(s_) ? QStringLiteral("passing")
-                                                            : QStringLiteral("see comms log"))
-                                       : QStringLiteral("unknown"),
-                     !s_.has_sys_status ? Check::Warn : (prearmHealthy(s_) ? Check::Ok : Check::Bad)});
-    items.push_back({QStringLiteral("Home"), s_.has_home ? QStringLiteral("set") : QStringLiteral("not set"),
-                     s_.has_home ? Check::Ok : Check::Warn});
-    if (s_.battery_pct >= 0) {
-        items.push_back({QStringLiteral("Battery"), QStringLiteral("%1%").arg(s_.battery_pct),
-                         s_.battery_pct >= 40 ? Check::Ok : (s_.battery_pct >= 20 ? Check::Warn : Check::Bad)});
-    } else {
-        items.push_back({QStringLiteral("Battery"),
-                         s_.has_battery ? QStringLiteral("%1 V").arg(s_.battery_v, 0, 'f', 1)
-                                        : QStringLiteral("not reported"),
-                         Check::NotApplicable});
-    }
-    return items;
-}
-
-void TelemetryBar::showChecklist(bool on) {
-    if (!on) {
-        panel_->hide();
+void TelemetryBar::mousePressEvent(QMouseEvent* e) {
+    if (gear_rect_.contains(e->position())) {
+        gear_spin_ = 1.0;
+        emit settingsRequested();
         return;
     }
-    std::vector<ChecklistPanel::Row> rows;
-    for (const auto& it : checklist()) {
-        QColor c = kMuted;
-        QString mark = QStringLiteral("–");
-        switch (it.status) {
-        case Check::Ok: c = kGreen; mark = QStringLiteral("✓"); break;
-        case Check::Warn: c = kAmber; mark = QStringLiteral("!"); break;
-        case Check::Bad: c = kRed; mark = QStringLiteral("✗"); break;
-        case Check::NotApplicable: break;
-        }
-        rows.push_back({it.name, it.detail, c, mark});
-    }
-    panel_->setRows(std::move(rows));
-    const QPoint at = mapToParent(QPointF(sys_rect_.right() - panel_->width(), sys_rect_.bottom() + 6).toPoint());
-    panel_->move(at);
-    panel_->raise();
-    panel_->show();
-}
-
-void TelemetryBar::mousePressEvent(QMouseEvent* e) {
-    // touch has no hover: a tap on SYSTEMS toggles the checklist
     if (sys_rect_.contains(e->position())) {
-        sys_hover_ = !panel_->isVisible();
-        showChecklist(sys_hover_);
+        emit systemsTapped();
     }
-}
-
-void TelemetryBar::mouseMoveEvent(QMouseEvent* e) {
-    if (e->buttons() != Qt::NoButton) {
-        return;  // a finger dragging, not a hover
-    }
-    const bool hover = sys_rect_.contains(e->position());
-    if (hover != sys_hover_) {
-        sys_hover_ = hover;
-        showChecklist(hover);
-    }
-}
-
-void TelemetryBar::leaveEvent(QEvent* e) {
-    sys_hover_ = false;
-    showChecklist(false);
-    QWidget::leaveEvent(e);
-}
-
-void TelemetryBar::hideEvent(QHideEvent* e) {
-    showChecklist(false);
-    QWidget::hideEvent(e);
 }
 
 void TelemetryBar::paintEvent(QPaintEvent*) {
@@ -287,8 +177,8 @@ void TelemetryBar::paintEvent(QPaintEvent*) {
 
     // chip widths at scale 1
     const double kLink = 104, kMode = 128, kVtol = 112, kLift = 104, kArm = 84, kAlt = 116, kSpd = 132,
-                 kBat = 156, kGps = 92, kSys = 108;
-    const double widths[] = {kLink, kMode, kVtol, kLift, kArm, kAlt, kSpd, kBat, kGps, kSys};
+                 kBat = 156, kGps = 92, kSys = 108, kGear = 60;
+    const double widths[] = {kLink, kMode, kVtol, kLift, kArm, kAlt, kSpd, kBat, kGps, kSys, kGear};
     double total = 0;
     for (double w : widths) {
         total += w;
@@ -415,12 +305,12 @@ void TelemetryBar::paintEvent(QPaintEvent*) {
     // ---- altitude ----------------------------------------------------------
     {
         const QRectF r = next(kAlt);
-        QString v = s_.has_position ? QString::number(alt_.value, 'f', 0) : QStringLiteral("—");
+        QString v = s_.has_position ? units::altText(alt_.value, false) : QStringLiteral("—");
         // commanded altitude when the autopilot is navigating to one
         if (s_.has_position && s_.has_nav && s_.armed && std::abs(s_.nav_alt_error) >= 1.5) {
-            v += QStringLiteral("→%1").arg(s_.alt_rel + s_.nav_alt_error, 0, 'f', 0);
+            v += QStringLiteral("→%1").arg(units::altText(s_.alt_rel + s_.nav_alt_error, false));
         }
-        chip(p, r, QStringLiteral("Alt m"), v, kText);
+        chip(p, r, QStringLiteral("Alt %1").arg(units::altUnitLabel()), v, kText);
     }
 
     // ---- speeds ------------------------------------------------------------
@@ -469,14 +359,11 @@ void TelemetryBar::paintEvent(QPaintEvent*) {
     // ---- systems -----------------------------------------------------------
     {
         const QRectF r = next(kSys);
-        int bad = 0, warn = 0;
-        for (const auto& it : checklist()) {
-            bad += it.status == Check::Bad;
-            warn += it.status == Check::Warn;
-        }
+        const int bad = adv_bad_, warn = adv_warn_;
         const QColor c = !alive_ ? kMuted : (bad ? kRed : (warn ? kAmber : kGreen));
-        const QString text = !alive_ ? QStringLiteral("—") : (bad ? QStringLiteral("%1 FAULT").arg(bad)
-                                                                       : (warn ? QStringLiteral("CHECK") : QStringLiteral("READY")));
+        const QString text = !alive_ ? QStringLiteral("—")
+                                     : (bad ? QStringLiteral("%1 FAULT").arg(bad)
+                                            : (warn ? QStringLiteral("%1 CHECK").arg(warn) : QStringLiteral("READY")));
         const QPointF dot(r.left() + 16, r.center().y() + 7);
         p.setPen(Qt::NoPen);
         p.setBrush(alpha(c, 0.25));
@@ -487,13 +374,42 @@ void TelemetryBar::paintEvent(QPaintEvent*) {
                  QStringLiteral("Systems"), labelFont(9.5), kMuted);
         drawText(p, QRectF(r.left() + 30, r.top() + 19, r.width() - 34, 24), Qt::AlignLeft | Qt::AlignVCenter,
                  text, labelFont(12.5), c);
-        if (sys_hover_) {
+        if (adv_critical_ && alive_ && !reducedMotion()) {
+            const double pulse = 0.5 + 0.5 * std::abs(std::sin(time_ * 3.0));
+            p.setPen(QPen(alpha(kRed, 0.8 * pulse), 1.5));
+            p.setBrush(alpha(kRed, 0.10 * pulse));
+            p.drawRect(r.adjusted(3, 6, -3, -6));
+        }
+        if (sys_open_) {
             p.setPen(QPen(alpha(kCyan, 0.6), 1));
             p.setBrush(Qt::NoBrush);
             p.drawRect(r.adjusted(3, 6, -3, -6));
         }
         // map back to widget coordinates for hover testing
         sys_rect_ = p.transform().mapRect(r);
+    }
+
+    // ---- settings ------------------------------------------------------------
+    {
+        const QRectF r = next(kGear);
+        const QPointF c = r.center();
+        p.save();
+        p.translate(c);
+        p.rotate(easeOutCubic(1.0 - gear_spin_) * 90.0 * (gear_spin_ > 0.0 ? 1.0 : 0.0));
+        // cog: ring + 8 teeth
+        p.setPen(QPen(kCyan, 2.2));
+        p.setBrush(Qt::NoBrush);
+        p.drawEllipse(QPointF(0, 0), 8.5, 8.5);
+        p.drawEllipse(QPointF(0, 0), 3.5, 3.5);
+        for (int i = 0; i < 8; ++i) {
+            p.save();
+            p.rotate(i * 45.0);
+            p.drawLine(QPointF(0, -9), QPointF(0, -13.5));
+            p.restore();
+        }
+        p.restore();
+        // the whole bar height is the hit target (>= 46 px)
+        gear_rect_ = p.transform().mapRect(r.adjusted(-2, -2, 2, 2));
     }
 }
 

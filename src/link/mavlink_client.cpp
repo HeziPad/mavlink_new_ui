@@ -553,6 +553,10 @@ void MavlinkClient::decodeTelemetry(const mavlink_message_t& msg) {
         mavlink_msg_ekf_status_report_decode(&msg, &e);
         s.has_ekf = true;
         s.ekf_flags = e.flags;
+        s.ekf_vel_var = e.velocity_variance;
+        s.ekf_pos_var = e.pos_horiz_variance;
+        s.ekf_hgt_var = e.pos_vert_variance;
+        s.ekf_mag_var = e.compass_variance;
         break;
     }
     case MAVLINK_MSG_ID_EXTENDED_SYS_STATE: {

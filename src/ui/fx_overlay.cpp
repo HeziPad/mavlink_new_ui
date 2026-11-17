@@ -70,7 +70,9 @@ void FxOverlay::setAlert(const QString& text) {
 }
 
 void FxOverlay::tick(double dt) {
-    bool dirty = false;
+    const double k = reducedMotion() ? 1.0 : 1.0 - std::exp(-12.0 * dt);
+    right_inset_ += (right_inset_target_ - right_inset_) * k;
+    bool dirty = std::abs(right_inset_target_ - right_inset_) > 0.25;
     for (auto& t : toasts_) {
         t.age += dt;
     }
@@ -127,7 +129,7 @@ void FxOverlay::paintToasts(QPainter& p) {
         // older entries shrink into a compact feed line
         const double compact = shown >= 1 ? 0.84 : 1.0;
         const double rh = h * compact;
-        const QRectF r(width() - 16 - w + (1.0 - in) * (w + 30), y, w, rh);
+        const QRectF r(width() - 16 - right_inset_ - w + (1.0 - in) * (w + 30), y, w, rh);
         p.save();
         p.setOpacity(out * (shown >= 2 ? 0.75 : 1.0));
         drawGlass(p, chamferPath(r, 9), t.color, 0.45, kGlassDeep);
@@ -198,6 +200,7 @@ void FxOverlay::paintBanner(QPainter& p) {
 }
 
 void FxOverlay::paintAlert(QPainter& p) {
+    alert_rect_ = QRectF();
     if (alert_fade_ <= 0.0) {
         return;
     }
@@ -215,15 +218,26 @@ void FxOverlay::paintAlert(QPainter& p) {
         return;
     }
     const QString text = QStringLiteral("⚠  %1").arg(alert_);
+    const QString hint = QStringLiteral("TAP FOR HELP");
     const QFont f = titleFont(15);
-    const double w = QFontMetricsF(f).horizontalAdvance(text) + 56;
-    const QRectF box(width() / 2.0 - w / 2.0, top_inset_ + 14, w, 34);
+    const QFont hf = labelFont(9.5);
+    const double hw = QFontMetricsF(hf).horizontalAdvance(hint) + 20;
+    const double w = QFontMetricsF(f).horizontalAdvance(text) + 56 + hw;
+    const QRectF box(width() / 2.0 - w / 2.0, top_inset_ + 10, w, 44);  // finger-sized: it opens the help
     p.save();
     p.setOpacity(alert_fade_);
     drawGlass(p, chamferPath(box, 10), kRed, 0.9, QColor(40, 6, 12, 220));
     drawGlowPath(p, chamferPath(box, 10), alpha(kRed, pulse), 1.2, 6);
-    drawText(p, box, Qt::AlignCenter, text, f, kRed);
+    drawText(p, box.adjusted(0, 0, -hw, 0), Qt::AlignCenter, text, f, kRed);
+    const QRectF hr(box.right() - hw - 6, box.center().y() - 11, hw, 22);
+    p.setPen(QPen(alpha(kRed, 0.7), 1));
+    p.setBrush(alpha(kRed, 0.12));
+    p.drawRect(hr);
+    drawText(p, hr, Qt::AlignCenter, hint, hf, alpha(kRed, 0.95));
     p.restore();
+    if (alert_fade_ > 0.5) {
+        alert_rect_ = box;
+    }
 }
 
 }  // namespace gcs::ui

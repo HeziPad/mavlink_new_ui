@@ -59,16 +59,24 @@ and shows `NO VIDEO`.
 | Key | Button | What it does |
 |-----|--------|--------------|
 | 1 | **Plan / Sync ↑** | First press: edit the mission on the map. Second press: upload it. **Hold**: re-download the vehicle's mission |
-| 2 | **Takeoff / Launch / Auto** | On the ground (**hold 1 s** to confirm): with a mission → AUTO + arm; without → GUIDED + arm + VTOL takeoff, then Hold (circle) on the wing at takeoff altitude. Airborne: resume the loop (AUTO), also after an aborted landing |
+| 2 | **Takeoff / Launch / Auto / Resume** | On the ground (**hold 1 s** to confirm): with a mission → AUTO + arm; without → GUIDED + arm + VTOL takeoff, then Hold (circle) on the wing at takeoff altitude. Airborne: resume the loop (AUTO), also after an aborted landing. During a landing it reads **Resume**: abort the landing and go back to the loop |
 | 3 | **Guide** | Toggle. Tap the map, or the ground in the camera view, to circle there on the wing (GUIDED) |
 | 4 | **Hold** | Instant. Circle where the aircraft is, on the wing (GUIDED). During a landing this is a go-around |
 | 5 | **Land** | **Hold 1 s**. Circle down beside the planned landing point on the wing, leave into the wind, back-transition and land vertically. Locked until the vehicle's mission has a landing point |
 | 6 | **QRTL** | Instant. Return home on the wing and land vertically |
 
 **Hold and Guide circles:** while circling, a panel above the dock sets the
-**altitude** (−10 / −1 / +1 / +10), the **radius** (−50 … +50 m, 40–1000 m)
-and the **direction** (CW / CCW). Changes apply live. The circle starts at the
-vehicle's `WP_LOITER_RAD`. Both use `DO_REPOSITION`, so the vehicle shows
+**altitude** (−10 / −1 / +1 / +10 m, or −50 … +50 ft; 20–5000 m), the
+**radius** (−50 … +50 m, 40–5000 m) and the **direction** (CW / CCW). Holding a
+button repeats and speeds up (×5 after 1 s, ×10 after 2.5 s). Changes apply
+live. The circle starts at the vehicle's `WP_LOITER_RAD`.
+
+ArduPlane flies a loiter **bigger than commanded**: `AP_L1_Control` scales the
+radius by EAS2TAS² (about +7 % at 700 m above sea level, more at higher fields,
+with `NAVL1_LIM_BANK` = 0), and the L1 loop overshoots small circles (SITL: 80 m
+flew as 91 m). The GCS measures each lap and trims the radius it sends, so the
+flown circle matches the dotted one. The panel shows `≈ flown 91` while it
+trims and `✓ flown 80` once it matches. Both use `DO_REPOSITION`, so the vehicle shows
 GUIDED. In AUTO the altitude comes from the plan: edit the waypoint instead.
 The ALT chip shows the commanded altitude as `62→80` while the aircraft climbs
 or descends to it.
@@ -92,8 +100,20 @@ each one. A bigger `NAVL1_PERIOD`, a lower `ROLL_LIMIT_DEG` or rounder loops
 To swap the map and camera, tap the small picture-in-picture view.
 
 Everything is made for touch first, with the mouse as an alternative. Locked
-buttons say why when pressed (and on hover with a mouse). Tap **SYSTEMS** in
-the telemetry bar for the pre-flight checklist. `Esc` deselects or leaves
+buttons say why when pressed (and on hover with a mouse).
+
+**SYSTEMS** in the telemetry bar counts problems. Tap it (or the red alert
+banner) to open the alerts panel: status pills (link, GPS, navigation, sensors,
+power, arming) and one card per problem. Each card says what's wrong, why it
+matters and what to try, with the raw data (EKF flags, the autopilot's
+message) in small print. The cards come from the EKF status, `SYS_STATUS` sensor
+health, GPS, battery and the link, plus the autopilot's PreArm and failsafe
+messages in plain language. PreArm cards stay while ArduPilot keeps repeating
+them (every 30 s) and clear when the vehicle arms. The panel only explains: it
+never changes the vehicle.
+
+The **⚙** at the end of the bar opens **Settings** (for now: altitude in metres
+or feet). `Esc` deselects or leaves
 Plan/Guide, `Del` deletes the selected point, and `Ctrl+Z` undoes a plan edit.
 
 **The lift rotors are for takeoff and landing only.** Every flight action above
@@ -156,24 +176,39 @@ circling the loop and bright while landing.
 
 ## Settings
 
+The in-app settings screen (⚙) switches altitudes between metres and feet
+everywhere: HUD tape, telemetry bar, map labels, panels and steppers.
+Distances and speeds stay metric.
+
 `~/.config/mavlink_gcs_ui/mavlink_gcs_ui.conf` is created on first run.
 You can edit the link and video ports, takeoff, default waypoint and landing approach altitude,
 cruise speed (used for the lap time), camera HFOV, the fixed-mount tilt used
 when no gimbal reports its angles, and reduced motion. The map
-layer and follow state are remembered automatically. Command-line options
+layer and follow state, the altitude unit, the camera HUD reference and the
+map attitude ball (open or collapsed) are remembered automatically. Command-line options
 override the file for one run.
 
 ## Camera view
 
-The horizon, elevation ladder and heading tape are drawn from the camera's
-**line of sight (LOS)**, so they overlay the video. The heading tape shows the
-LOS azimuth, with a cyan caret for the aircraft's nose. The LOS comes from the
+The horizon, elevation ladder, roll scale and heading tape follow either the
+camera's **line of sight (LOS)** or the **aircraft body**. Tap the **HUD ·
+LOS / HUD · BODY** chip under the AIRCRAFT box to switch.
+
+- **LOS** (default): the rulers overlay the video. The heading tape shows the
+  LOS azimuth, with a cyan caret for the aircraft's nose.
+- **BODY**: the screen centre is the nose (a `W` waterline symbol). The ladder
+  shows the aircraft's pitch and roll, and the tape its heading. An amber
+  `CAM` box and caret mark where the camera points. Over live video the rulers
+  no longer line up with the picture.
+
+The roll scale is numbered (10/20/30/45/60) and has a live `R 23°` / `L 12°`
+readout. It turns amber beyond 45°. The LOS comes from the
 gimbal (`GIMBAL_DEVICE_ATTITUDE_STATUS`), or from the fixed-mount tilt when no
 gimbal reports.
 
 Two readouts sit beside it:
 
-- **AIRCRAFT:** roll, pitch and heading, with a small attitude indicator.
+- **AIRCRAFT:** roll, pitch and heading, with a small attitude ball.
 - **GIMBAL · LOS:** pan and tilt **relative to the aircraft**, with the
   earth-frame azimuth and elevation underneath.
 
@@ -191,6 +226,12 @@ Motion is drawn every frame (about 60 fps). It is predicted from each sample's
 rates and timestamp (attitude at about 25 Hz, position at 10 Hz), so
 the horizon, heading tape and aircraft icon move continuously instead of in
 steps.
+
+On the map, a translucent green **camera footprint** shows the ground the
+camera sees: the image border is cast onto flat ground at home level. Edges
+that run past the horizon are dashed, and a dashed line of sight leads to the
+boresight crosshair, labelled with its range. An **attitude ball** sits at the
+top left (tap it to shrink it to a small puck).
 
 Map tiles (OpenStreetMap / Esri World Imagery) are cached under
 `~/.cache/mavlink_gcs_ui/tiles`. The map works offline with whatever is

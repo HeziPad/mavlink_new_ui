@@ -58,6 +58,17 @@ public:
     // ---- motion (predicted, set every frame) ---------------------------------
     void setAircraftPosition(double lat, double lon);
     void setHeading(double deg);
+    void setAttitude(double roll_deg, double pitch_deg);  // attitude ball
+
+    // ---- camera footprint: the ground the camera sees ------------------------
+    struct FootprintDraw {
+        std::vector<geo::NE> outline;  // metres from the aircraft
+        std::vector<bool> open;        // beyond the horizon / max range
+        geo::NE center;
+        bool center_hit = false;
+    };
+    void setFootprint(std::optional<FootprintDraw> fp);
+    void setBallCollapsed(bool on);
 
     // ---- the circle commanded in GUIDED (Hold / Guide) --------------------------
     struct OrbitDraw {
@@ -66,6 +77,8 @@ public:
         double radius = 80.0;
         bool ccw = false;
         bool hold = true;
+        double flown = -1.0;    // measured flown radius, < 0 unknown
+        bool trimmed = false;   // the flown circle matches the request
     };
     void setOrbit(std::optional<OrbitDraw> orbit);
     void ping(double lat, double lon, const QColor& color);
@@ -79,6 +92,7 @@ signals:
     void addToolChanged(AddTool t);
     void followChanged(bool on);
     void layerChanged(int layer);
+    void ballCollapsedChanged(bool collapsed);
 
 protected:
     bool event(QEvent* e) override;
@@ -106,6 +120,8 @@ private:
     void paintAircraft(QPainter& p);
     void paintOrbit(QPainter& p);
     void paintApproach(QPainter& p);
+    void paintFootprint(QPainter& p);
+    void paintBall(QPainter& p);
     double metersPerPixel() const;
     void paintOverlayChrome(QPainter& p);
 
@@ -158,7 +174,13 @@ private:
     double pinch_dist0_ = 0.0;
     double pinch_zoom0_ = 0.0;
     double pinch_lat_ = 0.0, pinch_lon_ = 0.0;
-    QRectF follow_chip_, layer_chip_;
+    QRectF follow_chip_, layer_chip_, ball_rect_;
+
+    std::optional<FootprintDraw> footprint_;
+    Tween roll_, pitch_;
+    bool has_att_ = false;
+    bool ball_collapsed_ = false;
+    double ball_open_ = 1.0;  // 0 collapsed .. 1 open, animated
 
     AngleTween heading_;
 };

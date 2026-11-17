@@ -22,6 +22,10 @@ public:
     void banner(const QString& text, const QColor& color);
     void setAlert(const QString& text);  // empty clears
     void setTopInset(double px) { top_inset_ = px; }
+    // toasts keep clear of a panel open on the right (animated)
+    void setRightInset(double px) { right_inset_target_ = px; }
+    // where the alert banner is drawn (empty when none): the window makes it tappable
+    QRectF alertRect() const { return alert_rect_; }
     void tick(double dt);
 
 protected:
@@ -52,6 +56,9 @@ private:
     double alert_t_ = 0.0;
     double alert_fade_ = 0.0;
     double top_inset_ = 64.0;
+    QRectF alert_rect_;
+    double right_inset_ = 0.0;
+    double right_inset_target_ = 0.0;
 };
 
 }  // namespace gcs::ui

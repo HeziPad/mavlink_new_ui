@@ -1,13 +1,16 @@
 #include "map_view.hpp"
 
+#include "attitude_ball.hpp"
 #include "core/geo.hpp"
 #include "theme.hpp"
 #include "tile_cache.hpp"
+#include "units.hpp"
 
 #include <QFontMetricsF>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPointingDevice>
+#include <QRadialGradient>
 #include <QTouchEvent>
 #include <QWheelEvent>
 
@@ -28,7 +31,7 @@ constexpr double kHitRadiusTouch = 28.0;  // a fingertip is ~7 mm; keep points e
 constexpr double kDragSlopMouse = 4.0;
 constexpr double kDragSlopTouch = 12.0;
 constexpr float kMinAlt = 10.0f;
-constexpr float kMaxAlt = 500.0f;
+constexpr float kMaxAlt = 5000.0f;
 constexpr size_t kUndoDepth = 64;
 
 QPointF worldPx(double lat, double lon, double zoom) {
@@ -257,6 +260,27 @@ void MapView::setHeading(double deg) {
     heading_.set(geo::wrap360(deg));
 }
 
+void MapView::setAttitude(double roll_deg, double pitch_deg) {
+    if (!has_att_) {
+        roll_.rate = pitch_.rate = 25.0;
+    }
+    roll_.set(roll_deg);
+    pitch_.set(pitch_deg);
+    has_att_ = true;
+}
+
+void MapView::setFootprint(std::optional<FootprintDraw> fp) {
+    footprint_ = std::move(fp);
+}
+
+void MapView::setBallCollapsed(bool on) {
+    ball_collapsed_ = on;
+    if (reducedMotion()) {
+        ball_open_ = on ? 0.0 : 1.0;
+    }
+    update();
+}
+
 void MapView::setOrbit(std::optional<OrbitDraw> orbit) {
     orbit_ = orbit;
     update();
@@ -276,6 +300,12 @@ void MapView::ping(double lat, double lon, const QColor& color) {
 void MapView::tick(double dt) {
     time_ += dt;
     heading_.step(dt);
+    roll_.step(dt);
+    pitch_.step(dt);
+    {
+        const double target = ball_collapsed_ ? 0.0 : 1.0;
+        ball_open_ = reducedMotion() ? target : ball_open_ + std::clamp(target - ball_open_, -dt * 5.0, dt * 5.0);
+    }
 
     // smooth zoom, anchored under the cursor unless following
     if (zoom_ != zoom_target_) {
@@ -482,6 +512,11 @@ void MapView::mouseReleaseEvent(QMouseEvent* e) {
 }
 
 void MapView::pointerPress(const QPointF& pos) {
+    if (ball_rect_.contains(pos)) {
+        setBallCollapsed(!ball_collapsed_);
+        emit ballCollapsedChanged(ball_collapsed_);
+        return;
+    }
     if (follow_chip_.contains(pos)) {
         setFollow(!follow_);
         return;
@@ -656,6 +691,7 @@ void MapView::paintEvent(QPaintEvent*) {
     }
 
     paintApproach(p);
+    paintFootprint(p);
     paintOrbit(p);
 
     // ping ripples (RTS move order)
@@ -812,7 +848,7 @@ void MapView::paintRoute(QPainter& p, const MissionPlan& plan, const QColor& c, 
 
     for (size_t i = 0; i < pts.size(); ++i) {
         marker(toScreen(pts[i].lat, pts[i].lon), static_cast<int>(i), QString::number(i + 1), c,
-               QStringLiteral("%1 m").arg(pts[i].alt_rel, 0, 'f', 0));
+               units::altText(pts[i].alt_rel));
     }
     if (plan.land) {
         const QPointF lp = toScreen(plan.land->lat, plan.land->lon);
@@ -829,7 +865,7 @@ void MapView::paintRoute(QPainter& p, const MissionPlan& plan, const QColor& c, 
         p.setPen(QPen(alpha(kGreen, 0.45), 1.3, Qt::DashLine));
         p.drawPath(spiral);
         marker(lp, kLandId, QStringLiteral("L"), kGreen,
-               QStringLiteral("LAND · approach %1 m").arg(plan.land->alt_rel, 0, 'f', 0));
+               QStringLiteral("LAND · approach %1").arg(units::altText(plan.land->alt_rel)));
     }
 }
 
@@ -859,6 +895,17 @@ void MapView::paintOrbit(QPainter& p) {
         p.setPen(ring);
         p.setBrush(alpha(col, 0.05));
         p.drawEllipse(c, rpx, rpx);
+        // the circle actually flown while the radius trim is still closing in
+        if (orbit_->flown > 0.0 && !orbit_->trimmed && !compact_) {
+            const double fpx = orbit_->flown / metersPerPixel();
+            QPen flown(alpha(kMuted, 0.6), 1.0, Qt::DotLine);
+            p.setPen(flown);
+            p.setBrush(Qt::NoBrush);
+            p.drawEllipse(c, fpx, fpx);
+            drawText(p, QRectF(c.x() - 80, c.y() + fpx + 2, 160, 14), Qt::AlignCenter,
+                     QStringLiteral("flown %1 · trimming").arg(formatDistance(orbit_->flown)), labelFont(9),
+                     alpha(kMuted, 0.9));
+        }
         if (!compact_) {
             // direction chevrons at N / E / S / W
             for (int k = 0; k < 4; ++k) {
@@ -992,9 +1039,10 @@ void MapView::paintAircraft(QPainter& p) {
 
 void MapView::paintOverlayChrome(QPainter& p) {
     if (compact_) {
-        follow_chip_ = layer_chip_ = QRectF();
+        follow_chip_ = layer_chip_ = ball_rect_ = QRectF();
         return;
     }
+    paintBall(p);
     const double right = width() - 16.0;
     double y = height() - 24.0;
 
@@ -1071,6 +1119,111 @@ void MapView::paintOverlayChrome(QPainter& p) {
     }
     if (mode_ != Mode::Normal) {
         drawBrackets(p, QRectF(rect()).adjusted(8, 8, -8, -8), 28, alpha(mode_ == Mode::Plan ? kAmber : kCyan, 0.7), 2.0);
+    }
+}
+
+void MapView::paintFootprint(QPainter& p) {
+    if (!footprint_ || !has_ac_ || footprint_->outline.size() < 3) {
+        return;
+    }
+    const auto& fp = *footprint_;
+    auto at = [&](const geo::NE& ne) {
+        double lat = 0.0, lon = 0.0;
+        geo::offset(ac_lat_, ac_lon_, ne.north, ne.east, lat, lon);
+        return toScreen(lat, lon);
+    };
+    QPolygonF poly;
+    for (const auto& ne : fp.outline) {
+        poly << at(ne);
+    }
+    const QPointF ac = toScreen(ac_lat_, ac_lon_);
+    const QColor col = kGreen;
+
+    // fill: brighter toward the aircraft, so the near edge reads as solid ground
+    QPainterPath path;
+    path.addPolygon(poly);
+    path.closeSubpath();
+    QRadialGradient fill(ac, std::max(40.0, QLineF(ac, at(fp.center)).length() * 2.2));
+    fill.setColorAt(0.0, alpha(col, compact_ ? 0.16 : 0.22));
+    fill.setColorAt(1.0, alpha(col, 0.05));
+    p.setPen(Qt::NoPen);
+    p.setBrush(fill);
+    p.drawPath(path);
+
+    // scan line sweeping from the near edge to the far edge
+    if (!reducedMotion() && !compact_) {
+        const double ph = std::fmod(time_ * 0.45, 1.0);
+        p.save();
+        p.setClipPath(path);
+        const QPointF far = at(fp.center);
+        const QPointF dir = far - ac;
+        const double len = std::hypot(dir.x(), dir.y());
+        if (len > 4.0) {
+            const QPointF u = dir / len, n(-u.y(), u.x());
+            const QPointF m = ac + dir * (0.15 + 1.9 * ph);
+            p.setPen(QPen(alpha(col, 0.55 * (1.0 - ph)), 2.0));
+            p.drawLine(m - n * 4000.0, m + n * 4000.0);
+        }
+        p.restore();
+    }
+
+    // edges: solid where the camera sees the ground, dashed where it runs off
+    // past the horizon / max range
+    const int n = static_cast<int>(poly.size());
+    for (int i = 0; i < n; ++i) {
+        const int j = (i + 1) % n;
+        const bool open = fp.open[i] || fp.open[j];
+        QPen pen(alpha(col, open ? 0.35 : 0.85), open ? 1.2 : 1.6);
+        if (open) {
+            pen.setStyle(Qt::DashLine);
+        }
+        p.setPen(pen);
+        p.drawLine(poly[i], poly[j]);
+    }
+
+    // line of sight to the boresight point
+    const QPointF bc = at(fp.center);
+    QPen los(alpha(col, 0.7), 1.2, Qt::DashLine);
+    p.setPen(los);
+    p.drawLine(ac, bc);
+    if (fp.center_hit) {
+        p.setPen(QPen(col, 1.6));
+        p.setBrush(Qt::NoBrush);
+        const double s = compact_ ? 5 : 8;
+        p.drawEllipse(bc, s, s);
+        p.drawLine(bc + QPointF(-s - 6, 0), bc + QPointF(-s + 2, 0));
+        p.drawLine(bc + QPointF(s - 2, 0), bc + QPointF(s + 6, 0));
+        p.drawLine(bc + QPointF(0, -s - 6), bc + QPointF(0, -s + 2));
+        p.drawLine(bc + QPointF(0, s - 2), bc + QPointF(0, s + 6));
+        if (!compact_) {
+            const QString text = QStringLiteral("CAM %1").arg(formatDistance(std::hypot(fp.center.north, fp.center.east)));
+            const QFont f = labelFont(10);
+            const double w = QFontMetricsF(f).horizontalAdvance(text) + 14;
+            const QRectF box(bc.x() + 14, bc.y() - 22, w, 18);
+            drawGlass(p, chamferPath(box, 4), col, 0.6, kGlassDeep);
+            drawText(p, box, Qt::AlignCenter, text, f, col);
+        }
+    }
+}
+
+void MapView::paintBall(QPainter& p) {
+    if (!has_att_) {
+        ball_rect_ = QRectF();
+        return;
+    }
+    // top-left, under the telemetry bar; toasts stack on the right
+    const double e = easeInOutCubic(ball_open_);
+    const double r = lerp(22.0, 58.0, e);
+    const double pad = lerp(8.0, 30.0, e);
+    const double box_h = 2 * r + pad * 2 + (e > 0.5 ? 26.0 : 0.0);
+    const QRectF box(16, 72, 2 * r + pad * 2, box_h);
+    ball_rect_ = box.adjusted(-4, -4, 4, 4);  // >= 48 px even collapsed
+    drawGlass(p, chamferPath(box, 10), kCyan, 0.45, alpha(kGlassDeep, 0.85));
+    const QPointF c(box.center().x(), box.top() + pad + r);
+    paintAttitudeBall(p, c, r, roll_.value, pitch_.value, heading_.value, e < 0.5);
+    if (e > 0.5) {
+        drawText(p, QRectF(box.left() + 10, box.top() + 4, 80, 14), Qt::AlignLeft | Qt::AlignVCenter,
+                 QStringLiteral("ATTITUDE"), labelFont(9), alpha(kMuted, e));
     }
 }
 

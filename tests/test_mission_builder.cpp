@@ -219,7 +219,35 @@ static void testApproachGeometry() {
     CHECK_NEAR(computeLandingApproach(l, in).leg_m, kMinLeg, 1e-6);
 }
 
+static void testLandingInMission() {
+    MissionPlan plan;
+    plan.wps = {{-35.36, 149.16, 80.0f}, {-35.35, 149.17, 95.0f}};
+    plan.land = UserWaypoint{-35.362, 149.166, 35.0f};
+    ApproachInputs in;
+    in.from_lat = -35.36;
+    in.from_lon = 149.16;
+    const LandingApproach appr = computeLandingApproach(*plan.land, in);
+    VehicleState s;
+    s.mission = buildLoopMission(-35.363, 149.165, 584.0, plan, 40.0f, &appr);
+    s.mission_known = true;
+    s.custom_mode = plane::AUTO;
+    const int lseq = landSeq(s.mission);
+    CHECK(lseq > 2);
+    s.mission_current = 2;  // on the loop
+    CHECK(!isLandingInMission(s));
+    s.mission_current = lseq;  // approach circle
+    CHECK(isLandingInMission(s));
+    s.mission_current = lseq + 1;  // VTOL land
+    CHECK(isLandingInMission(s));
+    s.custom_mode = plane::GUIDED;  // aborted to Hold
+    CHECK(!isLandingInMission(s));
+    s.custom_mode = plane::AUTO;
+    s.mission_known = false;
+    CHECK(!isLandingInMission(s));
+}
+
 int main() {
+    testLandingInMission();
     testApproachGeometry();
     testLayout();
     testExtractRoundTrip();

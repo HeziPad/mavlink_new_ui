@@ -104,6 +104,11 @@ struct VehicleState {
     uint32_t sensors_health = 0;
     bool has_ekf = false;
     uint16_t ekf_flags = 0;
+    // EKF_STATUS_REPORT innovation test ratios: < 0.5 good, >= 0.8 bad
+    double ekf_vel_var = 0.0;
+    double ekf_pos_var = 0.0;
+    double ekf_hgt_var = 0.0;
+    double ekf_mag_var = 0.0;
 
     // ---- VTOL ---------------------------------------------------------------
     bool has_ext_state = false;
@@ -170,6 +175,8 @@ bool linkAlive(const VehicleState& s, Clock::time_point now);       // heartbeat
 VtolState effectiveVtolState(const VehicleState& s);
 bool isAirborne(const VehicleState& s);
 bool hasFlyableMission(const VehicleState& s);
+// AUTO and on the approach circle or the land item (not on the loop)
+bool isLandingInMission(const VehicleState& s);
 bool prearmHealthy(const VehicleState& s);
 bool ekfHealthy(const VehicleState& s);
 bool gpsHealthy(const VehicleState& s);

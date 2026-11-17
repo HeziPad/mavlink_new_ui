@@ -10,7 +10,7 @@ Game-style ground control station for an ArduPilot **QuadPlane**: C++17, Qt 6 Wi
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo   # -DGCS_WITH_GSTREAMER=OFF to skip video
 cmake --build build
 ctest --test-dir build --output-on-failure      # all tests
-ctest --test-dir build -R mission_transfer      # one test (geo, mission_builder, mission_transfer, command_sender, lift_rotors)
+ctest --test-dir build -R mission_transfer      # one test (geo, mission_builder, mission_transfer, command_sender, lift_rotors, health, orbit_trim)
 ./build/test_geo                                # or run a test binary directly
 ./build/mavlink_gcs_ui                          # listens on udp 127.0.0.1:14551
 ```
@@ -27,14 +27,14 @@ There is no linter; the build uses `-Wall -Wextra -Wpedantic` and should stay wa
 
 Three layers with a strict dependency direction: `core` ← `link` ← `ui`.
 
-- **`src/core/`**: pure C++, no Qt and no I/O. `VehicleState`, ArduPlane mode numbers and names, geo math including camera-ray-to-ground casting, and the mission builder.
+- **`src/core/`**: pure C++, no Qt and no I/O. `VehicleState`, ArduPlane mode numbers and names, geo math including camera-ray-to-ground casting and the camera footprint, the mission builder, `health` (EKF/sensor/GPS/STATUSTEXT → plain-language advisories) and `OrbitTrim`.
 - **`src/link/`**: plain C++ plus POSIX sockets, also Qt-free. It is compiled together with core into the `gcs_core` static library, which is what the tests link against. `MavlinkClient` owns a single worker thread that owns the socket, parser, `MissionTransfer` state machine and `CommandSender` (retries and ACK handling). The UI thread only ever:
   - calls `snapshot()` to copy the latest `VehicleState`,
   - calls `pollEvents()` to drain `LinkEvent`s (command results, STATUSTEXTs, mission results),
   - calls request methods (`setMode`, `runSequence`, `uploadMission`, `guidedGoto`, ...), which post closures that run on the worker.
 
   Keep it this way: don't touch worker-owned members from other threads.
-- **`src/ui/`**: Qt widgets, touch-first. Map touch is handled in `MapView::event`: one finger goes through the same `pointer*` path as the mouse, and two fingers pinch. In PiP mode touch is ignored, so Qt synthesises the click that `ViewHost` swaps on. Other widgets rely on Qt's touch→mouse synthesis. Keep targets ≥ 44–48 px and don't put information behind hover only. `MainWindow` drives everything from a 16 ms `PreciseTimer` `frame()` tick that snapshots state, drains events and updates widgets. Rendering is mostly custom `paintEvent` code (map, camera HUD, effects overlay), not stock widgets. `ViewHost` handles the full-bleed main view and the swappable PiP. `ControlDock` holds the six action buttons and their lock/reason logic. Tiles are fetched and disk-cached by `TileCache`. Video is only compiled when `GCS_HAVE_GSTREAMER` is defined.
+- **`src/ui/`**: Qt widgets, touch-first. Map touch is handled in `MapView::event`: one finger goes through the same `pointer*` path as the mouse, and two fingers pinch. In PiP mode touch is ignored, so Qt synthesises the click that `ViewHost` swaps on. Other widgets rely on Qt's touch→mouse synthesis. Keep targets ≥ 44–48 px and don't put information behind hover only. `MainWindow` drives everything from a 16 ms `PreciseTimer` `frame()` tick that snapshots state, drains events and updates widgets. Rendering is mostly custom `paintEvent` code (map, camera HUD, effects overlay), not stock widgets. `ViewHost` handles the full-bleed main view and the swappable PiP. `ControlDock` holds the six action buttons and their lock/reason logic. Tiles are fetched and disk-cached by `TileCache`. Video is only compiled when `GCS_HAVE_GSTREAMER` is defined. Everything internal is in metres; any altitude shown to the user goes through `ui/units` (`altText`, `altStepMeters`), which follows the m/ft setting. Problems are shown as `core::health` advisories in `AlertsPanel` (opened from SYSTEMS or the alert banner), not as raw flags.
 
 `include/c_library_v2/` holds the vendored, generated MAVLink headers. They are included as SYSTEM, and link sources disable `-Wpedantic` and `-Waddress-of-packed-member`. Don't edit them.
 
@@ -49,6 +49,7 @@ Three layers with a strict dependency direction: `core` ← `link` ← `ui`.
   - The VTOL_LAND's `z` must be 0, meaning ground at home level. Without a rangefinder, ArduPlane uses the land item's altitude as the ground for its descent profile (`relative_ground_altitude` → `height_above_target`). With z = approach alt, it thinks it's already down and descends the whole way at `Q_LAND_FINAL_SPD` (0.5 m/s). In SITL that was 61 s instead of about 20 s.
   - The "VTOL land too short" arming check only fires when a `NAV_WAYPOINT` directly precedes the land item. The `LOITER_TO_ALT` in between avoids it.
   - A one-waypoint loop uses `NAV_LOITER_UNLIM` instead.
+- ArduPlane flies a GUIDED loiter bigger than `param3`: `AP_L1_Control::loiter_radius()` scales it by EAS2TAS² when `NAVL1_LIM_BANK` = 0 (+7 % at SITL's ~700 m AMSL), and L1 overshoots small circles (80 m flew as 91 m). `core::OrbitTrim` measures whole laps and commands `requested / ratio`, so send `trim_.commandRadius()`, not the requested radius.
 - Q_ASSIST can spin the lift rotors in cruise, and speed assist sends no STATUSTEXT. The LIFT ROTORS indicator therefore reads `SERVO_OUTPUT_RAW` and maps outputs with `SERVOn_FUNCTION` 33–40.
 - QRTL entered in wing-borne flight flies home on the wing, then lands vertically.
 - Gimbal: ArduPilot's `GIMBAL_DEVICE_ATTITUDE_STATUS` gives roll/pitch in the earth frame and yaw in the vehicle frame (flag). `core::cameraLos` turns that, or the fixed tilt setting, into an earth-frame camera attitude plus pan/tilt relative to the platform.
