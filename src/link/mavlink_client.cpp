@@ -246,6 +246,119 @@ void MavlinkClient::downloadMission() {
     });
 }
 
+void MavlinkClient::fetchParams(std::vector<std::string> names) {
+    post([this, names = std::move(names)] {
+        for (const auto& n : names) {
+            const bool queued = std::any_of(param_wants_.begin(), param_wants_.end(),
+                                            [&](const ParamWant& w) { return w.name == n; });
+            if (!queued) {
+                param_wants_.push_back({n, 0, {}});
+            }
+        }
+    });
+}
+
+void MavlinkClient::setParam(const std::string& name, float value) {
+    post([this, name, value] {
+        param_writes_.erase(std::remove_if(param_writes_.begin(), param_writes_.end(),
+                                           [&](const ParamWrite& w) { return w.name == name; }),
+                            param_writes_.end());
+        param_writes_.push_back({name, value, 0, {}});
+    });
+}
+
+void MavlinkClient::manualControl(int x, int y, int z, int r, int hold_ms) {
+    post([this, x, y, z, r, hold_ms] {
+        manual_x_ = std::clamp(x, -1000, 1000);
+        manual_y_ = std::clamp(y, -1000, 1000);
+        manual_z_ = std::clamp(z, 0, 1000);
+        manual_r_ = std::clamp(r, -1000, 1000);
+        manual_until_ = Clock::now() + std::chrono::milliseconds(std::clamp(hold_ms, 100, 5000));
+        if (!manual_active_) {
+            manual_active_ = true;
+            manual_last_tx_ = {};
+        }
+    });
+}
+
+void MavlinkClient::stopManualControl() {
+    post([this] {
+        if (manual_active_) {
+            // one neutral frame (throttle zero) so the vehicle doesn't keep the last input
+            manual_x_ = manual_y_ = manual_z_ = manual_r_ = 0;
+            sendManual(Clock::now());
+        }
+        manual_active_ = false;
+    });
+}
+
+void MavlinkClient::sendManual(Clock::time_point now) {
+    mavlink_message_t msg{};
+    mavlink_msg_manual_control_pack(ids_.own_sys, ids_.own_comp, &msg, ids_.target_sys,
+                                    static_cast<int16_t>(manual_x_), static_cast<int16_t>(manual_y_),
+                                    static_cast<int16_t>(manual_z_), static_cast<int16_t>(manual_r_),
+                                    0, 0, 0,                 // buttons, buttons2, extensions
+                                    0, 0, 0, 0, 0, 0, 0, 0);  // s, t, aux1..6
+    sendMessage(msg);
+    manual_last_tx_ = now;
+}
+
+void MavlinkClient::sendParamRequests(Clock::time_point now) {
+    using std::chrono::milliseconds;
+    auto idOf = [](const std::string& name, char (&id)[16]) {
+        std::memset(id, 0, sizeof(id));
+        std::memcpy(id, name.data(), std::min(name.size(), sizeof(id)));
+    };
+    int sent = 0;  // a few per pass: don't flood a slow radio
+    for (auto it = param_wants_.begin(); it != param_wants_.end() && sent < 8;) {
+        if (state_.params.count(it->name)) {
+            it = param_wants_.erase(it);
+            continue;
+        }
+        if (it->tries >= 4) {
+            it = param_wants_.erase(it);  // the vehicle doesn't have it
+            continue;
+        }
+        if (it->last == Clock::time_point{} || now - it->last >= milliseconds(1500)) {
+            char id[16];
+            idOf(it->name, id);
+            mavlink_message_t msg{};
+            mavlink_msg_param_request_read_pack(ids_.own_sys, ids_.own_comp, &msg, ids_.target_sys,
+                                                ids_.target_comp, id, -1);
+            sendMessage(msg);
+            it->last = now;
+            ++it->tries;
+            ++sent;
+        }
+        ++it;
+    }
+    for (auto it = param_writes_.begin(); it != param_writes_.end();) {
+        if (it->last == Clock::time_point{} || now - it->last >= milliseconds(1500)) {
+            if (it->tries >= 3) {
+                LinkEvent ev;
+                ev.type = LinkEvent::Type::ParamSet;
+                ev.tag = it->name;
+                ev.ok = false;
+                ev.text = "no confirmation from the vehicle";
+                publish(std::move(ev));
+                it = param_writes_.erase(it);
+                continue;
+            }
+            char id[16];
+            idOf(it->name, id);
+            const auto t = param_types_.find(it->name);
+            mavlink_message_t msg{};
+            mavlink_msg_param_set_pack(ids_.own_sys, ids_.own_comp, &msg, ids_.target_sys, ids_.target_comp, id,
+                                       it->value,
+                                       t != param_types_.end() ? t->second : static_cast<uint8_t>(MAV_PARAM_TYPE_REAL32));
+            sendMessage(msg);
+            it->last = now;
+            ++it->tries;
+        }
+        ++it;
+    }
+}
+
 bool MavlinkClient::openSocket() {
     auto fail = [this](const std::string& what) {
         state_.error = what + ": " + std::strerror(errno);
@@ -396,6 +509,20 @@ void MavlinkClient::handleMessage(const mavlink_message_t& msg) {
             publish(std::move(ev));
         }
     }
+    if (msg.msgid == MAVLINK_MSG_ID_RADIO_STATUS && vehicle_locked_) {
+        // injected by the telemetry radios themselves (their own sysid)
+        mavlink_radio_status_t r{};
+        mavlink_msg_radio_status_decode(&msg, &r);
+        state_.has_radio = true;
+        state_.radio_rssi = r.rssi;
+        state_.radio_remrssi = r.remrssi;
+        state_.radio_noise = r.noise;
+        state_.radio_remnoise = r.remnoise;
+        state_.radio_txbuf = r.txbuf;
+        state_.radio_rxerrors = r.rxerrors;
+        state_dirty_ = true;
+        return;
+    }
     if (!vehicle_locked_ || msg.sysid != ids_.target_sys) {
         return;
     }
@@ -422,6 +549,17 @@ void MavlinkClient::handleMessage(const mavlink_message_t& msg) {
         return;
     }
 
+    if (msg.msgid == MAVLINK_MSG_ID_COMMAND_LONG) {
+        // the vehicle asking us something: accelerometer calibration poses
+        mavlink_command_long_t c{};
+        mavlink_msg_command_long_decode(&msg, &c);
+        if (c.command == MAV_CMD_ACCELCAL_VEHICLE_POS) {
+            state_.accelcal_pos = static_cast<int>(c.param1);
+            state_.accelcal_rx = now;
+            state_dirty_ = true;
+        }
+        return;
+    }
     if (mission_->handle(msg, now)) {
         return;
     }
@@ -538,6 +676,15 @@ void MavlinkClient::decodeTelemetry(const mavlink_message_t& msg) {
         if (b.current_battery >= 0) {
             s.battery_a = b.current_battery / 100.0;
         }
+        s.battery_consumed_mah = b.current_consumed;
+        s.cell_v.clear();
+        for (int i = 0; i < 10; ++i) {
+            // UINT16_MAX = no cell; ArduPilot puts the whole pack in [0] when it
+            // has no per-cell data, so only keep plausible single-cell values
+            if (b.voltages[i] != UINT16_MAX && b.voltages[i] > 2000 && b.voltages[i] < 5000) {
+                s.cell_v.push_back(b.voltages[i] / 1000.0);
+            }
+        }
         break;
     }
     case MAVLINK_MSG_ID_GPS_RAW_INT: {
@@ -589,6 +736,95 @@ void MavlinkClient::decodeTelemetry(const mavlink_message_t& msg) {
     case MAVLINK_MSG_ID_PARAM_VALUE:
         handleParamValue(msg);
         break;
+    case MAVLINK_MSG_ID_RC_CHANNELS: {
+        mavlink_rc_channels_t r{};
+        mavlink_msg_rc_channels_decode(&msg, &r);
+        s.has_rc = true;
+        s.rc_count = r.chancount;
+        const uint16_t v[18] = {r.chan1_raw,  r.chan2_raw,  r.chan3_raw,  r.chan4_raw,  r.chan5_raw,  r.chan6_raw,
+                                r.chan7_raw,  r.chan8_raw,  r.chan9_raw,  r.chan10_raw, r.chan11_raw, r.chan12_raw,
+                                r.chan13_raw, r.chan14_raw, r.chan15_raw, r.chan16_raw, r.chan17_raw, r.chan18_raw};
+        for (int i = 0; i < 18; ++i) {
+            s.rc[i] = v[i] == UINT16_MAX ? 0 : v[i];
+        }
+        s.rc_rssi = r.rssi;
+        s.rc_rx = now;
+        break;
+    }
+    case MAVLINK_MSG_ID_VIBRATION: {
+        mavlink_vibration_t v{};
+        mavlink_msg_vibration_decode(&msg, &v);
+        s.has_vibe = true;
+        s.vibe_x = v.vibration_x;
+        s.vibe_y = v.vibration_y;
+        s.vibe_z = v.vibration_z;
+        s.clip0 = v.clipping_0;
+        s.clip1 = v.clipping_1;
+        s.clip2 = v.clipping_2;
+        break;
+    }
+    case MAVLINK_MSG_ID_POWER_STATUS: {
+        mavlink_power_status_t pw{};
+        mavlink_msg_power_status_decode(&msg, &pw);
+        s.has_power = true;
+        s.board_vcc = pw.Vcc / 1000.0;
+        s.servo_vcc = pw.Vservo / 1000.0;
+        break;
+    }
+    case MAVLINK_MSG_ID_SYSTEM_TIME: {
+        mavlink_system_time_t t{};
+        mavlink_msg_system_time_decode(&msg, &t);
+        if (s.time_boot_ms != 0 && t.time_boot_ms + 5000 < s.time_boot_ms) {
+            ++s.boot_count;  // the clock went back: it rebooted
+        }
+        s.time_boot_ms = t.time_boot_ms;
+        break;
+    }
+    case MAVLINK_MSG_ID_AUTOPILOT_VERSION: {
+        mavlink_autopilot_version_t a{};
+        mavlink_msg_autopilot_version_decode(&msg, &a);
+        s.has_version = true;
+        s.fw_version = a.flight_sw_version;
+        s.board_uid = a.uid;
+        break;
+    }
+    case MAVLINK_MSG_ID_GPS2_RAW: {
+        mavlink_gps2_raw_t g{};
+        mavlink_msg_gps2_raw_decode(&msg, &g);
+        s.has_gps2 = true;
+        s.gps2_fix = g.fix_type;
+        s.gps2_sats = g.satellites_visible == UINT8_MAX ? 0 : g.satellites_visible;
+        s.gps2_hdop = g.eph == UINT16_MAX ? 99.0 : g.eph / 100.0;
+        break;
+    }
+    case MAVLINK_MSG_ID_MAG_CAL_PROGRESS: {
+        mavlink_mag_cal_progress_t m{};
+        mavlink_msg_mag_cal_progress_decode(&msg, &m);
+        if (m.compass_id < s.magcal.size()) {
+            auto& c = s.magcal[m.compass_id];
+            c.active = true;
+            c.status = m.cal_status;
+            c.pct = m.completion_pct;
+            std::copy(std::begin(m.completion_mask), std::end(m.completion_mask), c.mask.begin());
+            c.rx = now;
+        }
+        break;
+    }
+    case MAVLINK_MSG_ID_MAG_CAL_REPORT: {
+        mavlink_mag_cal_report_t m{};
+        mavlink_msg_mag_cal_report_decode(&msg, &m);
+        if (m.compass_id < s.magcal.size()) {
+            auto& c = s.magcal[m.compass_id];
+            c.reported = true;
+            c.status = m.cal_status;
+            c.fitness = m.fitness;
+            c.autosaved = m.autosaved != 0;
+            c.active = false;
+            c.pct = m.cal_status == MAG_CAL_SUCCESS ? 100 : c.pct;
+            c.rx = now;
+        }
+        break;
+    }
     case MAVLINK_MSG_ID_SERVO_OUTPUT_RAW: {
         mavlink_servo_output_raw_t o{};
         mavlink_msg_servo_output_raw_decode(&msg, &o);
@@ -642,6 +878,17 @@ void MavlinkClient::requestStreams(Clock::time_point now) {
     commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_NAV_CONTROLLER_OUTPUT, 4.0), now);
     commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_WIND, 1.0), now);
     commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_GIMBAL_DEVICE_ATTITUDE_STATUS, 10.0), now);
+    // preflight data
+    commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_RC_CHANNELS, 5.0), now);
+    commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_VIBRATION, 2.0), now);
+    commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_POWER_STATUS, 1.0), now);
+    commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_SYSTEM_TIME, 1.0), now);
+    commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_GPS2_RAW, 1.0), now);
+    commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_MAG_CAL_PROGRESS, 5.0), now);
+    commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_MAG_CAL_REPORT, 1.0), now);
+    if (!state_.has_version) {
+        commands_->sendBackground(makeRequestMessage(MAVLINK_MSG_ID_AUTOPILOT_VERSION), now);
+    }
     last_stream_request_ = now;
     streams_requested_ = true;
 }
@@ -684,6 +931,34 @@ void MavlinkClient::handleParamValue(const mavlink_message_t& msg) {
     mavlink_msg_param_value_decode(&msg, &p);
     const std::string name(p.param_id, strnlen(p.param_id, sizeof(p.param_id)));
     const int value = static_cast<int>(std::lround(p.param_value));
+    param_types_[name] = p.param_type;
+    {
+        // generic cache; a change nobody here asked for is counted (preflight validity)
+        const auto old = state_.params.find(name);
+        bool ours = false;
+        for (auto it = param_writes_.begin(); it != param_writes_.end(); ++it) {
+            if (it->name == name) {
+                ours = true;
+                const bool match = std::abs(p.param_value - it->value) <= std::max(1e-4f, std::abs(it->value) * 1e-5f);
+                LinkEvent ev;
+                ev.type = LinkEvent::Type::ParamSet;
+                ev.tag = name;
+                ev.ok = match;
+                ev.text = std::to_string(p.param_value);
+                if (!match) {
+                    ev.text = "the vehicle kept " + std::to_string(p.param_value);
+                }
+                publish(std::move(ev));
+                param_writes_.erase(it);
+                break;
+            }
+        }
+        if (!ours && old != state_.params.end() && std::abs(old->second - p.param_value) > 1e-6f) {
+            ++state_.params_changed;
+        }
+        state_.params[name] = p.param_value;
+        state_dirty_ = true;
+    }
     if (name == "Q_GUIDED_MODE") {
         state_.q_guided_mode = value;
         return;
@@ -801,6 +1076,15 @@ void MavlinkClient::periodic(Clock::time_point now) {
         now - last_stream_request_ >= milliseconds(1500) && !mission_->busy()) {
         initial_download_done_ = true;
         mission_->startDownload(now);
+    }
+
+    sendParamRequests(now);
+    if (manual_active_) {
+        if (now >= manual_until_) {
+            manual_active_ = false;  // not refreshed: let go (the vehicle reverts to RC)
+        } else if (now - manual_last_tx_ >= milliseconds(100)) {
+            sendManual(now);
+        }
     }
 
     mission_->tick(now);

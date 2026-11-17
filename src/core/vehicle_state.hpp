@@ -4,6 +4,7 @@
 #include "mission.hpp"
 
 #include <array>
+#include <map>
 #include <chrono>
 #include <cstdint>
 #include <string>
@@ -166,6 +167,59 @@ struct VehicleState {
 
     // ---- trail --------------------------------------------------------------
     std::vector<TrailPoint> trail;
+
+    // ---- preflight data -------------------------------------------------------
+    // RC_CHANNELS: raw PWM per channel (0 = not present), receiver RSSI 0..254 (255 unknown)
+    bool has_rc = false;
+    int rc_count = 0;
+    std::array<uint16_t, 18> rc{};
+    int rc_rssi = 255;
+    Clock::time_point rc_rx{};
+    // VIBRATION (m/s/s) and accelerometer clipping counts
+    bool has_vibe = false;
+    double vibe_x = 0.0, vibe_y = 0.0, vibe_z = 0.0;
+    uint32_t clip0 = 0, clip1 = 0, clip2 = 0;
+    // RADIO_STATUS (SiK and similar telemetry radios)
+    bool has_radio = false;
+    int radio_rssi = 0, radio_remrssi = 0, radio_noise = 0, radio_remnoise = 0, radio_txbuf = 100;
+    uint16_t radio_rxerrors = 0;
+    // POWER_STATUS: flight controller supply
+    bool has_power = false;
+    double board_vcc = 0.0;   // V
+    double servo_vcc = 0.0;   // V
+    // BATTERY_STATUS cells (V; empty when the monitor doesn't report them) and use
+    std::vector<double> cell_v;
+    int battery_consumed_mah = -1;
+    // SYSTEM_TIME: a drop in time_boot_ms means the autopilot rebooted
+    uint32_t time_boot_ms = 0;
+    int boot_count = 0;       // reboots seen this session
+    // AUTOPILOT_VERSION
+    bool has_version = false;
+    uint32_t fw_version = 0;  // major<<24 | minor<<16 | patch<<8 | type
+    uint64_t board_uid = 0;
+    // second GPS (GPS2_RAW)
+    bool has_gps2 = false;
+    int gps2_fix = 0, gps2_sats = 0;
+    double gps2_hdop = 99.0;
+    // compass calibration (MAG_CAL_PROGRESS / MAG_CAL_REPORT), per compass id 0..2
+    struct MagCal {
+        bool active = false;
+        int status = 0;            // MAG_CAL_STATUS
+        int pct = 0;
+        std::array<uint8_t, 10> mask{};  // 80 sphere sections covered
+        bool reported = false;
+        double fitness = 0.0;      // RMS milligauss, lower is better
+        bool autosaved = false;
+        Clock::time_point rx{};
+    };
+    std::array<MagCal, 3> magcal{};
+    // accelerometer calibration: the pose the vehicle asks for
+    // (ACCELCAL_VEHICLE_POS: 1 level .. 6 back, 16777215 success, 16777216 failed), 0 none
+    int accelcal_pos = 0;
+    Clock::time_point accelcal_rx{};
+    // every parameter read or written this session (name -> value)
+    std::map<std::string, float> params;
+    int params_changed = 0;   // unsolicited changes seen (someone else set one)
 };
 
 // ---- derived values (pure functions, unit-tested) ---------------------------

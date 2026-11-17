@@ -32,11 +32,13 @@ set(GCS_LINK_SOURCES
 )
 
 add_library(gcs_core STATIC
+    src/core/frame_layout.cpp
     src/core/geo.cpp
     src/core/health.cpp
     src/core/mission.cpp
     src/core/orbit_trim.cpp
     src/core/plane_modes.cpp
+    src/core/preflight.cpp
     src/core/vehicle_state.cpp
     ${GCS_LINK_SOURCES}
 )
@@ -84,7 +86,7 @@ endif()
 
 # ---- tests ----------------------------------------------------------------------
 enable_testing()
-foreach(name geo mission_builder mission_transfer command_sender lift_rotors health orbit_trim)
+foreach(name geo mission_builder mission_transfer command_sender lift_rotors health orbit_trim preflight)
     add_executable(test_${name} tests/test_${name}.cpp)
     target_link_libraries(test_${name} PRIVATE gcs_core)
     gcs_warnings(test_${name})

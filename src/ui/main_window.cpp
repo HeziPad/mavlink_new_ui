@@ -605,6 +605,11 @@ void MainWindow::handleEvent(const link::LinkEvent& ev) {
     case T::Error:
         fx_->toast(text, kRed, QStringLiteral("Error"));
         break;
+    case T::ParamSet:
+        fx_->toast(ev.ok ? QStringLiteral("%1 = %2 (confirmed)").arg(QString::fromStdString(ev.tag), text)
+                         : QStringLiteral("%1 not set: %2").arg(QString::fromStdString(ev.tag), text),
+                   ev.ok ? kGreen : kRed, QStringLiteral("Param"));
+        break;
     }
 }
 

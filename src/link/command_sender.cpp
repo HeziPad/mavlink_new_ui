@@ -31,6 +31,114 @@ CommandRequest makeSetSafety(bool safe) {
     return r;
 }
 
+CommandRequest makeMotorTest(int seq, float pct, float seconds, int count) {
+    CommandRequest r;
+    r.command = MAV_CMD_DO_MOTOR_TEST;
+    r.params[0] = static_cast<float>(seq);
+    r.params[1] = static_cast<float>(MOTOR_TEST_THROTTLE_PERCENT);
+    r.params[2] = pct;
+    r.params[3] = seconds;
+    r.params[4] = static_cast<float>(count);
+    r.params[5] = static_cast<float>(MOTOR_TEST_ORDER_SEQUENCE);
+    r.label = "MOTOR TEST " + std::to_string(seq);
+    return r;
+}
+
+CommandRequest makeCalibration(Calibration c) {
+    CommandRequest r;
+    r.command = MAV_CMD_PREFLIGHT_CALIBRATION;
+    r.max_attempts = 1;  // the vehicle calibrates before it answers
+    r.ack_timeout = std::chrono::seconds(45);
+    switch (c) {
+    case Calibration::Gyro: r.params[0] = 1.0f; r.label = "GYRO CAL"; break;
+    case Calibration::BaroAirspeed: r.params[2] = 1.0f; r.label = "BARO/AIRSPEED CAL"; break;
+    case Calibration::Level: r.params[4] = 2.0f; r.label = "LEVEL CAL"; break;
+    case Calibration::AccelSimple: r.params[4] = 4.0f; r.label = "ACCEL CAL"; break;
+    case Calibration::AccelFull: r.params[4] = 1.0f; r.label = "ACCEL CAL"; break;
+    }
+    return r;
+}
+
+CommandRequest makeStartMagCal() {
+    CommandRequest r;
+    r.command = MAV_CMD_DO_START_MAG_CAL;
+    r.params[0] = 0.0f;  // all compasses
+    r.params[1] = 0.0f;  // no retry
+    r.params[2] = 1.0f;  // autosave
+    r.params[3] = 0.0f;  // no delay
+    r.params[4] = 0.0f;  // no autoreboot
+    r.label = "COMPASS CAL";
+    return r;
+}
+
+CommandRequest makeAcceptMagCal() {
+    CommandRequest r;
+    r.command = MAV_CMD_DO_ACCEPT_MAG_CAL;
+    r.label = "ACCEPT COMPASS CAL";
+    return r;
+}
+
+CommandRequest makeCancelMagCal() {
+    CommandRequest r;
+    r.command = MAV_CMD_DO_CANCEL_MAG_CAL;
+    r.label = "CANCEL COMPASS CAL";
+    return r;
+}
+
+CommandRequest makeFixedMagCalYaw(float yaw_deg) {
+    CommandRequest r;
+    r.command = MAV_CMD_FIXED_MAG_CAL_YAW;
+    r.params[0] = yaw_deg;
+    r.max_attempts = 1;
+    r.ack_timeout = std::chrono::seconds(10);
+    r.label = "COMPASS CAL (YAW)";
+    return r;
+}
+
+CommandRequest makeAccelCalPos(int pos) {
+    CommandRequest r;
+    r.command = MAV_CMD_ACCELCAL_VEHICLE_POS;
+    r.params[0] = static_cast<float>(pos);
+    r.label = "ACCEL POSE";
+    return r;
+}
+
+CommandRequest makeRunPrearmChecks() {
+    CommandRequest r;
+    r.command = MAV_CMD_RUN_PREARM_CHECKS;
+    r.label = "PREARM CHECKS";
+    return r;
+}
+
+CommandRequest makeReboot() {
+    CommandRequest r;
+    r.command = MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN;
+    r.params[0] = 1.0f;  // reboot the autopilot
+    r.max_attempts = 1;
+    r.ack_timeout = std::chrono::seconds(3);
+    r.label = "REBOOT";
+    return r;
+}
+
+CommandRequest makeMountControl(float pitch_deg, float yaw_deg) {
+    CommandRequest r;
+    r.command = MAV_CMD_DO_MOUNT_CONTROL;
+    r.params[0] = pitch_deg;
+    r.params[1] = 0.0f;  // roll
+    r.params[2] = yaw_deg;
+    r.params[6] = static_cast<float>(MAV_MOUNT_MODE_MAVLINK_TARGETING);
+    r.label = "GIMBAL";
+    return r;
+}
+
+CommandRequest makeRequestMessage(uint32_t msg_id) {
+    CommandRequest r;
+    r.command = MAV_CMD_REQUEST_MESSAGE;
+    r.params[0] = static_cast<float>(msg_id);
+    r.label = "REQUEST";
+    return r;
+}
+
 CommandRequest makeVtolTakeoff(float alt_rel) {
     // ArduPlane runs a GUIDED quadplane takeoff from MAV_CMD_NAV_TAKEOFF
     // (quadplane.do_user_takeoff); NAV_VTOL_TAKEOFF (84) is only a mission item
@@ -223,9 +331,13 @@ bool CommandSender::handle(const mavlink_message_t& msg, Clock::time_point now) 
 
 void CommandSender::tick(Clock::time_point now) {
     if (active_) {
-        const auto limit = current_.in_progress ? kInProgressTimeout : kRetryInterval;
+        const auto custom = current_.req.ack_timeout;
+        const auto limit = custom.count() > 0 ? std::chrono::duration_cast<std::chrono::milliseconds>(custom)
+                           : current_.in_progress
+                               ? std::chrono::duration_cast<std::chrono::milliseconds>(kInProgressTimeout)
+                               : std::chrono::duration_cast<std::chrono::milliseconds>(kRetryInterval);
         if (now - current_.last_tx >= limit) {
-            if (current_.in_progress || current_.attempts >= kMaxAttempts) {
+            if (current_.in_progress || current_.attempts >= std::min(kMaxAttempts, current_.req.max_attempts)) {
                 stepFinished(MAV_RESULT_FAILED, "no response from vehicle", now);
             } else {
                 transmit(current_, now);
