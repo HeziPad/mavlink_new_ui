@@ -282,7 +282,33 @@ void testSession() {
 
 }  // namespace
 
+static void testWeathervane() {
+    using namespace gcs;
+    using namespace gcs::preflight;
+    const ParamCheck* c = nullptr;
+    for (const auto& x : paramChecks()) {
+        if (x.id == "param.Q_WVANE_GAIN") c = &x;
+    }
+    CHECK(c != nullptr);
+    if (!c) return;
+    VehicleState s;
+    Profile p;
+    CHECK(!checkParam(*c, s, p).known);
+    s.params["Q_WVANE_ENABLE"] = 1.0f;
+    s.params["Q_WVANE_GAIN"] = 0.0f;  // ArduPlane's default: effectively off
+    auto v = checkParam(*c, s, p);
+    CHECK(v.known && !v.ok && v.recommended && *v.recommended == 1.0f);
+    s.params["Q_WVANE_GAIN"] = 1.0f;
+    CHECK(checkParam(*c, s, p).ok);
+    s.params["Q_WVANE_ENABLE"] = 4.0f;  // tail into wind
+    v = checkParam(*c, s, p);
+    CHECK(v.known && !v.ok && !v.recommended);
+    s.params["Q_WVANE_ENABLE"] = -1.0f;  // takeoff / landing only: nose into wind there
+    CHECK(checkParam(*c, s, p).ok);
+}
+
 int main() {
+    testWeathervane();
     testMissionElsewhere();
     testCatalogue();
     testFrames();

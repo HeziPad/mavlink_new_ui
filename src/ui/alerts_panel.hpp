@@ -5,6 +5,7 @@
 #include <QWidget>
 
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -40,6 +41,10 @@ private:
     std::vector<Advisory> list_;
     bool alive_ = false;
     std::map<std::string, double> age_;  // per id, for the slide-in
+    // cards show their title only until tapped; criticals arrive open
+    std::set<std::string> expanded_;
+    bool isExpanded(const Advisory& a) const { return expanded_.count(a.id) > 0; }
+    int cardAt(const QPointF& pos) const;  // index into list_, -1 none
     double time_ = 0.0;
     double scroll_ = 0.0;
     QRect area_;

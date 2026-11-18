@@ -77,12 +77,12 @@ and shows `NO VIDEO`.
 | Key | Button | What it does |
 |-----|--------|--------------|
 | 1 | **Plan / Sync ↑** | First press: edit the mission on the map. Second press: upload it; if the aircraft is flying the plan (AUTO), it switches to the new plan right away at its nearest waypoint. **Hold**: re-download the vehicle's mission |
-| 2 | **Takeoff / Launch / Resume Plan** | On the ground (**hold 1 s** to confirm): with a mission → AUTO + arm; without → GUIDED + arm + VTOL takeoff, then Hold (circle) on the wing at takeoff altitude. Locked while the safety switch is on. Airborne: **Resume Plan** goes back to the planned loop on the wing (AUTO), also mid-landing (aborts it). If the vehicle's current item isn't a loop waypoint (still the VTOL takeoff after a Hold during the climb, or the landing), it is reset to the loop first, so AUTO never re-runs a rotor takeoff. While flying the loop it reads **On Plan** |
+| 2 | **Takeoff / Launch / Resume Plan** | On the ground (**hold 1 s** to confirm): GUIDED + arm + vertical takeoff. At the takeoff altitude it flies a **straight climb-out leg** (300 m, into the wind when there is some, else straight ahead) for the transition, and only once it is wing-borne does it turn to the plan (AUTO from WP1), or Hold when there is no mission. Locked while the safety switch is on. Airborne: **Resume Plan** goes back to the planned loop on the wing (AUTO), also mid-landing (aborts it). If the vehicle's current item isn't a loop waypoint (still the VTOL takeoff after a Hold during the climb, or the landing), it is reset to the loop first, so AUTO never re-runs a rotor takeoff. While flying the loop it reads **On Plan** |
 | 3 | **Fly To** | Toggle. Tap the map, or the ground in the camera view, to circle there on the wing (GUIDED) |
 | 4 | **Hold** | Instant. Circle where the aircraft is, on the wing (GUIDED). During a landing this is a go-around |
 | 5 | **Land** | **Hold 1 s**. Circle down beside the landing point **L** on the wing, leave into the wind, back-transition and land vertically. Without an L it lands at home the same way |
 
-**Hold and Fly To circles:** while the **Fly To** button is on, a panel above the dock sets the
+**Hold and Fly To circles:** while holding, or while the **Fly To** button is on, a panel above the dock sets the
 **altitude** (−10 / −1 / +1 / +10 m, or −50 … +50 ft; 20–5000 m), the
 **radius** (−50 … +50 m, 40–5000 m) and the **direction** (CW / CCW). Holding a
 button repeats and speeds up (×5 after 1 s, ×10 after 2.5 s). Changes apply
@@ -137,16 +137,38 @@ buttons say why when pressed (and on hover with a mouse).
 **SYSTEMS** in the telemetry bar counts problems. Tap it (or the red alert
 banner) to open the alerts panel; tap it again, tap anywhere outside the panel
 or press `Esc` to close it. It shows status pills (link, GPS, navigation, sensors,
-power, arming) and one card per problem. Each card says what's wrong, why it
-matters and what to try, with the raw data (EKF flags, the autopilot's
+power, arming) and one card per problem. Cards show their **title only**; tap a
+title to open it (critical ones arrive open). An open card says what's wrong,
+why it matters and what to try, with the raw data (EKF flags, the autopilot's
 message) in small print. The cards come from the EKF status, `SYS_STATUS` sensor
 health, GPS, battery and the link, plus the autopilot's PreArm and failsafe
 messages in plain language. PreArm cards stay while ArduPilot keeps repeating
 them (every 30 s) and clear when the vehicle arms. The panel only explains: it
 never changes the vehicle.
 
+The **FLIGHT** chip says in plain words what the aircraft is doing: ON GROUND,
+TAKEOFF, TRANSITION, CLIMB-OUT, ON PLAN · WP3, END HOLD, HOLD, FLY TO,
+LANDING · APPROACH / VERTICAL, RTL, QLAND (other modes by their ArduPilot name,
+which is also in the chip's small print). A rotor glyph lights while the lift
+rotors spin, and "· ROTOR ASSIST" flags Q_ASSIST in cruise.
+
+The **ALT** chip switches reference on a tap: **ASL** (sea level), **AGL**
+(the ground below: the rangefinder when its reading is valid, i.e. pointing
+down, fresh, inside its range and not at its maximum, the aircraft not banked
+or pitched over 30°; otherwise the terrain map, marked "terrain") and **AFL**
+(above the landing point's ground). AS · GS show whole numbers.
+
+The map's **nav box** (bottom right) shows the aircraft's coordinates and the
+ground below it, the target it is flying to (WPn, APPROACH, L, HOLD, FLY TO,
+END HOLD, CLIMB-OUT) with distance and **ETA**, and, under a mouse cursor, the
+cursor's coordinates, ground height, distance and ETA. The camera view shows
+the **CAMERA TARGET** (bottom right): where the line of sight meets the
+terrain, its ground height and the slant range (≈ when no terrain tile is
+there and flat ground at home level is used).
+
 The **⚙** at the end of the bar opens **Settings**: altitude in metres or feet,
-the flight trail (on/off, last 30 s / 1 / 2 / 5 / 10 min / all), the
+speeds in m/s or knots, coordinates as decimal degrees, D° M′ S″ or UTM, the
+flight trail (on/off, last 30 s / 1 / 2 / 5 / 10 min / all), the
 **landing reserve** for the battery time left (20–40 %), and **offline maps**
 (see below).
 
@@ -173,9 +195,9 @@ fault: Launch switches mode before arming. `Esc` deselects or leaves
 Plan/Fly To, `Del` deletes the selected point, and `Ctrl+Z` undoes a plan edit.
 
 **The lift rotors are for takeoff and landing only.** Every flight action above
-keeps the aircraft on the wing. The **LIFT ROTORS** chip in the telemetry bar
-shows **OFF**, **ACTIVE** (hover / transition / on the ground) or **ASSIST**.
-ASSIST means the rotors spun up in wing-borne flight to prevent a stall
+keeps the aircraft on the wing. The rotor glyph on the **FLIGHT** chip lights
+while the lift rotors spin, and the chip adds **ROTOR ASSIST** when they spin
+in wing-borne flight. ASSIST means the rotors spun up in wing-borne flight to prevent a stall
 (`Q_ASSIST_SPEED` and friends), and it also raises a toast. The aircraft stays
 armed in cruise: disarming would stop the pusher too. The GCS reads
 `Q_GUIDED_MODE` at connect and shows an alert if it is 1, because Fly To would
@@ -266,7 +288,7 @@ It is a full-window checklist in 12 stages:
 | Surfaces | The GCS sweeps ailerons, elevator and rudder in MANUAL (disarmed) while the picture shows which way each must move; a wrong one can be reversed with one tap; stabilisation check in FBWA |
 | Motors | Props off (or tied down), safety OFF, then each lift motor A–D spins 2 s at 15 %: the picture lights the position and spin direction it must have, and the GCS checks the right output moved. The pusher spins 2 s at 12 % in MANUAL and is force-disarmed |
 | Payload | Gimbal sweep, video frames arriving |
-| Settings | 17 parameter checks (Q_GUIDED_MODE, Q_ASSIST_SPEED, airspeed limits, arming checks, RC/GCS/battery failsafes and voltages for your pack, fence, loiter radius vs bank limit, ...), each with the reason and a one-tap fix (confirmed, read back, logged) where there is a safe value |
+| Settings | 18 parameter checks (Q_GUIDED_MODE, weathervaning into the wind, Q_ASSIST_SPEED, airspeed limits, arming checks, RC/GCS/battery failsafes and voltages for your pack, fence, loiter radius vs bank limit, ...), each with the reason and a one-tap fix (confirmed, read back, logged) where there is a safe value |
 | Mission | On the vehicle, landing point, altitudes, range, laps per pack |
 | Ready | The GCS selects AUTO, resets the mission to its takeoff and runs the pre-arm checks (their messages are listed if any fail); then safety OFF and **READY TO LAUNCH** |
 
@@ -355,8 +377,10 @@ offline/areas.json                      the full-detail areas (outlines on the m
 ## Settings
 
 The in-app settings screen (⚙) switches altitudes between metres and feet
-everywhere: HUD tape, telemetry bar, map labels, panels and steppers.
-Distances and speeds stay metric.
+everywhere (HUD tape, telemetry bar, map labels, panels and steppers), speeds
+between m/s and knots (AS/GS, HUD, wind), and coordinates between decimal
+degrees, D° M′ S″ and UTM (WGS84). Distances stay metric. `core/coords` also
+parses those formats, for coordinate inputs.
 
 `~/.config/mavlink_gcs_ui/mavlink_gcs_ui.conf` is created on first run.
 You can edit the link and video ports, takeoff, default waypoint and landing approach altitude,

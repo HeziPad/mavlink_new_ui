@@ -663,56 +663,82 @@ void MapView::setElevation(ElevationCache* elev) {
     }
 }
 
-void MapView::paintHover(QPainter& p, double right, double bottom) {
-    if (!hover_pos_ || compact_ || touch_input_ || pressing_ || !rect().contains(hover_pos_->toPoint())) {
+void MapView::paintNavBox(QPainter& p, double right, double bottom) {
+    // bottom-right: where the aircraft is, where it is going and when it
+    // gets there, and (mouse only) what is under the cursor
+    if (compact_) {
         return;
     }
-    double lat = 0.0, lon = 0.0;
-    toLatLon(*hover_pos_, lat, lon);
-    const QString pos = QStringLiteral("%1° %2   %3° %4")
-                            .arg(std::abs(lat), 0, 'f', 5)
-                            .arg(lat >= 0 ? QLatin1Char('N') : QLatin1Char('S'))
-                            .arg(std::abs(lon), 0, 'f', 5)
-                            .arg(lon >= 0 ? QLatin1Char('E') : QLatin1Char('W'));
-    QString ground = QStringLiteral("GROUND  —");
-    if (elev_) {
-        if (hover_elev_.lat != lat || hover_elev_.lon != lon || hover_elev_.gen != elev_gen_) {
-            hover_elev_ = {lat, lon, elev_gen_, elev_->elevation(lat, lon)};
-        }
-        if (const auto h = hover_elev_.h) {
-            ground = QStringLiteral("GROUND  %1 MSL").arg(units::altText(*h));
-            if (s_.has_home) {
-                const double rel = *h - s_.home_alt_amsl;
-                ground += QStringLiteral("  ·  %1%2 vs HOME")
-                              .arg(rel >= 0 ? QStringLiteral("+") : QString())
-                              .arg(units::altText(rel));
-            }
-        } else {
-            ground = QStringLiteral("GROUND  loading…");
+    struct Line {
+        QString text;
+        QColor color;
+        bool strong;
+    };
+    std::vector<Line> lines;
+    if (has_ac_) {
+        lines.push_back({QStringLiteral("AIRCRAFT  ") + units::coordText(ac_lat_, ac_lon_), kText, true});
+        if (!nav_.aircraft_ground.isEmpty()) {
+            lines.push_back({nav_.aircraft_ground, kGreen, false});
         }
     }
-    QString from;
-    if (has_ac_) {
-        const double d = geo::distance(ac_lat_, ac_lon_, lat, lon);
-        from = QStringLiteral("%1  ·  %2° from AIRCRAFT")
-                   .arg(formatDistance(d))
-                   .arg(static_cast<int>(std::lround(geo::wrap360(geo::bearing(ac_lat_, ac_lon_, lat, lon)))) % 360, 3,
-                        10, QLatin1Char('0'));
+    if (nav_.target.valid) {
+        lines.push_back({QStringLiteral("→ %1  %2  ·  ETA %3")
+                             .arg(QString::fromStdString(nav_.target.name), units::distanceText(nav_.target.dist_m),
+                                  units::durationText(nav_.target.eta_s)),
+                         kCyan, true});
+    }
+    const bool hover = hover_pos_ && !touch_input_ && !pressing_ && rect().contains(hover_pos_->toPoint());
+    if (hover) {
+        double lat = 0.0, lon = 0.0;
+        toLatLon(*hover_pos_, lat, lon);
+        lines.push_back({QStringLiteral("CURSOR  ") + units::coordText(lat, lon), kText, true});
+        QString ground = QStringLiteral("GROUND  —");
+        if (elev_) {
+            if (hover_elev_.lat != lat || hover_elev_.lon != lon || hover_elev_.gen != elev_gen_) {
+                hover_elev_ = {lat, lon, elev_gen_, elev_->elevation(lat, lon)};
+            }
+            if (const auto h = hover_elev_.h) {
+                ground = QStringLiteral("GROUND  %1 MSL").arg(units::altText(*h));
+                if (s_.has_home) {
+                    const double rel = *h - s_.home_alt_amsl;
+                    ground += QStringLiteral("  ·  %1%2 vs HOME")
+                                  .arg(rel >= 0 ? QStringLiteral("+") : QString())
+                                  .arg(units::altText(rel));
+                }
+            } else {
+                ground = QStringLiteral("GROUND  loading…");
+            }
+        }
+        lines.push_back({ground, kGreen, false});
+        if (has_ac_) {
+            const double d = geo::distance(ac_lat_, ac_lon_, lat, lon);
+            const double gs = std::hypot(s_.vn, s_.ve);
+            lines.push_back({QStringLiteral("%1  ·  %2° from AIRCRAFT  ·  ETA %3")
+                                 .arg(units::distanceText(d))
+                                 .arg(static_cast<int>(std::lround(geo::wrap360(geo::bearing(ac_lat_, ac_lon_, lat, lon)))) % 360,
+                                      3, 10, QLatin1Char('0'))
+                                 .arg(units::durationText(etaSeconds(d, gs))),
+                             kMuted, false});
+        }
+    }
+    if (lines.empty()) {
+        return;
     }
     const QFont mf = monoFont(12, true);
     const QFont sf = monoFont(11);
-    const QFontMetricsF fm(mf), fs(sf);
-    double w = std::max({fm.horizontalAdvance(pos), fs.horizontalAdvance(ground), fs.horizontalAdvance(from)}) + 28;
-    const int lines = from.isEmpty() ? 2 : 3;
-    const QRectF box(right - w, bottom - (12 + lines * 18), w, 12 + lines * 18);
+    double w = 0.0;
+    for (const auto& l : lines) {
+        w = std::max(w, QFontMetricsF(l.strong ? mf : sf).horizontalAdvance(l.text));
+    }
+    w += 28;
+    const double h = 12 + lines.size() * 18.0;
+    const QRectF box(right - w, bottom - h, w, h);
     drawGlass(p, chamferPath(box, 7), kCyan, 0.35, alpha(kGlassDeep, 0.9));
     double y = box.top() + 6;
-    drawText(p, QRectF(box.left() + 14, y, w - 28, 18), Qt::AlignLeft | Qt::AlignVCenter, pos, mf, kText);
-    y += 18;
-    drawText(p, QRectF(box.left() + 14, y, w - 28, 18), Qt::AlignLeft | Qt::AlignVCenter, ground, sf, kGreen);
-    y += 18;
-    if (!from.isEmpty()) {
-        drawText(p, QRectF(box.left() + 14, y, w - 28, 18), Qt::AlignLeft | Qt::AlignVCenter, from, sf, kMuted);
+    for (const auto& l : lines) {
+        drawText(p, QRectF(box.left() + 14, y, w - 28, 18), Qt::AlignLeft | Qt::AlignVCenter, l.text,
+                 l.strong ? mf : sf, l.color);
+        y += 18;
     }
 }
 
@@ -1435,7 +1461,7 @@ void MapView::paintApproach(QPainter& p) {
         p.drawLine(tip, tip - dir * 8.0 + n * 5.0);
         p.drawLine(tip, tip - dir * 8.0 - n * 5.0);
         drawText(p, QRectF(base.x() - 30, base.y() - 22, 60, 14), Qt::AlignCenter,
-                 QStringLiteral("%1 m/s").arg(s_.wind_speed, 0, 'f', 1), monoFont(10), alpha(kText, 0.9));
+                 units::speedText(s_.wind_speed, 1), monoFont(10), alpha(kText, 0.9));
     }
 }
 
@@ -1573,7 +1599,7 @@ void MapView::paintOverlayChrome(QPainter& p) {
     double xr = right;
     xr = chip(layer_chip_, xr, layer_ == TileCache::Satellite ? QStringLiteral("▣ Sat") : QStringLiteral("▣ Map"), true);
     chip(follow_chip_, xr, QStringLiteral("◎ Follow"), follow_);
-    paintHover(p, right, y - 52);
+    paintNavBox(p, right, y - 52);
 
     if (!dl_status_.isEmpty()) {
         const QFont f = labelFont(11);

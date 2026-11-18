@@ -43,6 +43,8 @@ SettingsScreen::SettingsScreen(QWidget* parent) : QWidget(parent) {
     labels_.labels = {QStringLiteral("עברית"), QStringLiteral("ENGLISH")};
     online_.labels = {QStringLiteral("OFF"), QStringLiteral("ON")};
     alt_.labels = {QStringLiteral("METERS"), QStringLiteral("FEET")};
+    speed_.labels = {QStringLiteral("M/S"), QStringLiteral("KNOTS")};
+    coord_.labels = {QStringLiteral("DEGREES"), QStringLiteral("D° M′ S″"), QStringLiteral("UTM")};
     trail_on_.labels = {QStringLiteral("OFF"), QStringLiteral("ON")};
     for (int pct : reserveChoices()) {
         reserve_.labels << QStringLiteral("%1 %").arg(pct);
@@ -55,6 +57,8 @@ SettingsScreen::SettingsScreen(QWidget* parent) : QWidget(parent) {
 void SettingsScreen::open(const Values& v) {
     v_ = v;
     alt_.selected = v.alt_unit;
+    speed_.selected = v.speed_unit;
+    coord_.selected = v.coord_format;
     trail_on_.selected = v.trail_on ? 1 : 0;
     const auto& c = trailChoices();
     const auto it = std::find(c.begin(), c.end(), v.trail_secs);
@@ -64,7 +68,7 @@ void SettingsScreen::open(const Values& v) {
     const auto& rc = reserveChoices();
     const auto rit = std::find(rc.begin(), rc.end(), v.reserve_pct);
     reserve_.selected = rit != rc.end() ? static_cast<int>(rit - rc.begin()) : 1;
-    for (Segmented* s : {&alt_, &trail_on_, &trail_len_, &labels_, &online_, &reserve_}) {
+    for (Segmented* s : {&alt_, &speed_, &coord_, &trail_on_, &trail_len_, &labels_, &online_, &reserve_}) {
         s->knob = s->selected;
     }
     confirm_ = Confirm::None;
@@ -113,7 +117,7 @@ void SettingsScreen::tick(double dt) {
         return;
     }
     const double k = reducedMotion() ? 1.0 : 1.0 - std::exp(-16.0 * dt);
-    for (Segmented* s : {&alt_, &trail_on_, &trail_len_, &labels_, &online_, &reserve_}) {
+    for (Segmented* s : {&alt_, &speed_, &coord_, &trail_on_, &trail_len_, &labels_, &online_, &reserve_}) {
         s->knob += (s->selected - s->knob) * k;
     }
     cat_knob_ += (category_ - cat_knob_) * k;
@@ -123,7 +127,7 @@ void SettingsScreen::tick(double dt) {
 
 QRectF SettingsScreen::panelRect() const {
     const double w = std::min(860.0, width() - 48.0);
-    const double h = std::min(category_ == kOffline ? 560.0 : 480.0, height() - 80.0);
+    const double h = std::min(category_ == kOffline || category_ == kUnits ? 560.0 : 480.0, height() - 80.0);
     return {(width() - w) / 2.0, (height() - h) / 2.0, w, h};
 }
 
@@ -171,6 +175,10 @@ void SettingsScreen::mousePressEvent(QMouseEvent* e) {
     if (category_ == kUnits) {
         if (pressSegmented(alt_, pos)) {
             emit altUnitChanged(alt_.selected);
+        } else if (pressSegmented(speed_, pos)) {
+            emit speedUnitChanged(speed_.selected);
+        } else if (pressSegmented(coord_, pos)) {
+            emit coordFormatChanged(coord_.selected);
         }
     } else if (category_ == kBattery) {
         if (pressSegmented(reserve_, pos)) {
@@ -300,9 +308,15 @@ void SettingsScreen::paintEvent(QPaintEvent*) {
     if (category_ == kUnits) {
         paintRow(p, body, QStringLiteral("ALTITUDE"),
                  QStringLiteral("HUD tape, telemetry bar, map labels, panels and steppers"));
-        paintSegmented(p, QRectF(body.left(), body.top() + 54, std::min(body.width(), 360.0), 58), alt_);
+        paintSegmented(p, QRectF(body.left(), body.top() + 50, std::min(body.width(), 360.0), 54), alt_);
+        paintRow(p, body.adjusted(0, 122, 0, 0), QStringLiteral("SPEED"),
+                 QStringLiteral("airspeed, ground speed and wind"));
+        paintSegmented(p, QRectF(body.left(), body.top() + 172, std::min(body.width(), 360.0), 54), speed_);
+        paintRow(p, body.adjusted(0, 244, 0, 0), QStringLiteral("COORDINATES"),
+                 QStringLiteral("aircraft position, map cursor, camera target"));
+        paintSegmented(p, QRectF(body.left(), body.top() + 294, std::min(body.width(), 480.0), 54), coord_);
         drawText(p, QRectF(body.left(), body.bottom() - 18, body.width(), 18), Qt::AlignLeft | Qt::AlignVCenter,
-                 QStringLiteral("distances and speeds stay metric"), labelFont(10, false), alpha(kMuted, 0.8));
+                 QStringLiteral("distances stay metric · UTM on WGS84"), labelFont(10, false), alpha(kMuted, 0.8));
     } else if (category_ == kOffline) {
         paintOffline(p, body);
     } else if (category_ == kBattery) {

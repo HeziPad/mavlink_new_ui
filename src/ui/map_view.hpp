@@ -1,6 +1,7 @@
 #pragma once
 
 #include "anim.hpp"
+#include "core/flight_status.hpp"
 #include "core/mission.hpp"
 #include "core/vehicle_state.hpp"
 #include "view_host.hpp"
@@ -45,6 +46,12 @@ public:
     void setDefaultLandAltitude(float alt) { default_land_alt_ = alt; }
     // the autopilot's WP_LOITER_RAD: a hold with radius 0 circles at this
     void setDefaultLoiterRadius(double m) { default_loiter_radius_ = m; }
+    // the nav box (bottom right): the ground under the aircraft, and where it is going
+    struct NavInfo {
+        QString aircraft_ground;  // "GROUND 512 m MSL · AGL 80 m (rangefinder)"
+        NavTarget target;
+    };
+    void setNav(NavInfo nav) { nav_ = std::move(nav); }
     double defaultLoiterRadius() const { return default_loiter_radius_; }
 
     // ---- plan editing ------------------------------------------------------
@@ -169,7 +176,7 @@ private:
     void paintArea(QPainter& p);
     bool areaPress(const QPointF& pos);  // true: handled
     std::array<QPointF, 4> areaCorners() const;  // NW NE SE SW on screen
-    void paintHover(QPainter& p, double right, double bottom);
+    void paintNavBox(QPainter& p, double right, double bottom);
 
     TileCache* tiles_;
     ElevationCache* elev_ = nullptr;
@@ -199,6 +206,7 @@ private:
     float default_alt_ = 80.0f;
     float default_land_alt_ = kDefaultLandApproachAlt;
     double default_loiter_radius_ = 80.0;
+    NavInfo nav_;
 
     MissionPlan plan_;
     std::vector<MissionPlan> undo_;

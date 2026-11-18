@@ -20,6 +20,8 @@ class SettingsScreen : public QWidget {
 public:
     struct Values {
         int alt_unit = 0;     // units::Alt
+        int speed_unit = 0;   // units::Speed
+        int coord_format = 0; // coords::Fmt
         bool trail_on = true;
         int trail_secs = 120; // 0 = everything kept
         bool labels_english = false;
@@ -54,6 +56,8 @@ public:
 
 signals:
     void altUnitChanged(int unit);
+    void speedUnitChanged(int unit);
+    void coordFormatChanged(int fmt);
     void reserveChanged(int pct);
     void trailChanged(bool on, int secs);
     void offlineCountry();       // download / update the country pack
@@ -98,6 +102,8 @@ private:
 
     Values v_;
     Segmented alt_;
+    Segmented speed_;
+    Segmented coord_;
     Segmented trail_on_;
     Segmented trail_len_;
     Segmented labels_;

@@ -304,7 +304,36 @@ static void testTiles() {
     CHECK_NEAR(t::tileMeters(32.0853, 13), 4148.0, 20.0);
 }
 
+static void testRayToTerrain() {
+    using namespace gcs::geo;
+    // flat ground at 100 m AMSL, aircraft at 200 m, looking 45 deg down: hits 100 m out
+    auto flat = [](double, double) -> std::optional<double> { return 100.0; };
+    TerrainHit h = rayToTerrain(47.0, 8.0, 200.0, 90.0, -45.0, flat, 0.0);
+    CHECK(h.hit && !h.approximate);
+    CHECK_NEAR(distance(47.0, 8.0, h.lat, h.lon), 100.0, 1.0);
+    CHECK_NEAR(h.slant, 100.0 * std::sqrt(2.0), 1.0);
+    CHECK_NEAR(h.ground, 100.0, 1e-9);
+    // a hill rising toward the east is hit sooner
+    auto slope = [](double lat0, double lon) -> std::optional<double> {
+        (void)lat0;
+        return 100.0 + (lon - 8.0) * 111320.0 * std::cos(47.0 * kDegToRad) * 0.5;  // +0.5 m per m east
+    };
+    h = rayToTerrain(47.0, 8.0, 200.0, 90.0, -45.0, slope, 0.0);
+    CHECK(h.hit);
+    CHECK_NEAR(distance(47.0, 8.0, h.lat, h.lon), 66.7, 1.0);  // 100 - x = 0.5 x
+    // above the horizon: no hit
+    CHECK(!rayToTerrain(47.0, 8.0, 200.0, 90.0, 5.0, flat, 0.0).hit);
+    // beyond range: no hit
+    CHECK(!rayToTerrain(47.0, 8.0, 200.0, 90.0, -1.0, flat, 0.0, 3000.0).hit);
+    // unknown terrain: the flat fallback, marked approximate
+    auto none = [](double, double) -> std::optional<double> { return std::nullopt; };
+    h = rayToTerrain(47.0, 8.0, 200.0, 0.0, -45.0, none, 150.0);
+    CHECK(h.hit && h.approximate);
+    CHECK_NEAR(h.slant, 50.0 * std::sqrt(2.0), 1.0);
+}
+
 int main() {
+    testRayToTerrain();
     testTiles();
     testTrackPredictor();
     testPredictVelocity();

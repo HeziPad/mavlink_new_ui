@@ -659,6 +659,11 @@ const std::vector<ParamCheck>& paramChecks() {
     static const std::vector<ParamCheck> list = {
         {"param.Q_GUIDED_MODE", "Q_GUIDED_MODE", "Fly To stays on the wing",
          "1 makes Hold/Fly To hover on the rotors instead of circling on the wing.", true},
+        {"param.Q_WVANE_GAIN", "Q_WVANE_GAIN", "Hover turns into the wind",
+         "Weathervaning yaws the nose into the wind while hovering, so the takeoff's straight transition leg "
+         "(flown straight ahead) goes into the wind: shortest and safest. ArduPlane enables it but ships the "
+         "gain at 0, which turns it off.",
+         false},
         {"param.Q_ASSIST_SPEED", "Q_ASSIST_SPEED", "Stall protection (Q_ASSIST)",
          "Below this airspeed the lift rotors catch a stalling wing; 0 turns that off.", true},
         {"param.AIRSPEED", "", "Airspeed limits consistent",
@@ -708,7 +713,8 @@ std::vector<std::string> paramsToFetch() {
     std::vector<std::string> v = {"Q_ENABLE", "Q_FRAME_CLASS", "Q_FRAME_TYPE", "AIRSPEED_MIN", "AIRSPEED_CRUISE",
                                   "AIRSPEED_MAX", "ARMING_CHECK", "ARMING_SKIPCHK", "ARSPD_TYPE", "FLTMODE_CH",
                                   "FLTMODE1", "FLTMODE2", "FLTMODE3", "FLTMODE4", "FLTMODE5", "FLTMODE6",
-                                  "RCMAP_ROLL", "RCMAP_PITCH", "RCMAP_THROTTLE", "RCMAP_YAW", "RC_OVERRIDE_TIME"};
+                                  "RCMAP_ROLL", "RCMAP_PITCH", "RCMAP_THROTTLE", "RCMAP_YAW", "RC_OVERRIDE_TIME",
+                                  "Q_WVANE_ENABLE"};
     for (const auto& c : paramChecks()) {
         if (!c.name.empty()) {
             v.push_back(c.name);
@@ -753,6 +759,28 @@ ParamVerdict checkParam(const ParamCheck& c, const VehicleState& s, const Profil
     };
 
     if (c.id == "param.Q_GUIDED_MODE") return simple("Q_GUIDED_MODE", 0.0f, "circle on the wing");
+    if (c.id == "param.Q_WVANE_GAIN") {
+        const auto en = get("Q_WVANE_ENABLE");
+        const auto gain = get("Q_WVANE_GAIN");
+        if (!en || !gain) return v;
+        v.known = true;
+        v.current = *gain;
+        const int dir = static_cast<int>(std::lround(*en));
+        const bool nose = dir == 1 || dir == -1;  // nose into wind (always, or takeoff / landing only)
+        v.ok = nose && *gain > 0.0f;
+        if (*gain <= 0.0f) {
+            v.recommended = 1.0f;
+        }
+        if (v.ok) {
+            v.detail = "Q_WVANE_ENABLE = " + num(*en) + ", Q_WVANE_GAIN = " + num(*gain) + " ✓ noses into the wind";
+        } else if (!nose) {
+            v.detail = "Q_WVANE_ENABLE = " + num(*en) + ": set it to 1 (nose into wind) in your parameter editor" +
+                       (*gain <= 0.0f ? "; and Q_WVANE_GAIN → recommended 1" : "");
+        } else {
+            v.detail = "Q_WVANE_GAIN = " + num(*gain) + " → recommended 1: with 0 the hover never turns into the wind";
+        }
+        return v;
+    }
     if (c.id == "param.RTL_AUTOLAND") return simple("RTL_AUTOLAND", 2.0f, "RTL flies the landing at L");
     if (c.id == "param.Q_RTL_MODE") return simple("Q_RTL_MODE", 0.0f, "RTL hands over to the mission landing");
     if (c.id == "param.BRD_SAFETY_DEFLT") return simple("BRD_SAFETY_DEFLT", 1.0f, "safety starts ON");

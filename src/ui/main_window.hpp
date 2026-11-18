@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/endurance.hpp"
+#include "core/flight_status.hpp"
 #include "core/health.hpp"
 #include "core/orbit_trim.hpp"
 #include "core/vehicle_state.hpp"
@@ -57,6 +58,9 @@ struct AppSettings {
     bool reduced_motion = false;
     double cruise_speed = 18.0;
     int alt_unit = 0;            // units::Alt
+    int speed_unit = 0;          // units::Speed
+    int coord_format = 0;        // coords::Fmt
+    int alt_ref = 0;             // altitude chip: 0 ASL, 1 AGL, 2 AFL (above the landing point)
     int hud_reference = 0;       // CameraView::HudRef
     bool wind_north_up = false;  // camera HUD wind gauge
     bool ball_collapsed = false; // map attitude ball
@@ -100,6 +104,15 @@ private:
     void checkTakeoffHandoff();
     void layoutOverlays();
     void applyAltUnit(int unit);
+    void applySpeedUnit(int unit);
+    void updateHeights(qint64 now_ms);
+    qint64 heights_ms_ = -1000000;
+    qint64 nav_ms_ = -1000000;
+    void updateLosTarget(const CameraLos& los);
+    qint64 los_ms_ = -1000000;
+    std::optional<double> terrain_here_;  // ground (AMSL) under the aircraft, from the elevation map
+    std::optional<double> land_ground_;   // ground (AMSL) at the landing point
+    void applyCoordFormat(int fmt);
     void showAlerts(bool on);
     QRect alertsArea() const;
     int orbitPanelX() const;
@@ -191,6 +204,16 @@ private:
     // once it reaches altitude (rotors are for takeoff and landing only)
     bool takeoff_handoff_ = false;
     bool handoff_seen_guided_ = false;
+    // after the vertical climb: a straight leg for the transition, then the plan
+    void startClimbOut();
+    void checkClimbOut();
+    static int firstRouteSeq(const std::vector<MissionItem>& items);
+    bool climb_out_ = false;
+    double climb_out_lat_ = 0.0, climb_out_lon_ = 0.0;
+    qint64 climb_out_ms_ = 0;
+    static constexpr double kClimbOutMin = 300.0;      // m
+    static constexpr double kClimbOutSeconds = 12.0;   // x cruise airspeed
+    static constexpr qint64 kClimbOutTimeoutMs = 40000;
     LiftRotors last_lift_ = LiftRotors::Unknown;
 
     // The circle we commanded in GUIDED (Hold or a Guide target) via

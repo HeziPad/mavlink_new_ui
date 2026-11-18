@@ -462,19 +462,22 @@ void CameraView::paintHud(QPainter& p) {
     paintReadouts(p);
     paintRefChip(p);
     paintWind(p);
+    paintLosTarget(p);
     const Layout lay = layout();
-    paintVerticalTape(p, lay.as_tape, as_.value, 2.0, true, QStringLiteral("AS"));
+    paintVerticalTape(p, lay.as_tape, units::speedToDisplay(as_.value),
+                      units::speedUnit() == units::Speed::Knots ? 5.0 : 2.0, true,
+                      QStringLiteral("AS %1").arg(units::speedUnitLabel()));
     paintVerticalTape(p, lay.alt_tape, units::altToDisplay(alt_.value), units::feet() ? 20.0 : 5.0, false,
                       QStringLiteral("ALT %1").arg(units::altUnitLabel()));
 
     // status line under the crosshair
     {
-        const VtolState v = effectiveVtolState(s_);
-        QString text = QStringLiteral("%1  ·  %2  ·  GS %3  ·  VS %4")
-                           .arg(s_.has_heartbeat ? QString::fromStdString(s_.mode_name) : QStringLiteral("—"))
-                           .arg(QString::fromUtf8(vtolStateName(v)))
-                           .arg(s_.groundspeed, 0, 'f', 1)
-                           .arg(s_.climb, 0, 'f', 1);
+        const QString vs = units::feet() ? QStringLiteral("%1 ft/min").arg(std::lround(s_.climb * units::kFeetPerMeter * 60.0))
+                                         : QStringLiteral("%1 m/s").arg(s_.climb, 0, 'f', 1);
+        QString text = QStringLiteral("%1  ·  GS %2  ·  VS %3")
+                           .arg(flight_label_.isEmpty() ? QStringLiteral("—") : flight_label_)
+                           .arg(units::speedText(s_.groundspeed))
+                           .arg(vs);
         const QFont fnt = monoFont(12, true);
         // under the heading box: the bottom centre is where the dock panels open
         drawText(p, QRectF(c.x() - 300, 130, 600, 20), Qt::AlignCenter, text, fnt, alpha(hud, 0.9));
@@ -724,6 +727,35 @@ void CameraView::paintReadouts(QPainter& p) {
         drawText(p, QRectF(box.left() + 56, box.top() + 26 + 2 * 19 + 2, box.width() - 64, 16),
                  Qt::AlignRight | Qt::AlignVCenter, earth, monoFont(11), alpha(hud, 0.8));
     }
+}
+
+void CameraView::paintLosTarget(QPainter& p) {
+    // bottom right, clear of the picture's centre: what the camera looks at
+    if (compact() || !los_target_.valid) {
+        return;
+    }
+    const QColor hud = kGreen;
+    const QRectF box(width() - 16 - 300, height() - 16 - 92 - 96, 300, 92);
+    p.setPen(QPen(alpha(hud, 0.5), 1));
+    p.setBrush(alpha(kBg, 0.55));
+    p.drawRect(box);
+    drawText(p, QRectF(box.left() + 10, box.top() + 5, box.width() - 20, 16), Qt::AlignLeft | Qt::AlignVCenter,
+             QStringLiteral("CAMERA TARGET") + (los_target_.approximate ? QStringLiteral(" · ≈ flat ground") : QString()),
+             labelFont(10.5), los_target_.approximate ? kAmber : hud);
+    if (!los_target_.hit) {
+        drawText(p, box.adjusted(10, 24, -10, -8), Qt::AlignLeft | Qt::AlignVCenter,
+                 QStringLiteral("above the horizon / beyond 3 km"), monoFont(12, true), alpha(hud, 0.7));
+        return;
+    }
+    const QFont lf = labelFont(10);
+    auto row = [&](int i, const QString& k, const QString& v, const QFont& f) {
+        const double y = box.top() + 24 + i * 21;
+        drawText(p, QRectF(box.left() + 10, y, 64, 18), Qt::AlignLeft | Qt::AlignVCenter, k, lf, alpha(hud, 0.65));
+        drawText(p, QRectF(box.left() + 70, y, box.width() - 80, 18), Qt::AlignRight | Qt::AlignVCenter, v, f, hud);
+    };
+    row(0, QStringLiteral("POS"), units::coordText(los_target_.lat, los_target_.lon), monoFont(11.5, true));
+    row(1, QStringLiteral("GROUND"), QStringLiteral("%1 MSL").arg(units::altText(los_target_.ground)), monoFont(13, true));
+    row(2, QStringLiteral("SLANT"), units::distanceText(los_target_.slant), monoFont(13, true));
 }
 
 void CameraView::paintVerticalTape(QPainter& p, const QRectF& r, double value, double step, bool left,

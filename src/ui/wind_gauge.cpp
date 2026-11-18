@@ -2,6 +2,7 @@
 
 #include "core/geo.hpp"
 #include "theme.hpp"
+#include "units.hpp"
 
 #include <QPainter>
 #include <QPainterPath>
@@ -95,15 +96,17 @@ void paintWindGauge(QPainter& p, const QRectF& r, const WindInfo& w, double head
             drawText(p, t1, Qt::AlignCenter, QStringLiteral("WIND —"), labelFont(9.5), kMuted);
         } else {
             drawText(p, t1, Qt::AlignCenter,
-                     QStringLiteral("%1° · %2 m/s")
+                     QStringLiteral("%1° · %2")
                          .arg(static_cast<int>(std::lround(geo::wrap360(w.from_deg))) % 360, 3, 10, QLatin1Char('0'))
-                         .arg(w.speed, 0, 'f', 1),
+                         .arg(units::speedText(w.speed, 1)),
                      monoFont(11.5, true), kText);
             double head = 0.0, cross = 0.0;
             windComponents(w, heading_deg, head, cross);
-            const QString hw = head >= 0 ? QStringLiteral("HEAD %1").arg(head, 0, 'f', 1)
-                                         : QStringLiteral("TAIL %1").arg(-head, 0, 'f', 1);
-            const QString xw = QStringLiteral("X%1 %2").arg(cross >= 0 ? QLatin1Char('R') : QLatin1Char('L')).arg(std::abs(cross), 0, 'f', 1);
+            const QString hw = head >= 0 ? QStringLiteral("HEAD %1").arg(units::speedText(head, 1, false))
+                                         : QStringLiteral("TAIL %1").arg(units::speedText(-head, 1, false));
+            const QString xw = QStringLiteral("X%1 %2")
+                                   .arg(cross >= 0 ? QLatin1Char('R') : QLatin1Char('L'))
+                                   .arg(units::speedText(std::abs(cross), 1, false));
             drawText(p, t2, Qt::AlignCenter, calm ? QStringLiteral("calm") : hw + QStringLiteral("  ") + xw,
                      monoFont(9.5), alpha(kMuted, 0.95));
         }

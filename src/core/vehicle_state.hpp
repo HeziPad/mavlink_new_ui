@@ -93,6 +93,15 @@ struct VehicleState {
     double battery_a = -1.0;   // < 0 : unknown
     int battery_pct = -1;      // < 0 : unknown
 
+    // ---- rangefinder (DISTANCE_SENSOR, the downward one) -------------------------------
+    bool has_rangefinder = false;
+    double rangefinder_m = 0.0;
+    double rangefinder_min = 0.0;
+    double rangefinder_max = 0.0;
+    int rangefinder_quality = 0;   // 0 unknown, 1 invalid, 2..100 quality
+    int rangefinder_orient = 0;    // MAV_SENSOR_ORIENTATION, 25 = down
+    Clock::time_point rangefinder_rx{};
+
     // ---- GPS ----------------------------------------------------------------
     bool has_gps = false;
     int gps_fix = 0;           // GPS_FIX_TYPE

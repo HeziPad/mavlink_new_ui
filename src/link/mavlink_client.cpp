@@ -687,6 +687,21 @@ void MavlinkClient::decodeTelemetry(const mavlink_message_t& msg) {
         }
         break;
     }
+    case MAVLINK_MSG_ID_DISTANCE_SENSOR: {
+        mavlink_distance_sensor_t d{};
+        mavlink_msg_distance_sensor_decode(&msg, &d);
+        if (d.orientation != 25 && s.has_rangefinder && s.rangefinder_orient == 25) {
+            break;  // keep the downward one when there are several
+        }
+        s.has_rangefinder = true;
+        s.rangefinder_m = d.current_distance / 100.0;
+        s.rangefinder_min = d.min_distance / 100.0;
+        s.rangefinder_max = d.max_distance / 100.0;
+        s.rangefinder_quality = d.signal_quality;
+        s.rangefinder_orient = d.orientation;
+        s.rangefinder_rx = now;
+        break;
+    }
     case MAVLINK_MSG_ID_GPS_RAW_INT: {
         mavlink_gps_raw_int_t g{};
         mavlink_msg_gps_raw_int_decode(&msg, &g);
@@ -877,6 +892,7 @@ void MavlinkClient::requestStreams(Clock::time_point now) {
     commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_SERVO_OUTPUT_RAW, 4.0), now);
     commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_NAV_CONTROLLER_OUTPUT, 4.0), now);
     commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_WIND, 1.0), now);
+    commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_DISTANCE_SENSOR, 5.0), now);
     commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_GIMBAL_DEVICE_ATTITUDE_STATUS, 10.0), now);
     // preflight data
     commands_->sendBackground(messageInterval(MAVLINK_MSG_ID_RC_CHANNELS, 5.0), now);
