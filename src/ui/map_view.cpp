@@ -1181,9 +1181,9 @@ void MapView::buildBackdrop(const QPointF& world_tl, const QSize& size) {
     bd_.trail_n = s_.trail.size();
     bd_.trail_first = 0;
     if (trail_on_ && s_.trail.size() > 1) {
-        const size_t first = trailFirst();
-        bd_.trail_first = first;
-        paintTrail(p, world_tl, first, s_.trail.size(), first, s_.trail.size() - first);
+        const size_t first_pt = trailFirst();
+        bd_.trail_first = first_pt;
+        paintTrail(p, world_tl, first_pt, s_.trail.size(), first_pt, s_.trail.size() - first_pt);
     }
     bd_.world_tl = world_tl;
     bd_.zoom = zoom_;

@@ -685,7 +685,7 @@ void CameraView::paintReadouts(QPainter& p) {
     // ---- aircraft ---------------------------------------------------------------
     {
         const QRectF& box = lay.aircraft;
-        auto row = [&](int i, const QString& k, const QString& v) {
+        auto att_row = [&](int i, const QString& k, const QString& v) {
             // values stop short of the ball on the right
             const double y = box.top() + 26 + i * 19;
             drawText(p, QRectF(box.left() + 10, y, 50, 16), Qt::AlignLeft | Qt::AlignVCenter, k, lf, alpha(hud, 0.65));
@@ -697,9 +697,9 @@ void CameraView::paintReadouts(QPainter& p) {
         p.drawRect(box);
         drawText(p, QRectF(box.left() + 10, box.top() + 5, 120, 16), Qt::AlignLeft | Qt::AlignVCenter,
                  QStringLiteral("AIRCRAFT"), labelFont(10.5), hud);
-        row(0, QStringLiteral("ROLL"), signedDeg(roll_.value));
-        row(1, QStringLiteral("PITCH"), signedDeg(pitch_.value));
-        row(2, QStringLiteral("HDG"),
+        att_row(0, QStringLiteral("ROLL"), signedDeg(roll_.value));
+        att_row(1, QStringLiteral("PITCH"), signedDeg(pitch_.value));
+        att_row(2, QStringLiteral("HDG"),
             QStringLiteral("%1°").arg(static_cast<int>(std::lround(yaw_.value)) % 360, 3, 10, QLatin1Char('0')));
         // mini attitude ball, inside the box on the right
         paintAttitudeBall(p, QPointF(box.right() - 34, box.center().y() + 6), 24, roll_.value, pitch_.value,

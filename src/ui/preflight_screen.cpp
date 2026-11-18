@@ -360,13 +360,13 @@ void PreflightScreen::paintEvent(QPaintEvent*) {
     const double rail_w = wide ? 210 : 170, list_w = wide ? 270 : 220, data_w = wide ? 230 : 0;
     const QRectF rail(r.left(), top, rail_w, bottom - top);
     const QRectF list(rail.right() + 12, top, list_w, bottom - top);
-    const QRectF data(r.right() - data_w, top, data_w, bottom - top);
-    const QRectF card(list.right() + 12, top, (wide ? data.left() - 12 : r.right()) - list.right() - 12, bottom - top);
+    const QRectF data_col(r.right() - data_w, top, data_w, bottom - top);
+    const QRectF card(list.right() + 12, top, (wide ? data_col.left() - 12 : r.right()) - list.right() - 12, bottom - top);
     paintRail(p, rail);
     paintSteps(p, list);
     paintCard(p, card);
     if (wide) {
-        paintData(p, data);
+        paintData(p, data_col);
     }
 
     // ---- bottom bar
