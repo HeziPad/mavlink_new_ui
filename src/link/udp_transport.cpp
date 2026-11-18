@@ -5,6 +5,9 @@
 #include <ws2tcpip.h>
 #include <mstcpip.h>  // SIO_UDP_CONNRESET
 #include <mutex>
+#ifndef SIO_UDP_CONNRESET  // not exposed by every SDK configuration
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
 #else
 #include <arpa/inet.h>
 #include <fcntl.h>
