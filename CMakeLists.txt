@@ -37,6 +37,7 @@ add_library(gcs_core STATIC
     src/core/geo.cpp
     src/core/gzip.cpp
     src/core/health.cpp
+    src/core/endurance.cpp
     src/core/mission.cpp
     src/core/mvt.cpp
     src/core/orbit_trim.cpp
@@ -100,7 +101,7 @@ endif()
 
 # ---- tests ----------------------------------------------------------------------
 enable_testing()
-foreach(name geo mission_builder mission_transfer command_sender lift_rotors health orbit_trim preflight offline_map)
+foreach(name geo endurance mission_builder mission_transfer command_sender lift_rotors health orbit_trim preflight offline_map)
     add_executable(test_${name} tests/test_${name}.cpp)
     target_link_libraries(test_${name} PRIVATE gcs_core)
     gcs_warnings(test_${name})

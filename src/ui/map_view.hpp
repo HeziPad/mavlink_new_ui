@@ -56,7 +56,8 @@ public:
     void select(int id);
     void adjustAltitude(int id, float delta);  // waypoint or kLandId; one undo step per point
     void deletePoint(int id);
-    void insertAfter(int index);                  // midpoint to the next loop point
+    void insertAfter(int index);                  // midpoint to the next point (past the end of an open route)
+    void setPattern(Pattern pattern);             // how the route is flown (undoable)
 
     // ---- motion (predicted, set every frame) ---------------------------------
     void setAircraftPosition(double lat, double lon);

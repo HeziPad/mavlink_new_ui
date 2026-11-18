@@ -598,7 +598,7 @@ std::optional<Eval> evaluate(const std::string& id, const VehicleState& s, const
             if (plan.wps.empty()) {
                 return ev(Status::NotApplicable, "no waypoints");
             }
-            const double lap = lapLength(plan.wps);
+            const double lap = routeLength(plan);
             const double speed = s.airspeed_cruise > 0.0 ? s.airspeed_cruise : 18.0;
             const double lap_min = lap / speed / 60.0;
             if (p.endurance_min <= 0.0) {

@@ -1,5 +1,7 @@
 #include "telemetry_bar.hpp"
 
+#include "core/endurance.hpp"
+
 #include "theme.hpp"
 #include "units.hpp"
 
@@ -137,6 +139,13 @@ void TelemetryBar::setAdvisories(const std::vector<Advisory>& list) {
     }
 }
 
+void TelemetryBar::setEndurance(bool valid, double time_left_s, int level, Clock::time_point at) {
+    endurance_valid_ = valid;
+    endurance_s_ = time_left_s;
+    endurance_level_ = level;
+    endurance_at_ = at;
+}
+
 void TelemetryBar::setSystemsOpen(bool open) {
     sys_open_ = open;
     update();
@@ -219,7 +228,7 @@ void TelemetryBar::mousePressEvent(QMouseEvent* e) {
         emit settingsRequested();
         return;
     }
-    if (sys_rect_.contains(e->position())) {
+    if (sys_rect_.contains(e->position()) || (endurance_valid_ && batt_rect_.contains(e->position()))) {
         emit systemsTapped();
     }
 }
@@ -427,9 +436,27 @@ void TelemetryBar::paintEvent(QPaintEvent*) {
         const QColor c = batteryColor(pct);
         drawText(p, QRectF(r.left() + 10, r.top() + 6, r.width() - 20, 13), Qt::AlignLeft | Qt::AlignVCenter,
                  QStringLiteral("Batt"), labelFont(9.5), kMuted);
-        QString right = s_.has_battery ? QStringLiteral("%1V").arg(s_.battery_v, 0, 'f', 1) : QStringLiteral("—");
-        drawText(p, QRectF(r.left() + 10, r.top() + 5, r.width() - 20, 15), Qt::AlignRight | Qt::AlignVCenter,
-                 right, monoFont(12), kText);
+        batt_rect_ = p.transform().mapRect(r);
+        if (endurance_valid_ && isAirborne(s_)) {
+            // in flight: the flying time left before it must head back (it
+            // already keeps the return, the landing and the reserve)
+            const double left = endurance_s_ - std::chrono::duration<double>(now_ - endurance_at_).count();
+            const bool land_now = endurance_level_ >= 2 || left <= 0.0;
+            const QColor tc = land_now ? kRed : (endurance_level_ == 1 ? kAmber : kText);
+            const QString t = land_now ? QStringLiteral("LAND NOW")
+                                       : QStringLiteral("%1 left").arg(QString::fromStdString(endurance::clockText(left)));
+            p.save();
+            if (land_now && !reducedMotion()) {
+                p.setOpacity(0.55 + 0.45 * std::abs(std::sin(time_ * 3.0)));
+            }
+            drawText(p, QRectF(r.left() + 10, r.top() + 5, r.width() - 20, 15), Qt::AlignRight | Qt::AlignVCenter, t,
+                     monoFont(12, true), tc);
+            p.restore();
+        } else {
+            QString right = s_.has_battery ? QStringLiteral("%1V").arg(s_.battery_v, 0, 'f', 1) : QStringLiteral("—");
+            drawText(p, QRectF(r.left() + 10, r.top() + 5, r.width() - 20, 15), Qt::AlignRight | Qt::AlignVCenter,
+                     right, monoFont(12), kText);
+        }
         // segmented gauge
         const int segs = 10;
         const double gx = r.left() + 10, gy = r.top() + 25, gw = r.width() - 58, gh = 11;

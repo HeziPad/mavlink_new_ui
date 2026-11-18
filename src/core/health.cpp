@@ -330,7 +330,7 @@ std::vector<Advisory> assess(const VehicleState& s, Clock::time_point now, bool 
                                fmt("%.0f%% left. The pack may sag below what the lift rotors need for a vertical "
                                    "landing.",
                                    s.battery_pct),
-                               {"Land now: Land (if a landing point is set) or QRTL",
+                               {"Tap Land now (it lands at L, or at home when no L is set)",
                                 "Avoid long hovers: the lift rotors draw the most current"}));
         } else if (s.battery_pct < 30) {
             out.push_back(make("battery.low", Severity::Warning, "Battery low",
@@ -341,7 +341,7 @@ std::vector<Advisory> assess(const VehicleState& s, Clock::time_point now, bool 
 
     if (!s.has_home) {
         out.push_back(make("home.none", Severity::Caution, "No home position yet",
-                           "Home is set once GPS has a fix. Launch, Land and QRTL need it.",
+                           "Home is set once GPS has a fix. Launch and Land need it.",
                            {"Wait for GPS lock"}));
     }
     if (s.q_guided_mode == 1) {

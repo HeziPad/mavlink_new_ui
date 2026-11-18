@@ -249,7 +249,9 @@ void MapView::clearPlan() {
         return;
     }
     editPlan();
+    const Pattern pattern = plan_.pattern;  // clearing the points keeps the chosen route
     plan_ = MissionPlan{};
+    plan_.pattern = pattern;
     select(kNone);
     emit planChanged();
     update();
@@ -332,6 +334,16 @@ void MapView::deletePoint(int id) {
     update();
 }
 
+void MapView::setPattern(Pattern pattern) {
+    if (plan_.pattern == pattern) {
+        return;
+    }
+    editPlan();
+    plan_.pattern = pattern;
+    emit planChanged();
+    update();
+}
+
 void MapView::insertAfter(int index) {
     const int n = static_cast<int>(plan_.wps.size());
     if (index < 0 || index >= n) {
@@ -340,7 +352,11 @@ void MapView::insertAfter(int index) {
     editPlan();
     const auto& a = plan_.wps[index];
     UserWaypoint mid = a;
-    if (n > 1) {
+    if (n > 1 && index == n - 1 && plan_.pattern != Pattern::Loop) {
+        // an open route: extend it 150 m beyond its end, along the last leg
+        const auto& prev = plan_.wps[index - 1];
+        geo::destination(a.lat, a.lon, geo::bearing(prev.lat, prev.lon, a.lat, a.lon), 150.0, mid.lat, mid.lon);
+    } else if (n > 1) {
         const auto& b = plan_.wps[(index + 1) % n];  // the loop closes back to WP1
         mid = {(a.lat + b.lat) / 2.0, (a.lon + b.lon) / 2.0, (a.alt_rel + b.alt_rel) / 2.0f};
     } else {
@@ -1169,7 +1185,7 @@ void MapView::paintTiles(QPainter& p, const QPointF& world_tl, const QSizeF& siz
 
 void MapView::paintRoute(QPainter& p, const MissionPlan& plan, const QColor& c, bool editable, int active_index) {
     const auto& pts = plan.wps;
-    auto stroke = [&](const QPolygonF& line, double opacity, bool closed) {
+    auto stroke = [&](const QPolygonF& line, double opacity, bool closed, bool march = true) {
         // glow underlay + marching ants showing the direction of travel
         p.setBrush(Qt::NoBrush);
         p.setPen(QPen(alpha(c, 0.22 * opacity), 6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
@@ -1177,7 +1193,7 @@ void MapView::paintRoute(QPainter& p, const MissionPlan& plan, const QColor& c, 
         drawClipped(p, line, closed, view);
         QPen ants(alpha(c, opacity), 2.0, Qt::CustomDashLine, Qt::FlatCap, Qt::RoundJoin);
         ants.setDashPattern({5, 4});
-        ants.setDashOffset(reducedMotion() ? 0.0 : -std::fmod(time_ * 14.0, 9.0));
+        ants.setDashOffset(reducedMotion() || !march ? 0.0 : -std::fmod(time_ * 14.0, 9.0));
         p.setPen(ants);
         drawClipped(p, line, closed, view);
     };
@@ -1186,16 +1202,19 @@ void MapView::paintRoute(QPainter& p, const MissionPlan& plan, const QColor& c, 
     if (s_.has_home && !pts.empty()) {
         stroke(QPolygonF{toScreen(s_.home_lat, s_.home_lon), toScreen(pts[0].lat, pts[0].lon)}, 0.45, false);
     }
-    // the loop itself, closed back to WP1
+    // the route: a loop closes back to WP1; back-and-forth and one-way are
+    // open (back-and-forth flies both ways, so its dashes stand still)
     if (pts.size() > 1) {
-        QPolygonF loop;
+        QPolygonF route;
         for (const auto& wp : pts) {
-            loop << toScreen(wp.lat, wp.lon);
+            route << toScreen(wp.lat, wp.lon);
         }
-        stroke(loop, 1.0, true);
-    } else if (pts.size() == 1 && !compact_) {
-        // one point: the aircraft circles it
-        const QPointF sp = toScreen(pts[0].lat, pts[0].lon);
+        stroke(route, 1.0, plan.pattern == Pattern::Loop, plan.pattern != Pattern::BackForth || pts.size() == 2);
+    }
+    // the final hold: one point, or the end of a one-way route, is circled
+    const bool ends_in_hold = pts.size() == 1 || (pts.size() > 1 && plan.pattern == Pattern::OneWay);
+    if (ends_in_hold && !compact_) {
+        const QPointF sp = toScreen(pts.back().lat, pts.back().lon);
         QPen ring(alpha(c, 0.7), 1.5, Qt::DashLine);
         p.setPen(ring);
         p.setBrush(Qt::NoBrush);
@@ -1254,8 +1273,15 @@ void MapView::paintRoute(QPainter& p, const MissionPlan& plan, const QColor& c, 
     };
 
     for (size_t i = 0; i < pts.size(); ++i) {
-        marker(toScreen(pts[i].lat, pts[i].lon), static_cast<int>(i), QString::number(i + 1), c,
-               units::altText(pts[i].alt_rel));
+        QString caption = units::altText(pts[i].alt_rel);
+        if (pts.size() > 1 && i + 1 == pts.size()) {
+            if (plan.pattern == Pattern::OneWay) {
+                caption += QStringLiteral(" · HOLD");
+            } else if (plan.pattern == Pattern::BackForth && pts.size() > 2) {
+                caption += QStringLiteral(" · TURN BACK");
+            }
+        }
+        marker(toScreen(pts[i].lat, pts[i].lon), static_cast<int>(i), QString::number(i + 1), c, caption);
     }
     if (plan.land) {
         const QPointF lp = toScreen(plan.land->lat, plan.land->lon);

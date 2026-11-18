@@ -23,7 +23,10 @@ public:
         bool trail_on = true;
         int trail_secs = 120; // 0 = everything kept
         bool labels_english = false;
+        int reserve_pct = 25;  // battery time left: never plan into this much of the pack
     };
+    // the landing reserves offered (% of the pack)
+    static const std::vector<int>& reserveChoices();
     // the trail lengths offered (seconds, 0 = all)
     static const std::vector<int>& trailChoices();
     // what the OFFLINE page shows; MainWindow keeps it current
@@ -51,6 +54,7 @@ public:
 
 signals:
     void altUnitChanged(int unit);
+    void reserveChanged(int pct);
     void trailChanged(bool on, int secs);
     void offlineCountry();       // download / update the country pack
     void offlineCancel();
@@ -67,7 +71,7 @@ protected:
     void mousePressEvent(QMouseEvent* e) override;
 
 private:
-    enum Category { kUnits = 0, kMap = 1, kOffline = 2, kCategories };
+    enum Category { kUnits = 0, kMap = 1, kBattery = 2, kOffline = 3, kCategories };
     // a segmented control: one finger-sized cell per option, sliding highlight
     struct Segmented {
         QStringList labels;
@@ -98,6 +102,7 @@ private:
     Segmented trail_len_;
     Segmented labels_;
     Segmented online_;
+    Segmented reserve_;
     Offline off_;
     QRectF country_rect_, area_rect_, clear_rect_, delete_rect_, folder_rect_;
     // "are you sure?" over the panel

@@ -23,6 +23,10 @@ public:
     void setState(const VehicleState& s, Clock::time_point now);
     void setAdvisories(const std::vector<Advisory>& list);
     void setSystemsOpen(bool open);
+    // Battery time left (core/endurance): flying time before it must head
+    // back, estimated at `at`; the chip counts down from there. level:
+    // endurance::Level (0 none .. 3 critical).
+    void setEndurance(bool valid, double time_left_s, int level, Clock::time_point at);
     void tick(double dt);
     QSize sizeHint() const override { return {1330, 50}; }
 
@@ -68,6 +72,12 @@ private:
     int adv_bad_ = 0;   // Warning + Critical
     int adv_warn_ = 0;  // Caution
     bool adv_critical_ = false;
+
+    bool endurance_valid_ = false;
+    double endurance_s_ = 0.0;
+    int endurance_level_ = 0;
+    Clock::time_point endurance_at_{};
+    QRectF batt_rect_;
 };
 
 }  // namespace gcs::ui

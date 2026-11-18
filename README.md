@@ -146,8 +146,9 @@ them (every 30 s) and clear when the vehicle arms. The panel only explains: it
 never changes the vehicle.
 
 The **⚙** at the end of the bar opens **Settings**: altitude in metres or feet,
-the flight trail (on/off, last 30 s / 1 / 2 / 5 / 10 min / all), and **offline
-maps** (see below).
+the flight trail (on/off, last 30 s / 1 / 2 / 5 / 10 min / all), the
+**landing reserve** for the battery time left (20–40 %), and **offline maps**
+(see below).
 
 **Mouse over the map** shows the point under the cursor, bottom right:
 
@@ -180,8 +181,16 @@ armed in cruise: disarming would stop the pusher too. The GCS reads
 `Q_GUIDED_MODE` at connect and shows an alert if it is 1, because Guide would
 then end in a rotor hover.
 
-**Planning:** the waypoints form a **loop that is flown forever** until you
-press Hold or Land.
+**Planning:** **ROUTE** in the plan strip picks how the waypoints are flown,
+until you press Hold or Land:
+
+- **⟳ Loop** (default): 1 → 2 → 3 → 1 → … forever.
+- **⇄ Back & forth**: 1 → 2 → 3 → 2 → 1 → 2 → … forever. With two
+  waypoints this is the same flight as the loop.
+- **→ One way, then hold**: 1 → 2 → 3 once, then it circles WP3 on the wing.
+
+The map draws a loop closed, the other two open, and marks the last point
+TURN BACK or HOLD.
 
 - **Map:** tap to add a waypoint, drag to move one, pinch to zoom.
 - **Editing a point:** tap a point to select it. A panel then lets you set
@@ -198,12 +207,16 @@ press Hold or Land.
 The upload is built as:
 
 ```
-HOME → NAV_VTOL_TAKEOFF (40 m) → WP1 … WPn → DO_JUMP(WP1, forever)
-     [→ NAV_LOITER_TO_ALT (approach circle beside L) → NAV_VTOL_LAND at L]
+HOME → NAV_VTOL_TAKEOFF (40 m) → route → DO_LAND_START
+     → NAV_LOITER_TO_ALT (approach circle beside L) → NAV_VTOL_LAND at L
+
+route, Loop:          WP1 … WPn → DO_JUMP(WP1, forever)
+route, Back & forth:  WP1 … WPn, WPn-1 … WP2 → DO_JUMP(WP1, forever)
+route, One way:       WP1 … WPn-1 → NAV_LOITER_UNLIM at WPn
 ```
 
-With a single waypoint, the aircraft circles it (`NAV_LOITER_UNLIM`) instead of
-jumping. The mission never reaches the landing by itself.
+With a single waypoint, the aircraft circles it (`NAV_LOITER_UNLIM`) whatever
+the route. The mission never reaches the landing by itself.
 
 **The landing approach.** When you press **Land**, the GCS does four things:
 
@@ -405,8 +418,33 @@ components for the current heading (tap either to shrink both). The camera HUD
 has the same gauge, relative to the nose by default; tap it to switch to
 north-up.
 
-**Resume Plan** rejoins the loop at the **nearest waypoint** (the next one if
-the aircraft is already on top of the nearest), not where it left off.
+**Resume Plan** rejoins the route at the **nearest waypoint** (the next one if
+the aircraft is already on top of the nearest), not where it left off. On a
+back-and-forth it keeps the direction the aircraft is flying. On a one-way
+route it never wraps back to WP1.
+
+**Battery time left.** In flight the battery chip shows, for example, **14:20
+left**. That's how long the aircraft can keep flying the mission and still have
+enough to do all of this, recomputed every 2 s:
+
+- fly back to L (or home), into a wind taken **50 % stronger** than measured;
+- circle down the approach, **go around once**, and land on the lift rotors.
+  The rotor time covers the transition, the descent and 30 s of extra hover;
+- with all of that **× 1.3**, and the **landing reserve** (Settings → BATTERY,
+  default 25 % of the pack) left untouched.
+
+It uses the lower of the two charge readings (mAh used and the autopilot's %).
+It costs the return from the farthest point of the plan, not only from where
+the aircraft is now. The cruise current is learned in flight and the hover
+current during the takeoff (4 × cruise until measured).
+
+- Under 5 min left: amber, with a "head back soon" card.
+- At 0:00: **LAND NOW** and a warning card.
+- If even a return from here would eat into the reserve: a critical card and
+  the red banner.
+
+It only warns; it never lands by itself. Tap the chip for the card that
+explains the numbers. It needs `BATT_CAPACITY` and a current sensor.
 
 Map tiles (OpenStreetMap / Esri World Imagery) are cached under
 `~/.cache/mavlink_gcs_ui/tiles`. The map works offline with whatever is

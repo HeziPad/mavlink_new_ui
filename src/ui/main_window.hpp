@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/endurance.hpp"
 #include "core/health.hpp"
 #include "core/orbit_trim.hpp"
 #include "core/vehicle_state.hpp"
@@ -61,6 +62,7 @@ struct AppSettings {
     bool ball_collapsed = false; // map attitude ball
     bool trail_on = true;
     int trail_secs = 120;        // 0 = all
+    int battery_reserve_pct = 25;  // battery time left never plans into this much of the pack
 
     static AppSettings load();
     void save() const;
@@ -218,6 +220,16 @@ private:
     // Land: the approach is recomputed with the current wind and re-uploaded
     // first; the jump into it happens when the upload is acknowledged.
     bool land_pending_ = false;
+
+    // battery time left (core/endurance), recomputed every kEnduranceMs in flight
+    void updateEndurance(qint64 now_ms);
+    endurance::CurrentTracker endurance_tracker_;
+    endurance::LevelLatch endurance_latch_;
+    std::vector<Advisory> endurance_cards_;
+    qint64 endurance_ms_ = -1000000;
+    qint64 endurance_sample_ms_ = -1000000;
+    static constexpr qint64 kEnduranceMs = 2000;       // estimate
+    static constexpr qint64 kEnduranceSampleMs = 500;  // feed the current learner (battery data is ~1 Hz)
 };
 
 }  // namespace gcs::ui

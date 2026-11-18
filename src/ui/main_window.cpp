@@ -65,6 +65,8 @@ AppSettings AppSettings::load() {
     s.ball_collapsed = q.value(QStringLiteral("map/ball_collapsed"), s.ball_collapsed).toBool();
     s.trail_on = q.value(QStringLiteral("map/trail_on"), s.trail_on).toBool();
     s.trail_secs = q.value(QStringLiteral("map/trail_secs"), s.trail_secs).toInt();
+    s.battery_reserve_pct =
+        std::clamp(q.value(QStringLiteral("flight/battery_reserve_pct"), s.battery_reserve_pct).toInt(), 15, 50);
 
     // seed missing keys so the settings file is discoverable and hand-editable
     const std::pair<const char*, QVariant> defaults[] = {
@@ -95,6 +97,7 @@ void AppSettings::save() const {
     q.setValue(QStringLiteral("map/ball_collapsed"), ball_collapsed);
     q.setValue(QStringLiteral("map/trail_on"), trail_on);
     q.setValue(QStringLiteral("map/trail_secs"), trail_secs);
+    q.setValue(QStringLiteral("flight/battery_reserve_pct"), battery_reserve_pct);
 }
 
 // ---- construction ---------------------------------------------------------------
@@ -178,6 +181,7 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
         v.trail_on = settings_.trail_on;
         v.trail_secs = settings_.trail_secs;
         v.labels_english = vector_map_->english();
+        v.reserve_pct = settings_.battery_reserve_pct;
         refreshOfflineCounts();
         settings_screen_->open(v);
     });
@@ -293,6 +297,11 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
         fx_->toast(summary, cancelled || offline_->failed() ? kAmber : kGreen, QStringLiteral("Offline"));
     });
     connect(settings_screen_, &SettingsScreen::altUnitChanged, this, &MainWindow::applyAltUnit);
+    connect(settings_screen_, &SettingsScreen::reserveChanged, this, [this](int pct) {
+        settings_.battery_reserve_pct = pct;
+        settings_.save();
+        endurance_ms_ = -1000000;  // recompute now
+    });
     connect(settings_screen_, &SettingsScreen::trailChanged, this, [this](bool on, int secs) {
         settings_.trail_on = on;
         settings_.trail_secs = secs;
@@ -349,6 +358,7 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
     connect(orbit_panel_, &OrbitPanel::altitudeDelta, this, [this](float d) { adjustOrbit(d, 0.0f, false); });
     connect(orbit_panel_, &OrbitPanel::radiusDelta, this, [this](float d) { adjustOrbit(0.0f, d, false); });
     connect(orbit_panel_, &OrbitPanel::directionToggled, this, [this] { adjustOrbit(0.0f, 0.0f, true); });
+    connect(strip_, &PlanStrip::patternChanged, map_, &MapView::setPattern);
     connect(strip_, &PlanStrip::undoRequested, map_, &MapView::undo);
     connect(strip_, &PlanStrip::clearRequested, map_, &MapView::clearPlan);
     connect(strip_, &PlanStrip::cancelRequested, this, [this] {
@@ -624,6 +634,7 @@ void MainWindow::pullState() {
     }
     last_lift_ = lift;
 
+    updateEndurance(clock_.elapsed());
     bar_->setState(s_, now);
     map_->setState(s_);
     camera_->setState(s_);
@@ -690,7 +701,8 @@ void MainWindow::updateAlerts() {
     link_was_alive_ = alive;
 
     book_.update(s_, now);
-    const std::vector<Advisory> state = assess(s_, now, ever_connected_);
+    std::vector<Advisory> state = assess(s_, now, ever_connected_);
+    state = mergeAdvisories(std::move(state), endurance_cards_);
     advisories_ = mergeAdvisories(state, book_.current());
     reconcileLandedMode(advisories_, s_);
     {
@@ -738,6 +750,94 @@ void MainWindow::updateAlerts() {
         alert = QStringLiteral("Guide/Hold would hover on the rotors (Q_GUIDED_MODE=1)");
     }
     fx_->setAlert(alert);
+}
+
+void MainWindow::updateEndurance(qint64 now_ms) {
+    using namespace endurance;
+    const bool flying = s_.armed && isAirborne(s_);
+    if (!s_.armed) {
+        // landed (or a fresh pack): learn the currents again next flight
+        if (endurance_tracker_.cruiseSeconds() > 0.0 || endurance_tracker_.hoverAmps() >= 0.0 ||
+            endurance_latch_.level() != Level::None || !endurance_cards_.empty()) {
+            endurance_tracker_.reset();
+            endurance_latch_.reset();
+            endurance_cards_.clear();
+            bar_->setEndurance(false, 0.0, 0, Clock::now());
+        }
+        return;
+    }
+    if (now_ms - endurance_sample_ms_ < kEnduranceSampleMs) {
+        return;
+    }
+    endurance_sample_ms_ = now_ms;
+
+    // learn the currents (the takeoff hover, then cruise on the wing) on the
+    // autopilot's clock, so a short takeoff isn't missed between samples
+    Phase phase = Phase::Other;
+    if (flying) {
+        const LiftRotors lift = liftRotorState(s_, Clock::now());
+        if (lift == LiftRotors::Active && effectiveVtolState(s_) == VtolState::Hover) {
+            phase = Phase::Hover;
+        } else if (effectiveVtolState(s_) == VtolState::Cruise) {
+            phase = Phase::Cruise;  // Q_ASSIST included: it costs charge too
+        }
+    }
+    const double vehicle_t = s_.time_boot_ms > 0 ? s_.time_boot_ms / 1000.0 : now_ms / 1000.0;
+    endurance_tracker_.addSample(vehicle_t, s_.battery_a, phase);
+
+    if (now_ms - endurance_ms_ < kEnduranceMs || !flying || !s_.has_position) {
+        return;  // the estimate: a few hundred flops every 2 s; the bar counts down in between
+    }
+    endurance_ms_ = now_ms;
+    const double t = now_ms / 1000.0;
+
+    Inputs in;
+    in.capacity_mah = s_.batt_capacity_mah;
+    in.consumed_mah = s_.battery_consumed_mah;
+    in.battery_pct = s_.battery_pct;
+    in.reserve = settings_.battery_reserve_pct / 100.0;
+    in.current_a = s_.battery_a;
+    in.cruise_a = endurance_tracker_.cruiseAmps();
+    in.hover_a = endurance_tracker_.hoverAmps();
+    in.in_cruise = phase == Phase::Cruise;
+    in.airspeed = s_.airspeed_cruise > 0 ? s_.airspeed_cruise : settings_.cruise_speed;
+    in.wind_from_deg = s_.wind_from_deg;
+    in.wind_speed = s_.has_wind ? s_.wind_speed : 0.0;
+    in.here = {s_.lat, s_.lon, s_.alt_rel};
+
+    // where it lands: L, or home (what Land and the failsafes fly)
+    const MissionPlan plan = withLanding(s_.mission_known ? extractPlan(s_.mission) : MissionPlan{});
+    for (const auto& wp : plan.wps) {
+        in.route.push_back({wp.lat, wp.lon, wp.alt_rel});
+    }
+    if (orbit_) {
+        in.route.push_back({orbit_->lat, orbit_->lon, orbit_->alt});  // a Guide target counts as a place it may be
+    }
+    if (plan.land) {
+        in.land_lat = plan.land->lat;
+        in.land_lon = plan.land->lon;
+        const auto appr = s_.mission_known ? extractApproach(s_.mission) : std::nullopt;
+        const LandingApproach a = appr ? *appr : approachFor(plan, s_.lat, s_.lon);
+        in.approach_alt = a.alt;
+        in.approach_leg_m = a.leg_m;
+        in.approach_radius = a.radius;
+    } else {
+        endurance_cards_.clear();  // nowhere known to land yet (no home): nothing to cost
+        bar_->setEndurance(false, 0.0, 0, Clock::now());
+        return;
+    }
+
+    const Estimate e = estimate(in);
+    const Level before = endurance_latch_.level();
+    const Level level = endurance_latch_.update(e.valid ? e.level : Level::None, t);
+    endurance_cards_ = advisories(e, level);
+    bar_->setEndurance(e.valid, e.time_left_s, static_cast<int>(level), Clock::now());
+    // warnings and criticals are toasted with the other alerts; "soon" once here
+    if (level == Level::Caution && before == Level::None) {
+        fx_->toast(QStringLiteral("Battery: %1 of flying left, then head back and land")
+                       .arg(QString::fromStdString(clockText(e.time_left_s))),
+                   kAmber, QStringLiteral("Battery"));
+    }
 }
 
 void MainWindow::handleEvent(const link::LinkEvent& ev) {
@@ -1166,9 +1266,9 @@ void MainWindow::exitPlan() {
 
 void MainWindow::refreshPlanStrip() {
     const auto& plan = map_->plan();
-    const double lap = lapLength(plan.wps);
-    strip_->setInfo(static_cast<int>(plan.wps.size()), lap, lap / std::max(1.0, settings_.cruise_speed),
-                    plan.land.has_value(), map_->canUndo());
+    const double route = routeLength(plan);
+    strip_->setInfo(static_cast<int>(plan.wps.size()), route, route / std::max(1.0, settings_.cruise_speed),
+                    plan.land.has_value(), map_->canUndo(), plan.pattern);
     strip_->move((width() - strip_->width()) / 2, 66);
     // keep toasts / alerts clear of the strip's buttons
     fx_->setTopInset(strip_->isVisible() ? strip_->geometry().bottom() + 4 : 58);
@@ -1239,9 +1339,12 @@ void MainWindow::syncPlan() {
     approach_wind_ = s_.has_wind ? std::optional<double>(s_.wind_from_deg) : std::nullopt;
     dock_->setProgress(kPlan, 0.0);
     client_->uploadMission(std::move(items));
-    fx_->toast(QStringLiteral("Uploading loop of %1 waypoints%2")
-                   .arg(plan.wps.size())
-                   .arg(had_land ? QStringLiteral(" + landing point") : QStringLiteral(" · lands at home (no L set)")),
+    const QString route = plan.wps.size() < 2                      ? QStringLiteral("circle at %1 waypoint")
+                          : plan.pattern == Pattern::BackForth ? QStringLiteral("back-and-forth of %1 waypoints")
+                          : plan.pattern == Pattern::OneWay    ? QStringLiteral("one-way route of %1 waypoints, then hold")
+                                                               : QStringLiteral("loop of %1 waypoints");
+    fx_->toast(QStringLiteral("Uploading ") + route.arg(plan.wps.size()) +
+                   (had_land ? QStringLiteral(" + landing point") : QStringLiteral(" · lands at home (no L set)")),
                kAmber, QStringLiteral("Plan"));
 }
 
@@ -1426,7 +1529,10 @@ void MainWindow::launchOrAuto() {
         // the landing items (an aborted landing), which it would otherwise
         // resume on the rotors.
         const PredictedPosition here = predictPosition(s_, Clock::now());
-        const int seq = s_.mission_known ? nearestLoopSeq(s_.mission, here.lat, here.lon, defaultRadius()) : -1;
+        const double gs = std::hypot(s_.vn, s_.ve);
+        const double track = gs > 3.0 ? geo::wrap360(std::atan2(s_.ve, s_.vn) * geo::kRadToDeg) : -1.0;
+        const int seq =
+            s_.mission_known ? nearestLoopSeq(s_.mission, here.lat, here.lon, defaultRadius(), track) : -1;
         if (seq >= 0) {
             client_->runSequence("auto", {link::makeSetMissionCurrent(static_cast<uint16_t>(seq)),
                                           link::makeSetMode(plane::AUTO, "AUTO")});

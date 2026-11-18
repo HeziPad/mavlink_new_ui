@@ -157,6 +157,7 @@ struct VehicleState {
     double airspeed_cruise = -1.0;          // AIRSPEED_CRUISE (m/s), -1 unknown
     double trans_decel = -1.0;              // Q_TRANS_DECEL (m/s^2)
     double loiter_radius = -1.0;            // WP_LOITER_RAD (m)
+    double batt_capacity_mah = -1.0;        // BATT_CAPACITY (mAh), -1 unknown
     std::array<int, 16> servo_function{};   // SERVOn_FUNCTION, 0 until read
     int servo_functions_known = 0;          // how many of the 16 have arrived
     bool servo_map_final = false;           // all arrived, or gave up waiting

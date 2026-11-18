@@ -919,6 +919,9 @@ void MavlinkClient::requestParams(Clock::time_point now) {
     if (state_.loiter_radius < 0) {
         request("WP_LOITER_RAD");
     }
+    if (state_.batt_capacity_mah < 0) {
+        request("BATT_CAPACITY");
+    }
     for (int i = 0; i < 16; ++i) {
         if (state_.servo_function[i] == 0) {
             request("SERVO" + std::to_string(i + 1) + "_FUNCTION");
@@ -973,6 +976,10 @@ void MavlinkClient::handleParamValue(const mavlink_message_t& msg) {
     }
     if (name == "WP_LOITER_RAD") {
         state_.loiter_radius = std::abs(p.param_value);
+        return;
+    }
+    if (name == "BATT_CAPACITY") {
+        state_.batt_capacity_mah = p.param_value;  // also when someone changes it later
         return;
     }
     // SERVOn_FUNCTION, n = 1..16
@@ -1039,7 +1046,7 @@ void MavlinkClient::periodic(Clock::time_point now) {
 
     const bool params_missing = state_.q_guided_mode < 0 || state_.servo_functions_known < 16 ||
                                 state_.airspeed_cruise < 0 || state_.trans_decel < 0 ||
-                                state_.loiter_radius < 0;
+                                state_.loiter_radius < 0 || state_.batt_capacity_mah < 0;
 
     if (rate_t0_ == Clock::time_point{}) {
         rate_t0_ = now;

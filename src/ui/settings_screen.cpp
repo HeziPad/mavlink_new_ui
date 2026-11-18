@@ -19,6 +19,11 @@ const std::vector<int>& SettingsScreen::trailChoices() {
     return c;
 }
 
+const std::vector<int>& SettingsScreen::reserveChoices() {
+    static const std::vector<int> c = {20, 25, 30, 35, 40};
+    return c;
+}
+
 namespace {
 QString sizeText(qint64 b) {
     if (b < 0) {
@@ -39,6 +44,9 @@ SettingsScreen::SettingsScreen(QWidget* parent) : QWidget(parent) {
     online_.labels = {QStringLiteral("OFF"), QStringLiteral("ON")};
     alt_.labels = {QStringLiteral("METERS"), QStringLiteral("FEET")};
     trail_on_.labels = {QStringLiteral("OFF"), QStringLiteral("ON")};
+    for (int pct : reserveChoices()) {
+        reserve_.labels << QStringLiteral("%1 %").arg(pct);
+    }
     trail_len_.labels = {QStringLiteral("30 S"), QStringLiteral("1 MIN"), QStringLiteral("2 MIN"),
                          QStringLiteral("5 MIN"), QStringLiteral("10 MIN"), QStringLiteral("ALL")};
     hide();
@@ -53,7 +61,10 @@ void SettingsScreen::open(const Values& v) {
     trail_len_.selected = it != c.end() ? static_cast<int>(it - c.begin()) : 2;
     labels_.selected = v.labels_english ? 1 : 0;
     online_.selected = off_.online ? 1 : 0;
-    for (Segmented* s : {&alt_, &trail_on_, &trail_len_, &labels_, &online_}) {
+    const auto& rc = reserveChoices();
+    const auto rit = std::find(rc.begin(), rc.end(), v.reserve_pct);
+    reserve_.selected = rit != rc.end() ? static_cast<int>(rit - rc.begin()) : 1;
+    for (Segmented* s : {&alt_, &trail_on_, &trail_len_, &labels_, &online_, &reserve_}) {
         s->knob = s->selected;
     }
     confirm_ = Confirm::None;
@@ -102,7 +113,7 @@ void SettingsScreen::tick(double dt) {
         return;
     }
     const double k = reducedMotion() ? 1.0 : 1.0 - std::exp(-16.0 * dt);
-    for (Segmented* s : {&alt_, &trail_on_, &trail_len_, &labels_, &online_}) {
+    for (Segmented* s : {&alt_, &trail_on_, &trail_len_, &labels_, &online_, &reserve_}) {
         s->knob += (s->selected - s->knob) * k;
     }
     cat_knob_ += (category_ - cat_knob_) * k;
@@ -160,6 +171,10 @@ void SettingsScreen::mousePressEvent(QMouseEvent* e) {
     if (category_ == kUnits) {
         if (pressSegmented(alt_, pos)) {
             emit altUnitChanged(alt_.selected);
+        }
+    } else if (category_ == kBattery) {
+        if (pressSegmented(reserve_, pos)) {
+            emit reserveChanged(reserveChoices()[reserve_.selected]);
         }
     } else if (category_ == kOffline) {
         if (country_rect_.contains(pos)) {
@@ -264,7 +279,7 @@ void SettingsScreen::paintEvent(QPaintEvent*) {
     const QRectF cat_col(pr.left() + 24, top, 190, pr.bottom() - top - 24);
     p.setPen(QPen(alpha(kCyan, 0.18), 1));
     p.drawLine(QPointF(cat_col.right() + 16, cat_col.top()), QPointF(cat_col.right() + 16, cat_col.bottom()));
-    const char* names[kCategories] = {"UNITS", "MAP", "OFFLINE"};
+    const char* names[kCategories] = {"UNITS", "MAP", "BATTERY", "OFFLINE"};
     cat_rects_.clear();
     for (int i = 0; i < kCategories; ++i) {
         const QRectF item(cat_col.left(), cat_col.top() + i * 60, cat_col.width(), 52);
@@ -290,6 +305,20 @@ void SettingsScreen::paintEvent(QPaintEvent*) {
                  QStringLiteral("distances and speeds stay metric"), labelFont(10, false), alpha(kMuted, 0.8));
     } else if (category_ == kOffline) {
         paintOffline(p, body);
+    } else if (category_ == kBattery) {
+        paintRow(p, body, QStringLiteral("LANDING RESERVE"),
+                 QStringLiteral("battery that \"time left\" never counts on, on top of the return and the landing"));
+        paintSegmented(p, QRectF(body.left(), body.top() + 54, body.width(), 58), reserve_);
+        const QStringList notes = {
+            QStringLiteral("TIME LEFT (battery chip, in flight) = how long it can keep flying the mission and still:"),
+            QStringLiteral("  · fly back to L (or home) into a wind 50 % stronger than measured"),
+            QStringLiteral("  · circle down the approach, go around once, and land on the lift rotors"),
+            QStringLiteral("  · with all of that x 1.3, and this reserve left untouched"),
+            QStringLiteral("Warns at 5 min, says LAND NOW at 0. It never lands by itself.")};
+        for (int i = 0; i < notes.size(); ++i) {
+            drawText(p, QRectF(body.left(), body.top() + 136 + i * 22, body.width(), 20),
+                     Qt::AlignLeft | Qt::AlignVCenter, notes[i], labelFont(10.5, false), i == 0 ? kText : kMuted);
+        }
     } else {
         paintRow(p, body, QStringLiteral("FLIGHT TRAIL"), QStringLiteral("the line the aircraft leaves behind on the map"));
         paintSegmented(p, QRectF(body.left(), body.top() + 54, std::min(body.width(), 220.0), 58), trail_on_);
