@@ -49,8 +49,13 @@ using namespace theme;
 AppSettings AppSettings::load() {
     QSettings q;
     AppSettings s;
+    s.link_serial = q.value(QStringLiteral("link/type")).toString() == QStringLiteral("serial");
     s.host = q.value(QStringLiteral("link/host"), s.host).toString();
     s.port = q.value(QStringLiteral("link/port"), s.port).toInt();
+    s.remote_host = q.value(QStringLiteral("link/remote_host"), s.remote_host).toString();
+    s.remote_port = q.value(QStringLiteral("link/remote_port"), s.remote_port).toInt();
+    s.serial_port = q.value(QStringLiteral("link/serial_port"), s.serial_port).toString();
+    s.serial_baud = q.value(QStringLiteral("link/serial_baud"), s.serial_baud).toInt();
     s.video_port = q.value(QStringLiteral("video/port"), s.video_port).toInt();
     s.takeoff_alt = q.value(QStringLiteral("flight/takeoff_alt"), s.takeoff_alt).toFloat();
     s.waypoint_alt = q.value(QStringLiteral("flight/waypoint_alt"), s.waypoint_alt).toFloat();
@@ -92,6 +97,18 @@ AppSettings AppSettings::load() {
     return s;
 }
 
+void AppSettings::saveLink() const {
+    QSettings q;
+    q.setValue(QStringLiteral("link/type"), link_serial ? QStringLiteral("serial") : QStringLiteral("udp"));
+    q.setValue(QStringLiteral("link/host"), host);
+    q.setValue(QStringLiteral("link/port"), port);
+    q.setValue(QStringLiteral("link/remote_host"), remote_host);
+    q.setValue(QStringLiteral("link/remote_port"), remote_port);
+    q.setValue(QStringLiteral("link/serial_port"), serial_port);
+    q.setValue(QStringLiteral("link/serial_baud"), serial_baud);
+    q.setValue(QStringLiteral("video/port"), video_port);
+}
+
 void AppSettings::save() const {
     // only UI state the user changes from inside the app; command-line
     // overrides (--udp, --reduced-motion, ...) must not stick
@@ -126,10 +143,7 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
     units::setSpeedUnit(static_cast<units::Speed>(settings_.speed_unit));
     units::setCoordFormat(static_cast<coords::Fmt>(settings_.coord_format));
 
-    link::MavlinkClient::Config cfg;
-    cfg.bind_host = settings_.host.toStdString();
-    cfg.port = static_cast<uint16_t>(settings_.port);
-    client_ = std::make_unique<link::MavlinkClient>(cfg);
+    client_ = std::make_unique<link::MavlinkClient>(linkConfig());
     video_ = std::make_unique<VideoReceiver>(settings_.video_port);
     tiles_ = new TileCache(this);
     vector_map_ = new VectorMap(this);
@@ -235,7 +249,9 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
         v.trail_secs = settings_.trail_secs;
         v.labels_english = vector_map_->english();
         v.reserve_pct = settings_.battery_reserve_pct;
+        v.link = linkValues();
         refreshOfflineCounts();
+        updateLinkStatus();
         settings_screen_->open(v);
     });
     // ---- offline map data ------------------------------------------------------------
@@ -349,6 +365,8 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
         refreshOfflineCounts();
         fx_->toast(summary, cancelled || offline_->failed() ? kAmber : kGreen, QStringLiteral("Offline"));
     });
+    connect(settings_screen_, &SettingsScreen::linkEdit, this, &MainWindow::editLinkField);
+    connect(settings_screen_, &SettingsScreen::linkConnect, this, &MainWindow::applyLink);
     connect(settings_screen_, &SettingsScreen::altUnitChanged, this, &MainWindow::applyAltUnit);
     connect(settings_screen_, &SettingsScreen::speedUnitChanged, this, &MainWindow::applySpeedUnit);
     connect(settings_screen_, &SettingsScreen::coordFormatChanged, this, &MainWindow::applyCoordFormat);
@@ -565,7 +583,7 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
     timer_->start(16);
     clock_.start();
 
-    fx_->toast(QStringLiteral("Listening on udp %1:%2").arg(settings_.host).arg(settings_.port), kCyan,
+    fx_->toast(QStringLiteral("Link: %1").arg(QString::fromStdString(client_->snapshot().endpoint)), kCyan,
                QStringLiteral("Link"));
     refreshDock();
     layoutOverlays();
@@ -622,6 +640,9 @@ void MainWindow::layoutOverlays() {
     if (preflight_->isVisible()) {
         preflight_->raise();
     }
+    if (pad_ && pad_->isOpen()) {
+        pad_->raise();  // typing a value for a panel underneath
+    }
 }
 
 // ---- main loop --------------------------------------------------------------------
@@ -651,6 +672,9 @@ void MainWindow::frame() {
     dock_->tick(dt);
     fx_->tick(dt);
     settings_screen_->tick(dt);
+    if (settings_screen_->isVisible()) {
+        updateLinkStatus();
+    }
     alerts_->tick(dt);
     pf_->update(s_, Clock::now(), video_->frameAge());
     preflight_->tick(dt);
@@ -747,6 +771,108 @@ void MainWindow::refreshOffline() {
     o.status = offline_status_;
     o.online = offline::online();
     settings_screen_->setOffline(o);
+}
+
+// ---- link (Settings > CONNECTION) ----------------------------------------------------------
+
+link::MavlinkClient::Config MainWindow::linkConfig() const {
+    link::MavlinkClient::Config cfg;
+    cfg.type = settings_.link_serial ? link::MavlinkClient::LinkType::Serial : link::MavlinkClient::LinkType::Udp;
+    cfg.bind_host = settings_.host.toStdString();
+    cfg.port = static_cast<uint16_t>(settings_.port);
+    cfg.remote_host = settings_.remote_host.toStdString();
+    cfg.remote_port = static_cast<uint16_t>(settings_.remote_port);
+    cfg.serial_port = settings_.serial_port.toStdString();
+    cfg.serial_baud = settings_.serial_baud;
+    return cfg;
+}
+
+SettingsScreen::Link MainWindow::linkValues() const {
+    SettingsScreen::Link l;
+    l.serial = settings_.link_serial;
+    l.host = settings_.host;
+    l.port = settings_.port;
+    l.remote_host = settings_.remote_host;
+    l.remote_port = settings_.remote_port;
+    l.serial_port = settings_.serial_port;
+    l.baud = settings_.serial_baud;
+    l.video_port = settings_.video_port;
+    return l;
+}
+
+void MainWindow::applyLink(const SettingsScreen::Link& l) {
+    const bool video_changed = l.video_port != settings_.video_port;
+    settings_.link_serial = l.serial;
+    settings_.host = l.host;
+    settings_.port = l.port;
+    settings_.remote_host = l.remote_host;
+    settings_.remote_port = l.remote_port;
+    settings_.serial_port = l.serial_port;
+    settings_.serial_baud = l.baud;
+    settings_.video_port = l.video_port;
+    settings_.saveLink();
+    const auto cfg = linkConfig();
+    client_->reconfigure(cfg);
+    if (video_changed) {
+        video_->restart(l.video_port);
+    }
+    fx_->toast(QStringLiteral("Connecting: %1").arg(QString::fromStdString(link::MavlinkClient::makeTransport(cfg)->describe())),
+               kCyan, QStringLiteral("Link"));
+}
+
+void MainWindow::editLinkField(int field) {
+    const SettingsScreen::Link cur = settings_screen_->link();
+    if (field == SettingsScreen::kListenField) {
+        pad_->openAddress(QStringLiteral("LISTEN FOR TELEMETRY ON"), cur.host, cur.port,
+                          {{QStringLiteral("ALL NETWORKS :14550"), QStringLiteral("0.0.0.0"), 14550},
+                           {QStringLiteral("THIS COMPUTER :14550"), QStringLiteral("127.0.0.1"), 14550},
+                           {QStringLiteral("SIMULATOR :14551"), QStringLiteral("127.0.0.1"), 14551}},
+                          [this](const QString& host, int port) {
+                              auto l = settings_screen_->link();
+                              l.host = host;
+                              l.port = port;
+                              settings_screen_->setLink(l);
+                          });
+    } else if (field == SettingsScreen::kSendToField) {
+        pad_->openAddress(QStringLiteral("ALSO SEND TO (RADIO / COMPANION)"), cur.remote_host,
+                          cur.remote_port > 0 ? cur.remote_port : 14550,
+                          {{QStringLiteral("OFF · ONLY REPLY"), QString(), 0}},
+                          [this](const QString& host, int port) {
+                              auto l = settings_screen_->link();
+                              l.remote_host = host;
+                              l.remote_port = host.isEmpty() ? 0 : port;
+                              settings_screen_->setLink(l);
+                          });
+    } else if (field == SettingsScreen::kVideoField) {
+        pad_->openNumber(QStringLiteral("VIDEO PORT (UDP, RTP / H.264)"), QStringLiteral("PORT"), cur.video_port, 1, 65535,
+                         {{QStringLiteral("5600"), 5600}, {QStringLiteral("5601"), 5601}, {QStringLiteral("5000"), 5000}},
+                         [this](int port) {
+                             auto l = settings_screen_->link();
+                             l.video_port = port;
+                             settings_screen_->setLink(l);
+                         });
+    }
+}
+
+void MainWindow::updateLinkStatus() {
+    const QString where = QString::fromStdString(s_.endpoint);
+    QString text;
+    QColor c = kMuted;
+    const double hb_age =
+        s_.has_heartbeat ? std::chrono::duration<double>(Clock::now() - s_.last_heartbeat).count() : 1e9;
+    if (!s_.error.empty()) {
+        text = QStringLiteral("%1 · retrying").arg(QString::fromStdString(s_.error));
+        c = kRed;
+    } else if (!s_.socket_open) {
+        text = QStringLiteral("opening %1…").arg(where);
+    } else if (hb_age < 3.0) {
+        text = QStringLiteral("CONNECTED · %1").arg(where);
+        c = kGreen;
+    } else {
+        text = QStringLiteral("open · waiting for the aircraft on %1").arg(where);
+        c = kAmber;
+    }
+    settings_screen_->setLinkStatus(text, c, s_.armed);
 }
 
 void MainWindow::showAlerts(bool on) {

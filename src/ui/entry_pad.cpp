@@ -390,7 +390,8 @@ void EntryPad::focusBox(int i) {
     active_ = boxes_[i].edit;
     active_->setFocus(Qt::OtherFocusReason);
     if (dot_key_) {
-        dot_key_->setEnabled(active_->property("decimals").toInt() > 0);
+        // in an IP address '.' moves on to the next number
+        dot_key_->setEnabled(active_->property("decimals").toInt() > 0 || kind_ == Kind::Address);
     }
 }
 
@@ -430,6 +431,13 @@ void EntryPad::typeText(const QString& s) {
     }
     const int i = activeIndex();
     if (i < 0) {
+        return;
+    }
+    if (kind_ == Kind::Address && s == QStringLiteral(".")) {
+        if (i + 1 < static_cast<int>(boxes_.size())) {
+            focusBox(i + 1);
+            active_->selectAll();
+        }
         return;
     }
     QLineEdit* e = active_;
@@ -479,6 +487,13 @@ bool EntryPad::eventFilter(QObject* obj, QEvent* e) {
                 return true;
             }
             break;
+        case Qt::Key_Period:
+        case Qt::Key_Colon:
+            if (kind_ == Kind::Address) {
+                typeText(QStringLiteral("."));
+                return true;
+            }
+            break;
         case Qt::Key_Escape:
             return true;  // no keyboard shortcuts: Cancel is a tap
         default:
@@ -494,7 +509,8 @@ void EntryPad::showFor(Kind kind) {
     kind_ = kind;
     ref_row_->setVisible(kind == Kind::Altitude);
     nudge_keys_->setVisible(kind == Kind::Altitude);
-    presets_->setVisible(kind == Kind::Duration);
+    presets_->setVisible((kind == Kind::Duration || kind == Kind::Address || kind == Kind::Number) &&
+                         presets_->layout()->count() > 0);
     for (auto* w : fields_->findChildren<QWidget*>()) {
         w->ensurePolished();
     }
@@ -516,6 +532,8 @@ void EntryPad::openCoordinate(const QString& title, std::optional<coords::LatLon
     coord_done_ = std::move(done);
     alt_done_ = nullptr;
     dur_done_ = nullptr;
+    addr_done_ = nullptr;
+    num_done_ = nullptr;
     fmt_ = units::coordFormat();  // the format chosen in Settings; not switched here
     title_->setText(title);
     clearBoxes();
@@ -595,6 +613,8 @@ void EntryPad::openAltitude(const QString& title, double lat, double lon, double
     alt_done_ = std::move(done);
     coord_done_ = nullptr;
     dur_done_ = nullptr;
+    addr_done_ = nullptr;
+    num_done_ = nullptr;
     lat_ = lat;
     lon_ = lon;
     home_amsl_ = home_amsl;
@@ -620,20 +640,16 @@ void EntryPad::openAltitude(const QString& title, double lat, double lon, double
     showFor(Kind::Altitude);
 }
 
-void EntryPad::setPresets(const std::vector<std::pair<QString, double>>& chips) {
+void EntryPad::setPresets(const std::vector<std::pair<QString, std::function<void()>>>& chips) {
     auto* lay = presets_->layout();
     while (auto* item = lay->takeAt(0)) {
         delete item->widget();
         delete item;
     }
-    for (const auto& [label, sec] : chips) {
+    for (const auto& [label, fn] : chips) {
         auto* b = key(label, QStringLiteral("padSel"));
         b->setMinimumHeight(48);
-        const double s = sec;
-        connect(b, &QPushButton::clicked, this, [this, s] {
-            setDuration(s);
-            refresh();
-        });
+        connect(b, &QPushButton::clicked, this, fn);
         lay->addWidget(b);
     }
 }
@@ -648,14 +664,24 @@ void EntryPad::openDuration(const QString& title, double seconds, double max_s, 
     coord_done_ = nullptr;
     alt_done_ = nullptr;
     dur_done_ = std::move(done);
+    addr_done_ = nullptr;
+    num_done_ = nullptr;
     max_value_ = max_s;
     title_->setText(title);
-    setPresets({{QStringLiteral("FLY THROUGH"), 0.0},
-                {QStringLiteral("0:30"), 30.0},
-                {QStringLiteral("1:00"), 60.0},
-                {QStringLiteral("2:00"), 120.0},
-                {QStringLiteral("5:00"), 300.0},
-                {QStringLiteral("10:00"), 600.0}});
+    std::vector<std::pair<QString, std::function<void()>>> chips;
+    for (const auto& [label, sec] : std::vector<std::pair<QString, double>>{{QStringLiteral("FLY THROUGH"), 0.0},
+                                                                             {QStringLiteral("0:30"), 30.0},
+                                                                             {QStringLiteral("1:00"), 60.0},
+                                                                             {QStringLiteral("2:00"), 120.0},
+                                                                             {QStringLiteral("5:00"), 300.0},
+                                                                             {QStringLiteral("10:00"), 600.0}}) {
+        const double s = sec;
+        chips.emplace_back(label, [this, s] {
+            setDuration(s);
+            refresh();
+        });
+    }
+    setPresets(chips);
     clearBoxes();
     QWidget* r = newRow();
     addLabel(r, QStringLiteral("HOLD"), "padRowName");
@@ -668,12 +694,96 @@ void EntryPad::openDuration(const QString& title, double seconds, double max_s, 
     showFor(Kind::Duration);
 }
 
+void EntryPad::openAddress(const QString& title, const QString& host, int port, const std::vector<AddressChip>& chips,
+                           std::function<void(const QString&, int)> done) {
+    coord_done_ = nullptr;
+    alt_done_ = nullptr;
+    dur_done_ = nullptr;
+    num_done_ = nullptr;
+    addr_done_ = std::move(done);
+    title_->setText(title);
+    std::vector<std::pair<QString, std::function<void()>>> presets;
+    for (const auto& c : chips) {
+        presets.emplace_back(c.label, [this, c] {
+            if (c.host.isEmpty()) {
+                auto d = addr_done_;
+                close();
+                if (d) {
+                    d(QString(), 0);
+                }
+                return;
+            }
+            const QStringList parts = c.host.split(QLatin1Char('.'));
+            for (int i = 0; i < 4 && i < parts.size(); ++i) {
+                setBoxText(i, parts[i]);
+            }
+            if (c.port > 0) {
+                setBoxText(4, QString::number(c.port));
+            }
+            refresh();
+        });
+    }
+    setPresets(presets);
+    clearBoxes();
+    QWidget* r = newRow();
+    addLabel(r, QStringLiteral("IP"), "padRowName");
+    for (int i = 0; i < 4; ++i) {
+        addBox(r, 3, 0, 3, QStringLiteral("0"));
+        if (i < 3) {
+            addLabel(r, QStringLiteral("."));
+        }
+    }
+    addLabel(r, QStringLiteral(":"));
+    addBox(r, 5, 0, 0, QStringLiteral("port"));
+    static_cast<QHBoxLayout*>(r->layout())->addStretch(1);
+    const QStringList parts = host.split(QLatin1Char('.'));
+    if (parts.size() == 4) {
+        for (int i = 0; i < 4; ++i) {
+            setBoxText(i, parts[i]);
+        }
+    }
+    if (port > 0) {
+        setBoxText(4, QString::number(port));
+    }
+    showFor(Kind::Address);
+}
+
+void EntryPad::openNumber(const QString& title, const QString& name, int value, int min, int max,
+                          const std::vector<std::pair<QString, int>>& chips, std::function<void(int)> done) {
+    coord_done_ = nullptr;
+    alt_done_ = nullptr;
+    dur_done_ = nullptr;
+    addr_done_ = nullptr;
+    num_done_ = std::move(done);
+    min_int_ = min;
+    max_int_ = max;
+    title_->setText(title);
+    std::vector<std::pair<QString, std::function<void()>>> presets;
+    for (const auto& [label, v] : chips) {
+        const int val = v;
+        presets.emplace_back(label, [this, val] {
+            setBoxText(0, QString::number(val));
+            refresh();
+        });
+    }
+    setPresets(presets);
+    clearBoxes();
+    QWidget* r = newRow();
+    addLabel(r, name, "padRowName");
+    addBox(r, static_cast<int>(QString::number(max).size()), 0, 0, QString::number(min));
+    static_cast<QHBoxLayout*>(r->layout())->addStretch(1);
+    setBoxText(0, QString::number(value));
+    showFor(Kind::Number);
+}
+
 void EntryPad::close() {
     poll_->stop();
     hide();
     coord_done_ = nullptr;
     alt_done_ = nullptr;
     dur_done_ = nullptr;
+    addr_done_ = nullptr;
+    num_done_ = nullptr;
     emit closed();
 }
 
@@ -702,6 +812,10 @@ void EntryPad::refresh() {
         refreshCoordinate(preview, ok);
     } else if (kind_ == Kind::Duration) {
         refreshDuration(preview, ok);
+    } else if (kind_ == Kind::Address) {
+        refreshAddress(preview, ok);
+    } else if (kind_ == Kind::Number) {
+        refreshNumber(preview, ok);
     } else {
         refreshAltitude(preview, ok);
     }
@@ -795,6 +909,59 @@ void EntryPad::refreshDuration(QString& preview, bool& ok) {
     }
 }
 
+void EntryPad::refreshAddress(QString& preview, bool& ok) {
+    address_.reset();
+    QStringList octets;
+    bool all = true;
+    bool in_range = true;
+    for (int i = 0; i < 4; ++i) {
+        bool good = false;
+        const int v = boxText(i).toInt(&good);
+        all = all && good;
+        in_range = in_range && good && v >= 0 && v <= 255;
+        octets << QString::number(v);
+    }
+    bool port_ok = false;
+    const int port = boxText(4).toInt(&port_ok);
+    if (!all || !port_ok) {
+        preview = QStringLiteral("four numbers, then the port; '.' moves to the next number");
+        return;
+    }
+    if (!in_range) {
+        preview = QStringLiteral("<span style='color:#ff4d5e'>each number is 0 to 255</span>");
+        return;
+    }
+    if (port < 1 || port > 65535) {
+        preview = QStringLiteral("<span style='color:#ff4d5e'>port: 1 to 65535</span>");
+        return;
+    }
+    const QString host = octets.join(QLatin1Char('.'));
+    address_ = std::make_pair(host, port);
+    ok = true;
+    if (host == QStringLiteral("0.0.0.0")) {
+        preview = QStringLiteral("all networks of this computer (WiFi, Ethernet, radio modems), port %1").arg(port);
+    } else if (host.startsWith(QStringLiteral("127."))) {
+        preview = QStringLiteral("this computer only, port %1 (a simulator or a program running here)").arg(port);
+    } else {
+        preview = QStringLiteral("%1 port %2").arg(host).arg(port);
+    }
+}
+
+void EntryPad::refreshNumber(QString& preview, bool& ok) {
+    number_.reset();
+    bool good = false;
+    const int v = boxText(0).toInt(&good);
+    if (!good) {
+        preview = QStringLiteral("%1 to %2").arg(min_int_).arg(max_int_);
+    } else if (v < min_int_ || v > max_int_) {
+        preview = QStringLiteral("<span style='color:#ff4d5e'>%1 to %2</span>").arg(min_int_).arg(max_int_);
+    } else {
+        number_ = v;
+        ok = true;
+        preview = QString::number(v);
+    }
+}
+
 void EntryPad::refreshAltitude(QString& preview, bool& ok) {
     for (size_t i = 0; i < ref_buttons_.size(); ++i) {
         ref_buttons_[i]->setChecked(static_cast<int>(i) == ref_);
@@ -849,6 +1016,16 @@ void EntryPad::accept() {
     } else if (kind_ == Kind::Duration && value_ && dur_done_) {
         auto done = dur_done_;
         const double v = *value_;
+        close();
+        done(v);
+    } else if (kind_ == Kind::Address && address_ && addr_done_) {
+        auto done = addr_done_;
+        const auto a = *address_;
+        close();
+        done(a.first, a.second);
+    } else if (kind_ == Kind::Number && number_ && num_done_) {
+        auto done = num_done_;
+        const int v = *number_;
         close();
         done(v);
     } else if (kind_ == Kind::Altitude && rel_ && alt_done_) {

@@ -1,3 +1,4 @@
+#include "link/serial_transport.hpp"
 #include "ui/app_icon.hpp"
 #include "ui/main_window.hpp"
 
@@ -6,6 +7,8 @@
 #include <QDir>
 #include <QFont>
 #include <QThreadPool>
+
+#include <algorithm>
 
 int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
@@ -38,12 +41,17 @@ int main(int argc, char* argv[]) {
                                                       .arg(settings.host)
                                                       .arg(settings.port),
                            QStringLiteral("host:port"));
+    QCommandLineOption serial(QStringLiteral("serial"),
+                              QStringLiteral("Serial port of the autopilot or telemetry radio, optionally with the baud "
+                                             "rate, e.g. /dev/ttyACM0, /dev/ttyUSB0:57600, COM4:115200"),
+                              QStringLiteral("port[:baud]"));
     QCommandLineOption video(QStringLiteral("video-port"),
                              QStringLiteral("UDP port of the RTP/H.264 stream (default %1)").arg(settings.video_port),
                              QStringLiteral("port"));
     QCommandLineOption reduced(QStringLiteral("reduced-motion"),
                                QStringLiteral("Disable glitch, scanline, ripple and pulse effects"));
     parser.addOption(udp);
+    parser.addOption(serial);
     parser.addOption(video);
     QCommandLineOption export_icon(QStringLiteral("export-icon"),
                                    QStringLiteral("Write the app icon as PNGs (16-512 px) into <dir> and exit"),
@@ -74,6 +82,28 @@ int main(int argc, char* argv[]) {
         }
         settings.host = v.left(colon);
         settings.port = port;
+        settings.link_serial = false;
+    }
+    if (parser.isSet(serial)) {
+        QString v = parser.value(serial);
+        const int colon = v.lastIndexOf(QLatin1Char(':'));
+        bool ok = false;
+        const int baud = colon > 0 ? v.mid(colon + 1).toInt(&ok) : 0;
+        if (ok) {
+            const auto& bauds = gcs::link::serialBauds();
+            if (std::find(bauds.begin(), bauds.end(), baud) == bauds.end()) {
+                qCritical("--serial: baud must be one of 57600, 115200, 230400, 460800, 921600");
+                return 2;
+            }
+            settings.serial_baud = baud;
+            v = v.left(colon);
+        }
+        if (v.isEmpty()) {
+            qCritical("--serial expects a port, e.g. /dev/ttyACM0 or COM4:57600");
+            return 2;
+        }
+        settings.serial_port = v;
+        settings.link_serial = true;
     }
     if (parser.isSet(video)) {
         settings.video_port = parser.value(video).toInt();

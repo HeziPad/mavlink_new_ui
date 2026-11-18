@@ -9,7 +9,9 @@
 #include "core/orbit_trim.hpp"
 #include "core/vehicle_state.hpp"
 #include "link/link_events.hpp"
+#include "link/mavlink_client.hpp"
 #include "map_view.hpp"
+#include "settings_screen.hpp"
 
 #include <QElapsedTimer>
 #include <QString>
@@ -49,8 +51,14 @@ class ViewHost;
 class WaypointPanel;
 
 struct AppSettings {
+    // link (Settings > CONNECTION; --udp / --serial override for one run)
+    bool link_serial = false;
     QString host = QStringLiteral("127.0.0.1");
     int port = 14551;
+    QString remote_host;  // UDP: also send here from the start (empty = only reply)
+    int remote_port = 0;
+    QString serial_port;
+    int serial_baud = 57600;
     int video_port = 5600;
     float takeoff_alt = 40.0f;
     float waypoint_alt = 80.0f;
@@ -76,6 +84,7 @@ struct AppSettings {
 
     static AppSettings load();
     void save() const;
+    void saveLink() const;  // only when the operator presses CONNECT
 };
 
 // Composes the views, HUD and link, and owns the meaning of the five dock
@@ -198,6 +207,11 @@ private:
     QString offline_status_;
     void refreshOffline();
     void refreshOfflineCounts();
+    link::MavlinkClient::Config linkConfig() const;
+    void applyLink(const SettingsScreen::Link& l);
+    SettingsScreen::Link linkValues() const;
+    void editLinkField(int field);
+    void updateLinkStatus();
 
     MapView* map_ = nullptr;
     CameraView* camera_ = nullptr;
