@@ -228,6 +228,7 @@ private:
         bool hold = true;  // false: a Guide target
     };
     std::optional<Orbit> orbit_;
+    bool hold_panel_hidden_ = false;  // Hold pressed again while holding: panel tucked away
     // ArduPlane flies the loiter bigger than asked; this trims the commanded
     // radius from measured laps so the flown circle matches the drawn one
     OrbitTrim trim_;

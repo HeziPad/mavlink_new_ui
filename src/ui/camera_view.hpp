@@ -94,7 +94,7 @@ private:
     // Left column (AIRCRAFT, LOS, HUD chip, WIND), the tapes just inside it
     // and the ladder between the tapes. One place, so paint and hit-tests agree.
     struct Layout {
-        QRectF aircraft, los, chip, wind;
+        QRectF target, aircraft, los, chip, wind;
         QRectF as_tape, alt_tape;
         QRectF ladder_clip;
     };

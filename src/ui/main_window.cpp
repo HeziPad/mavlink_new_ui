@@ -682,6 +682,7 @@ void MainWindow::updateHeights(qint64 now_ms) {
     } else if (orbit_ && s_.custom_mode == plane::GUIDED) {
         nav.target = pointTarget(s_, orbit_->hold ? "HOLD" : "FLY TO", orbit_->lat, orbit_->lon, orbit_->radius);
     }
+    bar_->setNavTarget(nav.target);
     map_->setNav(std::move(nav));
 }
 
@@ -1345,7 +1346,8 @@ void MainWindow::refreshDock() {
         spec.label = QStringLiteral("Hold");
         spec.icon = DockIcon::Hold;
         spec.active = s_.custom_mode == plane::GUIDED && orbit_ && orbit_->hold;
-        spec.hint = QStringLiteral("Circle here on the wing (also aborts a landing); press Fly To to change altitude and radius");
+        spec.hint = QStringLiteral("Circle here on the wing (also aborts a landing); press again to hide or show the "
+                                   "altitude / radius panel");
         if (!alive) {
             spec.enabled = false;
             spec.reason = no_link;
@@ -1409,7 +1411,14 @@ void MainWindow::onTriggered(int slot) {
         }
         break;
     case kHold:
-        hold();
+        if (orbit_ && orbit_->hold && s_.custom_mode == plane::GUIDED && isAirborne(s_)) {
+            // already holding: a second press hides (or shows) the panel; the circle goes on
+            hold_panel_hidden_ = !hold_panel_hidden_;
+            refreshOrbitPanel();
+        } else {
+            hold_panel_hidden_ = false;
+            hold();
+        }
         break;
     case kLand:
         land();
@@ -1679,8 +1688,8 @@ void MainWindow::adjustOrbit(float d_alt, float d_radius, bool flip) {
 void MainWindow::refreshOrbitPanel() {
     // Hold: always while holding; Fly To: while its button is on (the circle
     // keeps flying when it's off)
-    const bool show = orbit_ && (guiding_ || orbit_->hold) && !planning_ && s_.custom_mode == plane::GUIDED &&
-                      isAirborne(s_);
+    const bool show = orbit_ && (guiding_ || (orbit_->hold && !hold_panel_hidden_)) && !planning_ &&
+                      s_.custom_mode == plane::GUIDED && isAirborne(s_);
     if (show) {
         orbit_panel_->setValues(orbit_->hold ? QStringLiteral("HOLD") : QStringLiteral("FLY TO"), orbit_->alt,
                                 orbit_->radius, orbit_->ccw, s_.alt_rel, orbitDraw().flown, orbitDraw().trimmed);

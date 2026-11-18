@@ -682,9 +682,9 @@ void MapView::paintNavBox(QPainter& p, double right, double bottom) {
         }
     }
     if (nav_.target.valid) {
-        lines.push_back({QStringLiteral("→ %1  %2  ·  ETA %3")
-                             .arg(QString::fromStdString(nav_.target.name), units::distanceText(nav_.target.dist_m),
-                                  units::durationText(nav_.target.eta_s)),
+        // distance only: the ETA is on the telemetry bar's ETA chip
+        lines.push_back({QStringLiteral("→ %1  %2")
+                             .arg(QString::fromStdString(nav_.target.name), units::distanceText(nav_.target.dist_m)),
                          kCyan, true});
     }
     const bool hover = hover_pos_ && !touch_input_ && !pressing_ && rect().contains(hover_pos_->toPoint());
@@ -1768,14 +1768,6 @@ void MapView::paintFootprint(QPainter& p) {
         p.drawLine(bc + QPointF(s - 2, 0), bc + QPointF(s + 6, 0));
         p.drawLine(bc + QPointF(0, -s - 6), bc + QPointF(0, -s + 2));
         p.drawLine(bc + QPointF(0, s - 2), bc + QPointF(0, s + 6));
-        if (!compact_) {
-            const QString text = QStringLiteral("CAM %1").arg(formatDistance(std::hypot(fp.center.north, fp.center.east)));
-            const QFont f = labelFont(10);
-            const double w = QFontMetricsF(f).horizontalAdvance(text) + 14;
-            const QRectF box(bc.x() + 14, bc.y() - 22, w, 18);
-            drawGlass(p, chamferPath(box, 4), col, 0.6, kGlassDeep);
-            drawText(p, box, Qt::AlignCenter, text, f, col);
-        }
     }
 }
 

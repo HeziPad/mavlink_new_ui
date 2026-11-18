@@ -82,7 +82,7 @@ and shows `NO VIDEO`.
 | 4 | **Hold** | Instant. Circle where the aircraft is, on the wing (GUIDED). During a landing this is a go-around |
 | 5 | **Land** | **Hold 1 s**. Circle down beside the landing point **L** on the wing, leave into the wind, back-transition and land vertically. Without an L it lands at home the same way |
 
-**Hold and Fly To circles:** while holding, or while the **Fly To** button is on, a panel above the dock sets the
+**Hold and Fly To circles:** while holding (press **Hold** again to hide or show it), or while the **Fly To** button is on, a panel above the dock sets the
 **altitude** (−10 / −1 / +1 / +10 m, or −50 … +50 ft; 20–5000 m), the
 **radius** (−50 … +50 m, 40–5000 m) and the **direction** (CW / CCW). Holding a
 button repeats and speeds up (×5 after 1 s, ×10 after 2.5 s). Changes apply
@@ -149,7 +149,8 @@ never changes the vehicle.
 The **FLIGHT** chip says in plain words what the aircraft is doing: ON GROUND,
 TAKEOFF, TRANSITION, CLIMB-OUT, ON PLAN · WP3, END HOLD, HOLD, FLY TO,
 LANDING · APPROACH / VERTICAL, RTL, QLAND (other modes by their ArduPilot name,
-which is also in the chip's small print). A rotor glyph lights while the lift
+which is also in the chip's small print). The **ETA** chip beside it shows what
+it is flying to and when it gets there. A rotor glyph lights while the lift
 rotors spin, and "· ROTOR ASSIST" flags Q_ASSIST in cruise.
 
 The **ALT** chip switches reference on a tap: **ASL** (sea level), **AGL**
@@ -160,9 +161,9 @@ or pitched over 30°; otherwise the terrain map, marked "terrain") and **AFL**
 
 The map's **nav box** (bottom right) shows the aircraft's coordinates and the
 ground below it, the target it is flying to (WPn, APPROACH, L, HOLD, FLY TO,
-END HOLD, CLIMB-OUT) with distance and **ETA**, and, under a mouse cursor, the
+END HOLD, CLIMB-OUT) with its distance (the ETA is on the ETA chip), and, under a mouse cursor, the
 cursor's coordinates, ground height, distance and ETA. The camera view shows
-the **CAMERA TARGET** (bottom right): where the line of sight meets the
+the **CAMERA TARGET** (top of the left column, above AIRCRAFT): where the line of sight meets the
 terrain, its ground height and the slant range (≈ when no terrain tile is
 there and flat ground at home level is used).
 

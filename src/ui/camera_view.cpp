@@ -345,7 +345,8 @@ CameraView::Layout CameraView::layout() const {
     const QRectF r = rect();
     const QPointF c = r.center();
     constexpr double kColX = 16, kColW = 200;
-    l.aircraft = QRectF(kColX, 120, kColW, 92);
+    l.target = QRectF(kColX, 120, kColW, 112);
+    l.aircraft = QRectF(kColX, l.target.bottom() + 8, kColW, 92);
     l.los = QRectF(kColX, l.aircraft.bottom() + 8, kColW, 104);
     l.chip = QRectF(kColX, l.los.bottom() + 8, kColW, 48);
     l.wind = QRectF(kColX, l.chip.bottom() + 8, kColW, 120);
@@ -730,32 +731,45 @@ void CameraView::paintReadouts(QPainter& p) {
 }
 
 void CameraView::paintLosTarget(QPainter& p) {
-    // bottom right, clear of the picture's centre: what the camera looks at
+    // top of the left column, above AIRCRAFT: what the camera looks at
     if (compact() || !los_target_.valid) {
         return;
     }
     const QColor hud = kGreen;
-    const QRectF box(width() - 16 - 300, height() - 16 - 92 - 96, 300, 92);
+    const QRectF box = layout().target;
     p.setPen(QPen(alpha(hud, 0.5), 1));
     p.setBrush(alpha(kBg, 0.55));
     p.drawRect(box);
     drawText(p, QRectF(box.left() + 10, box.top() + 5, box.width() - 20, 16), Qt::AlignLeft | Qt::AlignVCenter,
-             QStringLiteral("CAMERA TARGET") + (los_target_.approximate ? QStringLiteral(" · ≈ flat ground") : QString()),
+             QStringLiteral("CAMERA TARGET") + (los_target_.approximate ? QStringLiteral(" ≈") : QString()),
              labelFont(10.5), los_target_.approximate ? kAmber : hud);
     if (!los_target_.hit) {
-        drawText(p, box.adjusted(10, 24, -10, -8), Qt::AlignLeft | Qt::AlignVCenter,
-                 QStringLiteral("above the horizon / beyond 3 km"), monoFont(12, true), alpha(hud, 0.7));
+        drawText(p, box.adjusted(10, 24, -10, -8), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
+                 QStringLiteral("above the horizon or beyond 3 km"), monoFont(11, true), alpha(hud, 0.7));
         return;
     }
+    // the coordinates, full width: latitude and longitude on their own lines
+    // (UTM fits on one)
+    const QString pos = units::coordText(los_target_.lat, los_target_.lon);
+    const QStringList parts = pos.split(QStringLiteral("  "), Qt::SkipEmptyParts);
+    const QFont cf = monoFont(11.5, true);
+    double y = box.top() + 24;
+    for (const QString& line : parts.size() == 2 ? parts : QStringList{pos}) {
+        drawText(p, QRectF(box.left() + 10, y, box.width() - 20, 17), Qt::AlignLeft | Qt::AlignVCenter, line, cf, hud);
+        y += 17;
+    }
+    if (parts.size() != 2) {
+        y += 17;
+    }
     const QFont lf = labelFont(10);
-    auto row = [&](int i, const QString& k, const QString& v, const QFont& f) {
-        const double y = box.top() + 24 + i * 21;
+    auto row = [&](const QString& k, const QString& v) {
         drawText(p, QRectF(box.left() + 10, y, 64, 18), Qt::AlignLeft | Qt::AlignVCenter, k, lf, alpha(hud, 0.65));
-        drawText(p, QRectF(box.left() + 70, y, box.width() - 80, 18), Qt::AlignRight | Qt::AlignVCenter, v, f, hud);
+        drawText(p, QRectF(box.left() + 70, y, box.width() - 80, 18), Qt::AlignRight | Qt::AlignVCenter, v,
+                 monoFont(13, true), hud);
+        y += 19;
     };
-    row(0, QStringLiteral("POS"), units::coordText(los_target_.lat, los_target_.lon), monoFont(11.5, true));
-    row(1, QStringLiteral("GROUND"), QStringLiteral("%1 MSL").arg(units::altText(los_target_.ground)), monoFont(13, true));
-    row(2, QStringLiteral("SLANT"), units::distanceText(los_target_.slant), monoFont(13, true));
+    row(QStringLiteral("GROUND"), QStringLiteral("%1 MSL").arg(units::altText(los_target_.ground)));
+    row(QStringLiteral("SLANT"), units::distanceText(los_target_.slant));
 }
 
 void CameraView::paintVerticalTape(QPainter& p, const QRectF& r, double value, double step, bool left,

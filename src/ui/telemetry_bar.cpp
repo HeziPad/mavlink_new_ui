@@ -222,9 +222,9 @@ void TelemetryBar::paintEvent(QPaintEvent*) {
     p.setRenderHint(QPainter::Antialiasing);
 
     // chip widths at scale 1
-    const double kLink = 104, kFlight = 250, kArm = 100, kSafe = 104, kAlt = 200, kSpd = 120, kBat = 156, kGps = 92,
+    const double kLink = 104, kFlight = 250, kEta = 112, kArm = 100, kSafe = 104, kAlt = 200, kSpd = 120, kBat = 156, kGps = 92,
                  kSys = 108, kGear = 60;
-    const double widths[] = {kLink, kFlight, kArm, kSafe, kAlt, kSpd, kBat, kGps, kSys, kGear};
+    const double widths[] = {kLink, kFlight, kEta, kArm, kSafe, kAlt, kSpd, kBat, kGps, kSys, kGear};
     double total = 0;
     for (double w : widths) {
         total += w;
@@ -344,6 +344,14 @@ void TelemetryBar::paintEvent(QPaintEvent*) {
                        hub + QPointF(std::cos(ang) * 4.0, std::sin(ang) * 4.0));
         }
         p.drawEllipse(g, 1.5, 1.5);
+    }
+
+    // ---- ETA to what it is flying to ------------------------------------------------
+    {
+        const QRectF r = next(kEta);
+        const QString name = nav_.valid ? QString::fromStdString(nav_.name) : QString();
+        chip(p, r, name.isEmpty() ? QStringLiteral("ETA") : QStringLiteral("ETA → %1").arg(name),
+             nav_.valid ? units::durationText(nav_.eta_s) : QStringLiteral("—"), nav_.valid ? kCyan : kMuted);
     }
 
     // ---- armed -------------------------------------------------------------

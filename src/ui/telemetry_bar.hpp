@@ -27,6 +27,7 @@ public:
     void setAdvisories(const std::vector<Advisory>& list);
     void setSystemsOpen(bool open);
     void setFlightStatus(const FlightStatus& f);
+    void setNavTarget(const NavTarget& t) { nav_ = t; }  // the ETA chip
     // the altitude chip's other references (ASL comes from the state):
     // AGL (from the rangefinder when `agl_rangefinder`, else terrain) and
     // AFL (above the landing point's ground); nullopt = unknown
@@ -37,7 +38,7 @@ public:
     // endurance::Level (0 none .. 3 critical).
     void setEndurance(bool valid, double time_left_s, int level, Clock::time_point at);
     void tick(double dt);
-    QSize sizeHint() const override { return {1330, 50}; }
+    QSize sizeHint() const override { return {1440, 50}; }
 
 signals:
     void settingsRequested();
@@ -64,6 +65,7 @@ private:
     Tween alt_, as_, gs_, batt_;
     Pulse mode_flash_;  // the flight chip, on a change of state
     FlightStatus flight_;
+    NavTarget nav_;
     int alt_ref_ = 0;
     std::optional<double> agl_, afl_;
     bool agl_rangefinder_ = false;
