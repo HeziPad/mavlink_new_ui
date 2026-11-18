@@ -373,6 +373,31 @@ static void testPatterns() {
         CHECK(items[2].command == mav::kCmdNavLoiterUnlim);
         CHECK(extractPlan(items).pattern == Pattern::Loop);
     }
+    // the hold radius and direction ride on the LOITER_UNLIM's param3
+    {
+        MissionPlan p;
+        p.pattern = Pattern::OneWay;
+        p.wps = {{47.0, 8.0, 80.0f}, {47.01, 8.0, 90.0f}};
+        p.hold_radius = 150.0f;
+        p.hold_ccw = true;
+        const auto items = buildLoopMission(47.0, 8.0, 400.0, p);
+        CHECK(items[3].command == mav::kCmdNavLoiterUnlim);
+        CHECK_NEAR(items[3].param3, -150.0, 1e-4);
+        const MissionPlan back = extractPlan(items);
+        CHECK_NEAR(back.hold_radius, 150.0, 1e-4);
+        CHECK(back.hold_ccw);
+        CHECK(holdIndex(back) == 1);
+        p.hold_radius = 0.0f;  // default radius, CCW: -1
+        CHECK_NEAR(buildLoopMission(47.0, 8.0, 400.0, p)[3].param3, -1.0, 1e-6);
+        CHECK(extractPlan(buildLoopMission(47.0, 8.0, 400.0, p)).hold_radius == 0.0f);
+        CHECK(extractPlan(buildLoopMission(47.0, 8.0, 400.0, p)).hold_ccw);
+        p.hold_ccw = false;
+        CHECK_NEAR(buildLoopMission(47.0, 8.0, 400.0, p)[3].param3, 0.0, 1e-6);
+        p.pattern = Pattern::Loop;
+        CHECK(holdIndex(p) == -1);
+        p.wps.resize(1);
+        CHECK(holdIndex(p) == 0);
+    }
     // loop round trip keeps Loop
     CHECK(extractPlan(patternMission(Pattern::Loop, 4, true)).pattern == Pattern::Loop);
 

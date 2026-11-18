@@ -120,6 +120,13 @@ private:
     void refreshApproachForWind(qint64 now_ms);
     void onCameraClick(double px, double py, double w, double h);
     void launchOrAuto();
+    // the seq Resume Plan / a new plan rejoins at: the nearest route point,
+    // keeping the direction of flight; -1 if the mission has no route
+    int rejoinSeq(const std::vector<MissionItem>& items) const;
+    void announceRejoin(const std::vector<MissionItem>& items, int seq, const QString& what);
+    // airborne in AUTO on the route (not landing)
+    bool flyingThePlan() const;
+    static int holdSeq(const std::vector<MissionItem>& items);  // the final hold item, -1 none
     void hold();
     void land();
     int slotForTag(const std::string& tag) const;
@@ -210,6 +217,12 @@ private:
     bool orbit_trim_only_ = false;  // pending re-send is a silent trim correction
     qint64 orbit_sent_ms_ = 0;
     static constexpr qint64 kOrbitResendMs = 300;
+    // orbit / hold limits: the radius can't usefully go below what the
+    // aircraft can turn at its bank limit
+    static constexpr float kMinOrbitRadius = 40.0f;
+    static constexpr float kMaxOrbitRadius = 5000.0f;
+    static constexpr float kMinOrbitAlt = 20.0f;
+    static constexpr float kMaxOrbitAlt = 5000.0f;
     // the on-board approach (flown by failsafe RTLs) follows the wind
     std::optional<double> approach_wind_;  // wind direction it was laid out for
     qint64 approach_sent_ms_ = -1000000;
@@ -220,11 +233,27 @@ private:
     // Land: the approach is recomputed with the current wind and re-uploaded
     // first; the jump into it happens when the upload is acknowledged.
     bool land_pending_ = false;
+    // a Sync while flying the plan: jump to the nearest new waypoint once it is on board
+    bool rejoin_after_upload_ = false;
+    bool end_hold_upload_ = false;  // a live edit of the one-way end hold (silent)
+
+    // In AUTO on the final hold (end of a one-way route): the orbit panel
+    // edits its radius / direction / altitude; edits are coalesced and
+    // uploaded (same item count), then the hold item is re-loaded.
+    bool onEndHold() const;
+    void adjustEndHold(float d_alt, float d_radius, bool flip);
+    void sendEndHold(qint64 now_ms);
+    std::optional<MissionPlan> end_hold_plan_;  // the edited plan, until it is on board
+    bool end_hold_dirty_ = false;
+    qint64 end_hold_sent_ms_ = -1000000;
+    static constexpr qint64 kEndHoldResendMs = 1000;
 
     // battery time left (core/endurance), recomputed every kEnduranceMs in flight
     void updateEndurance(qint64 now_ms);
     endurance::CurrentTracker endurance_tracker_;
     endurance::LevelLatch endurance_latch_;
+    endurance::TimeLeftFilter endurance_shown_;  // what the pilot sees: smoothed
+    bool endurance_learned_ = false;             // cruise current learned (restart the smoothing once)
     std::vector<Advisory> endurance_cards_;
     qint64 endurance_ms_ = -1000000;
     qint64 endurance_sample_ms_ = -1000000;

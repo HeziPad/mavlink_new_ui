@@ -657,8 +657,8 @@ std::optional<Eval> evaluate(const std::string& id, const VehicleState& s, const
 
 const std::vector<ParamCheck>& paramChecks() {
     static const std::vector<ParamCheck> list = {
-        {"param.Q_GUIDED_MODE", "Q_GUIDED_MODE", "Guide stays on the wing",
-         "1 makes Hold/Guide hover on the rotors instead of circling on the wing.", true},
+        {"param.Q_GUIDED_MODE", "Q_GUIDED_MODE", "Fly To stays on the wing",
+         "1 makes Hold/Fly To hover on the rotors instead of circling on the wing.", true},
         {"param.Q_ASSIST_SPEED", "Q_ASSIST_SPEED", "Stall protection (Q_ASSIST)",
          "Below this airspeed the lift rotors catch a stalling wing; 0 turns that off.", true},
         {"param.AIRSPEED", "", "Airspeed limits consistent",

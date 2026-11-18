@@ -355,6 +355,15 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
     connect(panel_, &WaypointPanel::insertRequested, this, [this] { map_->insertAfter(map_->selected()); });
     connect(panel_, &WaypointPanel::deleteRequested, this, [this] { map_->deletePoint(map_->selected()); });
     connect(panel_, &WaypointPanel::closeRequested, this, [this] { map_->select(MapView::kNone); });
+    connect(panel_, &WaypointPanel::holdRadiusDelta, this, [this](float d) {
+        const auto& plan = map_->plan();
+        const float now = plan.hold_radius > 0.0f ? plan.hold_radius : static_cast<float>(defaultRadius());
+        map_->setHold(std::clamp(now + d, kMinOrbitRadius, kMaxOrbitRadius), plan.hold_ccw);
+    });
+    connect(panel_, &WaypointPanel::holdDirectionToggled, this, [this] {
+        const auto& plan = map_->plan();
+        map_->setHold(plan.hold_radius, !plan.hold_ccw);
+    });
     connect(orbit_panel_, &OrbitPanel::altitudeDelta, this, [this](float d) { adjustOrbit(d, 0.0f, false); });
     connect(orbit_panel_, &OrbitPanel::radiusDelta, this, [this](float d) { adjustOrbit(0.0f, d, false); });
     connect(orbit_panel_, &OrbitPanel::directionToggled, this, [this] { adjustOrbit(0.0f, 0.0f, true); });
@@ -452,6 +461,10 @@ void MainWindow::frame() {
     refreshApproachForWind(now_ms);
     if (orbit_dirty_ && orbit_ && now_ms - orbit_sent_ms_ >= kOrbitResendMs) {
         sendOrbit();
+    }
+    if (end_hold_dirty_ && !uploading_ && !s_.mission_transfer_active &&
+        now_ms - end_hold_sent_ms_ >= kEndHoldResendMs) {
+        sendEndHold(now_ms);
     }
     host_->tick(dt);
     map_->tick(dt);
@@ -637,6 +650,7 @@ void MainWindow::pullState() {
     updateEndurance(clock_.elapsed());
     bar_->setState(s_, now);
     map_->setState(s_);
+    map_->setDefaultLoiterRadius(defaultRadius());
     camera_->setState(s_);
     updateAlerts();
     refreshDock();
@@ -747,7 +761,7 @@ void MainWindow::updateAlerts() {
         }
     }
     if (alert.isEmpty() && alive && s_.q_guided_mode == 1) {
-        alert = QStringLiteral("Guide/Hold would hover on the rotors (Q_GUIDED_MODE=1)");
+        alert = QStringLiteral("Fly To/Hold would hover on the rotors (Q_GUIDED_MODE=1)");
     }
     fx_->setAlert(alert);
 }
@@ -761,6 +775,8 @@ void MainWindow::updateEndurance(qint64 now_ms) {
             endurance_latch_.level() != Level::None || !endurance_cards_.empty()) {
             endurance_tracker_.reset();
             endurance_latch_.reset();
+            endurance_shown_.reset();
+            endurance_learned_ = false;
             endurance_cards_.clear();
             bar_->setEndurance(false, 0.0, 0, Clock::now());
         }
@@ -827,9 +843,21 @@ void MainWindow::updateEndurance(qint64 now_ms) {
         return;
     }
 
-    const Estimate e = estimate(in);
+    Estimate e = estimate(in);
+    if (e.valid) {
+        // the pilot sees a smoothed time (a climb or a gust doesn't make it
+        // jump); Critical still comes from the raw estimate. The first
+        // estimates use a cautious guess of the cruise current; once it is
+        // learned, start the smoothing over from the real figure instead of
+        // creeping up to it for minutes.
+        if (e.cruise_learned && !endurance_learned_) {
+            endurance_shown_.reset();
+        }
+        endurance_learned_ = e.cruise_learned;
+        e.time_left_s = endurance_shown_.update(e.time_left_s, t);
+    }
     const Level before = endurance_latch_.level();
-    const Level level = endurance_latch_.update(e.valid ? e.level : Level::None, t);
+    const Level level = endurance_latch_.update(levelFor(e, e.time_left_s), t);
     endurance_cards_ = advisories(e, level);
     bar_->setEndurance(e.valid, e.time_left_s, static_cast<int>(level), Clock::now());
     // warnings and criticals are toasted with the other alerts; "soon" once here
@@ -934,6 +962,28 @@ void MainWindow::handleEvent(const link::LinkEvent& ev) {
             }
             break;
         }
+        if (rejoin_after_upload_ || end_hold_upload_) {
+            const bool silent = end_hold_upload_;
+            rejoin_after_upload_ = end_hold_upload_ = false;
+            int seq = -1;
+            if (s_.custom_mode == plane::AUTO && isAirborne(s_)) {
+                seq = silent ? holdSeq(ev.items) : rejoinSeq(ev.items);
+            }
+            if (silent && !end_hold_dirty_) {
+                end_hold_plan_.reset();  // on board now; the panel reads it back from the mission
+            }
+            if (seq >= 0) {
+                // setting the current item makes ArduPlane load it now
+                client_->runSequence(silent ? "end-hold" : "auto",
+                                     {link::makeSetMissionCurrent(static_cast<uint16_t>(seq))});
+                if (!silent) {
+                    announceRejoin(ev.items, seq, QStringLiteral("New plan"));
+                }
+            }
+            if (silent) {
+                break;  // a live hold edit: no toast or dock flash
+            }
+        }
         dock_->flash(kPlan, true);
         fx_->toast(QStringLiteral("Mission synced · %1 items").arg(ev.items.size()), kGreen, QStringLiteral("Plan"));
         if (planning_) {
@@ -948,6 +998,13 @@ void MainWindow::handleEvent(const link::LinkEvent& ev) {
         }
         break;
     case T::MissionFailed:
+        rejoin_after_upload_ = false;
+        if (end_hold_upload_) {
+            end_hold_upload_ = false;  // quiet: the edit is still pending and is sent again
+            end_hold_dirty_ = true;
+            uploading_ = false;
+            break;
+        }
         if (approach_refresh_) {
             approach_refresh_ = false;  // quiet: tried again on the next wind check
             uploading_ = false;
@@ -1121,7 +1178,7 @@ void MainWindow::refreshDock() {
     } else {
         dock_->setProgress(kGuide, -1.0);
         DockSlotSpec spec;
-        spec.label = QStringLiteral("Guide");
+        spec.label = QStringLiteral("Fly To");
         spec.icon = DockIcon::Guide;
         spec.active = guiding_;
         spec.hint = QStringLiteral("Tap the map or camera to send the aircraft there (on the wing)");
@@ -1151,7 +1208,7 @@ void MainWindow::refreshDock() {
         spec.label = QStringLiteral("Hold");
         spec.icon = DockIcon::Hold;
         spec.active = s_.custom_mode == plane::GUIDED && orbit_ && orbit_->hold;
-        spec.hint = QStringLiteral("Circle here on the wing (also aborts a landing); press Guide to change altitude and radius");
+        spec.hint = QStringLiteral("Circle here on the wing (also aborts a landing); press Fly To to change altitude and radius");
         if (!alive) {
             spec.enabled = false;
             spec.reason = no_link;
@@ -1288,9 +1345,11 @@ void MainWindow::refreshPanel() {
     } else if (sel >= 0 && sel < static_cast<int>(plan.wps.size())) {
         panel_->showWaypoint(sel, plan.wps[sel].alt_rel);
     } else {
+        panel_->setHold(false, 0.0f, false, defaultRadius());
         panel_->hide();
         return;
     }
+    panel_->setHold(sel >= 0 && sel == holdIndex(plan), plan.hold_radius, plan.hold_ccw, defaultRadius());
     const QSize ds = dock_->sizeHint();
     panel_->move((width() - panel_->width()) / 2, height() - ds.height() - 18 - panel_->height());
     panel_->show();
@@ -1336,6 +1395,9 @@ void MainWindow::syncPlan() {
     const LandingApproach appr = approachFor(plan, from_lat, from_lon);
     auto items = buildLoopMission(s_.home_lat, s_.home_lon, s_.home_alt_amsl, plan, settings_.takeoff_alt, &appr);
     uploading_ = true;
+    // flying the plan: switch to the new one as soon as it is on board
+    // (ArduPlane would otherwise finish the leg it has in memory)
+    rejoin_after_upload_ = flyingThePlan();
     approach_wind_ = s_.has_wind ? std::optional<double>(s_.wind_from_deg) : std::nullopt;
     dock_->setProgress(kPlan, 0.0);
     client_->uploadMission(std::move(items));
@@ -1459,15 +1521,13 @@ void MainWindow::updateOrbitTrim() {
 
 void MainWindow::adjustOrbit(float d_alt, float d_radius, bool flip) {
     if (!orbit_) {
+        if (onEndHold()) {
+            adjustEndHold(d_alt, d_radius, flip);
+        }
         return;
     }
-    // the radius can't usefully go below what the aircraft can turn at its bank limit
-    constexpr float kMinRadius = 40.0f;
-    constexpr float kMaxRadius = 5000.0f;
-    constexpr float kMinAlt = 20.0f;
-    constexpr float kMaxAlt = 5000.0f;
-    orbit_->alt = std::clamp(orbit_->alt + d_alt, kMinAlt, kMaxAlt);
-    orbit_->radius = std::clamp(orbit_->radius + d_radius, kMinRadius, kMaxRadius);
+    orbit_->alt = std::clamp(orbit_->alt + d_alt, kMinOrbitAlt, kMaxOrbitAlt);
+    orbit_->radius = std::clamp(orbit_->radius + d_radius, kMinOrbitRadius, kMaxOrbitRadius);
     if (flip) {
         orbit_->ccw = !orbit_->ccw;
     }
@@ -1479,14 +1539,22 @@ void MainWindow::adjustOrbit(float d_alt, float d_radius, bool flip) {
 }
 
 void MainWindow::refreshOrbitPanel() {
-    // only while the Guide button is on: the circle keeps flying when it's off
+    // only while the Fly To button is on: the circle keeps flying when it's off
     const bool show = guiding_ && orbit_ && !planning_ && s_.custom_mode == plane::GUIDED && isAirborne(s_);
-    if (!show) {
+    if (show) {
+        orbit_panel_->setValues(orbit_->hold ? QStringLiteral("HOLD") : QStringLiteral("FLY TO"), orbit_->alt,
+                                orbit_->radius, orbit_->ccw, s_.alt_rel, orbitDraw().flown, orbitDraw().trimmed);
+    } else if (!planning_ && onEndHold()) {
+        // circling the end of a one-way route: the same controls, applied to the plan's hold
+        const MissionPlan plan = end_hold_plan_ ? *end_hold_plan_ : extractPlan(s_.mission);
+        const int h = holdIndex(plan);
+        orbit_panel_->setValues(QStringLiteral("HOLD · END"), plan.wps[h].alt_rel,
+                                plan.hold_radius > 0.0f ? plan.hold_radius : static_cast<float>(defaultRadius()),
+                                plan.hold_ccw, s_.alt_rel);
+    } else {
         orbit_panel_->hide();
         return;
     }
-    orbit_panel_->setValues(orbit_->hold ? QStringLiteral("HOLD") : QStringLiteral("GUIDE"), orbit_->alt,
-                            orbit_->radius, orbit_->ccw, s_.alt_rel, orbitDraw().flown, orbitDraw().trimmed);
     const QSize ds = dock_->sizeHint();
     orbit_panel_->move(orbitPanelX(), height() - ds.height() - 18 - orbit_panel_->height());
     if (!orbit_panel_->isVisible()) {
@@ -1494,6 +1562,60 @@ void MainWindow::refreshOrbitPanel() {
         orbit_panel_->raise();
         fx_->raise();
     }
+}
+
+bool MainWindow::onEndHold() const {
+    if (s_.custom_mode != plane::AUTO || !isAirborne(s_) || !s_.mission_known || s_.mission_current < 1 ||
+        s_.mission_current >= static_cast<int>(s_.mission.size()) ||
+        s_.mission[s_.mission_current].command != mav::kCmdNavLoiterUnlim) {
+        return false;
+    }
+    const int h = holdIndex(extractPlan(s_.mission));
+    return h >= 0 && seqToWaypointIndex(s_.mission, s_.mission_current) == h;
+}
+
+void MainWindow::adjustEndHold(float d_alt, float d_radius, bool flip) {
+    if (!end_hold_plan_) {
+        end_hold_plan_ = extractPlan(s_.mission);
+    }
+    MissionPlan& plan = *end_hold_plan_;
+    const int h = holdIndex(plan);
+    if (h < 0) {
+        end_hold_plan_.reset();
+        return;
+    }
+    auto& alt = plan.wps[h].alt_rel;
+    alt = std::clamp(alt + d_alt, kMinOrbitAlt, kMaxOrbitAlt);
+    if (d_radius != 0.0f) {
+        const float now = plan.hold_radius > 0.0f ? plan.hold_radius : static_cast<float>(defaultRadius());
+        plan.hold_radius = std::clamp(now + d_radius, kMinOrbitRadius, kMaxOrbitRadius);
+    }
+    if (flip) {
+        plan.hold_ccw = !plan.hold_ccw;
+    }
+    end_hold_dirty_ = true;  // sent from frame(), coalescing auto-repeat presses
+    refreshOrbitPanel();
+}
+
+void MainWindow::sendEndHold(qint64 now_ms) {
+    end_hold_dirty_ = false;
+    if (!end_hold_plan_ || !onEndHold() || !s_.has_home) {
+        end_hold_plan_.reset();  // it left the hold meanwhile: drop the edit
+        return;
+    }
+    const MissionPlan plan = withLanding(*end_hold_plan_);
+    // keep the approach on board (same layout, so the same item count)
+    const auto on_board = extractApproach(s_.mission);
+    const LandingApproach appr = on_board ? *on_board : approachFor(plan, s_.lat, s_.lon);
+    auto items = buildLoopMission(s_.home_lat, s_.home_lon, s_.home_alt_amsl, plan, settings_.takeoff_alt, &appr);
+    if (items.size() != s_.mission.size()) {
+        end_hold_plan_.reset();  // not a mission this GCS laid out; leave it alone
+        return;
+    }
+    end_hold_sent_ms_ = now_ms;
+    end_hold_upload_ = true;
+    uploading_ = true;
+    client_->uploadMission(std::move(items));
 }
 
 void MainWindow::onCameraClick(double px, double py, double w, double h) {
@@ -1516,9 +1638,42 @@ void MainWindow::onCameraClick(double px, double py, double w, double h) {
         fx_->toast(QStringLiteral("Above the horizon — target %1 m out on bearing %2°")
                        .arg(t.range, 0, 'f', 0)
                        .arg(t.bearing_deg, 0, 'f', 0),
-                   kAmber, QStringLiteral("Guide"));
+                   kAmber, QStringLiteral("Fly To"));
     }
     sendGuided(lat, lon);
+}
+
+int MainWindow::holdSeq(const std::vector<MissionItem>& items) {
+    const int h = holdIndex(extractPlan(items));
+    for (size_t i = 1; h >= 0 && i < items.size(); ++i) {
+        if (items[i].command == mav::kCmdNavLoiterUnlim && seqToWaypointIndex(items, static_cast<int>(i)) == h) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+bool MainWindow::flyingThePlan() const {
+    return s_.custom_mode == plane::AUTO && isAirborne(s_) && s_.mission_known && !isLandingInMission(s_);
+}
+
+int MainWindow::rejoinSeq(const std::vector<MissionItem>& items) const {
+    // the nearest route point, carrying on in the direction it is flying
+    const PredictedPosition here = predictPosition(s_, Clock::now());
+    const double gs = std::hypot(s_.vn, s_.ve);
+    const double track = gs > 3.0 ? geo::wrap360(std::atan2(s_.ve, s_.vn) * geo::kRadToDeg) : -1.0;
+    return nearestLoopSeq(items, here.lat, here.lon, defaultRadius(), track);
+}
+
+void MainWindow::announceRejoin(const std::vector<MissionItem>& items, int seq, const QString& what) {
+    const PredictedPosition here = predictPosition(s_, Clock::now());
+    const auto& it = items[seq];
+    map_->ping(it.lat(), it.lon(), kGreen);
+    fx_->toast(QStringLiteral("%1 → WP%2, %3 m")
+                   .arg(what)
+                   .arg(seqToWaypointIndex(items, seq) + 1)
+                   .arg(std::lround(geo::distance(here.lat, here.lon, it.lat(), it.lon()))),
+               kGreen, QStringLiteral("Plan"));
 }
 
 void MainWindow::launchOrAuto() {
@@ -1528,21 +1683,11 @@ void MainWindow::launchOrAuto() {
         // also keeps AUTO off the VTOL takeoff (a Hold during the climb) and
         // the landing items (an aborted landing), which it would otherwise
         // resume on the rotors.
-        const PredictedPosition here = predictPosition(s_, Clock::now());
-        const double gs = std::hypot(s_.vn, s_.ve);
-        const double track = gs > 3.0 ? geo::wrap360(std::atan2(s_.ve, s_.vn) * geo::kRadToDeg) : -1.0;
-        const int seq =
-            s_.mission_known ? nearestLoopSeq(s_.mission, here.lat, here.lon, defaultRadius(), track) : -1;
+        const int seq = s_.mission_known ? rejoinSeq(s_.mission) : -1;
         if (seq >= 0) {
             client_->runSequence("auto", {link::makeSetMissionCurrent(static_cast<uint16_t>(seq)),
                                           link::makeSetMode(plane::AUTO, "AUTO")});
-            const auto& it = s_.mission[seq];
-            const double lat = it.x * 1e-7, lon = it.y * 1e-7;
-            map_->ping(lat, lon, kGreen);
-            fx_->toast(QStringLiteral("Resume Plan → WP%1, %2 m")
-                           .arg(seqToWaypointIndex(s_.mission, seq) + 1)
-                           .arg(std::lround(geo::distance(here.lat, here.lon, lat, lon))),
-                       kGreen, QStringLiteral("Plan"));
+            announceRejoin(s_.mission, seq, QStringLiteral("Resume Plan"));
         } else {
             client_->setMode(plane::AUTO, "auto");
         }

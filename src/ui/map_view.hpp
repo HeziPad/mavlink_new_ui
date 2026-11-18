@@ -43,6 +43,9 @@ public:
     bool follow() const { return follow_; }
     void setDefaultAltitude(float alt) { default_alt_ = alt; }
     void setDefaultLandAltitude(float alt) { default_land_alt_ = alt; }
+    // the autopilot's WP_LOITER_RAD: a hold with radius 0 circles at this
+    void setDefaultLoiterRadius(double m) { default_loiter_radius_ = m; }
+    double defaultLoiterRadius() const { return default_loiter_radius_; }
 
     // ---- plan editing ------------------------------------------------------
     const MissionPlan& plan() const { return plan_; }
@@ -58,6 +61,7 @@ public:
     void deletePoint(int id);
     void insertAfter(int index);                  // midpoint to the next point (past the end of an open route)
     void setPattern(Pattern pattern);             // how the route is flown (undoable)
+    void setHold(float radius, bool ccw);         // the final hold circle (undoable; radius 0 = default)
 
     // ---- motion (predicted, set every frame) ---------------------------------
     void setAircraftPosition(double lat, double lon);
@@ -194,6 +198,7 @@ private:
     bool follow_ = true;
     float default_alt_ = 80.0f;
     float default_land_alt_ = kDefaultLandApproachAlt;
+    double default_loiter_radius_ = 80.0;
 
     MissionPlan plan_;
     std::vector<MissionPlan> undo_;

@@ -156,7 +156,7 @@ void assessEkf(const VehicleState& s, bool airborne, std::vector<Advisory>& out)
     if (!pos_ok) {
         if (airborne) {
             out.push_back(make("ekf.position", Severity::Critical, "Position estimate lost",
-                               "The autopilot no longer trusts where it is. AUTO, Guide, Hold and QRTL depend on it "
+                               "The autopilot no longer trusts where it is. AUTO, Fly To, Hold and Land depend on it "
                                "and may drift or fail.",
                                {"Be ready to take manual control on the RC transmitter",
                                 "Bring it back by line of sight and land",
@@ -164,8 +164,8 @@ void assessEkf(const VehicleState& s, bool airborne, std::vector<Advisory>& out)
                                detail));
         } else {
             out.push_back(make("ekf.position", Severity::Warning, "Position not ready",
-                               "The autopilot doesn't trust its GPS position yet, so it can't arm for AUTO, Guide "
-                               "or QRTL.",
+                               "The autopilot doesn't trust its GPS position yet, so it can't arm for AUTO or "
+                               "Fly To.",
                                {"Wait for GPS lock: clear view of the sky, usually 30-60 s",
                                 "Keep the video transmitter and metal away from the GPS antenna",
                                 "Check the GPS card for satellite count"},
@@ -224,7 +224,7 @@ void assessEkf(const VehicleState& s, bool airborne, std::vector<Advisory>& out)
 void assessGps(const VehicleState& s, bool airborne, std::vector<Advisory>& out) {
     if (!s.has_gps) {
         out.push_back(make("gps.none", Severity::Warning, "No GPS data",
-                           "The autopilot isn't reporting any GPS. Missions, Guide, Hold and QRTL need it.",
+                           "The autopilot isn't reporting any GPS. Missions, Fly To, Hold and Land need it.",
                            {"Check the GPS is plugged in and powered", "Check GPS_TYPE is set"}));
         return;
     }
@@ -345,7 +345,7 @@ std::vector<Advisory> assess(const VehicleState& s, Clock::time_point now, bool 
                            {"Wait for GPS lock"}));
     }
     if (s.q_guided_mode == 1) {
-        out.push_back(make("param.q_guided_mode", Severity::Warning, "Guide and Hold would hover on the rotors",
+        out.push_back(make("param.q_guided_mode", Severity::Warning, "Fly To and Hold would hover on the rotors",
                            "Q_GUIDED_MODE is 1, so GUIDED targets end in a rotor hover instead of a wing-borne "
                            "circle. That uses lots of battery and breaks the \"rotors only for takeoff and landing\" "
                            "rule.",

@@ -11,6 +11,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <cmath>
 
 namespace gcs::ui {
 
@@ -40,9 +41,12 @@ QPushButton* makeButton(const QString& text, const QString& name = {}) {
 }  // namespace
 
 WaypointPanel::WaypointPanel(QWidget* parent) : QWidget(parent) {
-    auto* outer = new QHBoxLayout(this);
-    outer->setContentsMargins(18, 10, 12, 10);
+    auto* rows = new QVBoxLayout(this);
+    rows->setContentsMargins(18, 10, 12, 10);
+    rows->setSpacing(8);
+    auto* outer = new QHBoxLayout;
     outer->setSpacing(10);
+    rows->addLayout(outer);
 
     auto* info = new QVBoxLayout;
     info->setSpacing(0);
@@ -92,11 +96,39 @@ WaypointPanel::WaypointPanel(QWidget* parent) : QWidget(parent) {
     outer->addWidget(delete_);
     outer->addWidget(close);
 
+    // the final hold: circle radius and direction (like the Fly To panel)
+    hold_row_ = new QWidget;
+    auto* hr = new QHBoxLayout(hold_row_);
+    hr->setContentsMargins(0, 0, 0, 0);
+    hr->setSpacing(6);
+    auto* hold_title = new QLabel(QStringLiteral("HOLD\nCIRCLE"));
+    hold_title->setObjectName(QStringLiteral("wpTitle"));
+    hold_radius_ = new QLabel;
+    hold_radius_->setObjectName(QStringLiteral("wpHold"));
+    hold_radius_->setMinimumWidth(170);
+    hr->addWidget(hold_title);
+    hr->addWidget(hold_radius_);
+    for (int d : {-50, -10, 10, 50}) {
+        auto* b = makeButton(QStringLiteral("%1%2").arg(d > 0 ? QStringLiteral("+") : QString()).arg(d));
+        b->setAutoRepeat(true);
+        b->setAutoRepeatDelay(400);
+        b->setAutoRepeatInterval(90);
+        connect(b, &QPushButton::clicked, this, [this, d] { emit holdRadiusDelta(static_cast<float>(d)); });
+        hr->addWidget(b);
+    }
+    hold_dir_ = makeButton(QStringLiteral("⟲ COUNTER-CW"));
+    connect(hold_dir_, &QPushButton::clicked, this, &WaypointPanel::holdDirectionToggled);
+    hr->addWidget(hold_dir_);
+    hr->addStretch(1);
+    rows->addWidget(hold_row_);
+    hold_row_->hide();
+
     setStyleSheet(QStringLiteral(R"(
         QLabel { background: transparent; color: #e6f1f8; }
         QLabel#wpTitle { color: #ffb547; font: bold 12px "DejaVu Sans"; }
         QLabel#wpAlt { font: bold 24px "DejaVu Sans Mono"; min-width: 110px; }
         QLabel#wpNote { color: #7d93a6; font: 11px "DejaVu Sans"; }
+        QLabel#wpHold { font: bold 16px "DejaVu Sans Mono"; }
         QPushButton {
             background: rgba(63, 224, 255, 0.06); color: #e6f1f8;
             border: 1px solid rgba(63, 224, 255, 0.45); padding: 0 12px;
@@ -143,6 +175,18 @@ void WaypointPanel::showLanding(float approach_alt) {
     steppers_->show();
     insert_->hide();
     relayout();
+}
+
+void WaypointPanel::setHold(bool show, float radius, bool ccw, double default_radius) {
+    if (show) {
+        hold_radius_->setText(radius > 0.0f ? QStringLiteral("r %1 m").arg(std::lround(radius))
+                                            : QStringLiteral("r %1 m (default)").arg(std::lround(default_radius)));
+        hold_dir_->setText(ccw ? QStringLiteral("⟲ COUNTER-CW") : QStringLiteral("⟳ CLOCKWISE"));
+    }
+    if (hold_row_->isVisible() != show) {
+        hold_row_->setVisible(show);
+        relayout();
+    }
 }
 
 void WaypointPanel::relayout() {

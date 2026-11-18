@@ -36,6 +36,8 @@ constexpr double kLearnS = 20.0;           // s of cruise before the learned cur
 constexpr double kDefaultReserve = 0.25;   // never plan into the last 25 % of the pack
 constexpr double kCautionS = 300.0;        // "return soon" below 5 min
 constexpr double kClearHoldS = 30.0;       // a level clears only after 30 s below it
+constexpr double kCruiseTau = 300.0;       // s, cruise current average (a climb barely moves it)
+constexpr double kShownTau = 180.0;        // s, the time left shown to the pilot
 
 // What the lift and wing were doing over a current sample.
 enum class Phase { Other, Cruise, Hover };
@@ -45,8 +47,9 @@ class CurrentTracker {
 public:
     // t: seconds on any monotonic clock; amps < 0 (unknown) is ignored
     void addSample(double t, double amps, Phase phase);
-    // Cruise: the higher of a ~60 s and a ~15 s average, so a climb or a
-    // headwind shows at once but a short lull doesn't. < 0 until kLearnS.
+    // Cruise: a slow (kCruiseTau) average, so a climb or a lull barely moves
+    // it; what a climb really uses still shows in the measured charge.
+    // < 0 until kLearnS.
     double cruiseAmps() const;
     // Mean current while hovering on the rotors (the takeoff); < 0 if never.
     double hoverAmps() const;
@@ -55,7 +58,7 @@ public:
 
 private:
     double last_t_ = -1.0;
-    double slow_ = 0.0, fast_ = 0.0;
+    double avg_ = 0.0;
     double cruise_s_ = 0.0;
     double hover_as_ = 0.0, hover_s_ = 0.0;  // amp-seconds, seconds
 };
@@ -117,6 +120,25 @@ struct Estimate {
 double groundSpeed(double airspeed, double track_deg, double wind_from_deg, double wind_speed);
 ReturnCost returnCost(const Inputs& in, const RoutePoint& from, double cruise_a, double hover_a);
 Estimate estimate(const Inputs& in);
+
+// Smooths the time left shown to the pilot: between estimates it runs down
+// like a clock, and each new estimate only pulls it part of the way
+// (kShownTau), so a climb or a gust doesn't make it jump.
+class TimeLeftFilter {
+public:
+    double update(double raw_s, double t);  // t: seconds, monotonic
+    double value() const { return value_; }
+    bool valid() const { return t_ >= 0.0; }
+    void reset() { *this = TimeLeftFilter{}; }
+
+private:
+    double value_ = 0.0;
+    double t_ = -1.0;
+};
+
+// Caution / Warning from the shown (filtered) time; Critical from the raw
+// estimate, so a real shortfall is never delayed.
+Level levelFor(const Estimate& e, double shown_time_left_s);
 
 // A level rises at once and only falls after it has stayed lower for
 // kClearHoldS, so the card doesn't flicker on a gust.

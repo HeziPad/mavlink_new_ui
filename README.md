@@ -76,17 +76,17 @@ and shows `NO VIDEO`.
 
 | Key | Button | What it does |
 |-----|--------|--------------|
-| 1 | **Plan / Sync ↑** | First press: edit the mission on the map. Second press: upload it. **Hold**: re-download the vehicle's mission |
+| 1 | **Plan / Sync ↑** | First press: edit the mission on the map. Second press: upload it; if the aircraft is flying the plan (AUTO), it switches to the new plan right away at its nearest waypoint. **Hold**: re-download the vehicle's mission |
 | 2 | **Takeoff / Launch / Resume Plan** | On the ground (**hold 1 s** to confirm): with a mission → AUTO + arm; without → GUIDED + arm + VTOL takeoff, then Hold (circle) on the wing at takeoff altitude. Locked while the safety switch is on. Airborne: **Resume Plan** goes back to the planned loop on the wing (AUTO), also mid-landing (aborts it). If the vehicle's current item isn't a loop waypoint (still the VTOL takeoff after a Hold during the climb, or the landing), it is reset to the loop first, so AUTO never re-runs a rotor takeoff. While flying the loop it reads **On Plan** |
-| 3 | **Guide** | Toggle. Tap the map, or the ground in the camera view, to circle there on the wing (GUIDED) |
+| 3 | **Fly To** | Toggle. Tap the map, or the ground in the camera view, to circle there on the wing (GUIDED) |
 | 4 | **Hold** | Instant. Circle where the aircraft is, on the wing (GUIDED). During a landing this is a go-around |
 | 5 | **Land** | **Hold 1 s**. Circle down beside the landing point **L** on the wing, leave into the wind, back-transition and land vertically. Without an L it lands at home the same way |
 
-**Hold and Guide circles:** while the **Guide** button is on, a panel above the dock sets the
+**Hold and Fly To circles:** while the **Fly To** button is on, a panel above the dock sets the
 **altitude** (−10 / −1 / +1 / +10 m, or −50 … +50 ft; 20–5000 m), the
 **radius** (−50 … +50 m, 40–5000 m) and the **direction** (CW / CCW). Holding a
 button repeats and speeds up (×5 after 1 s, ×10 after 2.5 s). Changes apply
-live. The circle starts at the vehicle's `WP_LOITER_RAD`. Turn Guide off to hide
+live. The circle starts at the vehicle's `WP_LOITER_RAD`. Turn Fly To off to hide
 the panel; the circle keeps flying.
 
 ArduPlane flies a loiter **bigger than commanded**: `AP_L1_Control` scales the
@@ -170,7 +170,7 @@ reboot), so turning it off is always a deliberate step.
 After an RTL / QLAND landing (a failsafe) the vehicle sits in a mode ArduPlane can't
 arm in, so its pre-arm check fails. SYSTEMS shows that as an info card, not a
 fault: Launch switches mode before arming. `Esc` deselects or leaves
-Plan/Guide, `Del` deletes the selected point, and `Ctrl+Z` undoes a plan edit.
+Plan/Fly To, `Del` deletes the selected point, and `Ctrl+Z` undoes a plan edit.
 
 **The lift rotors are for takeoff and landing only.** Every flight action above
 keeps the aircraft on the wing. The **LIFT ROTORS** chip in the telemetry bar
@@ -178,7 +178,7 @@ shows **OFF**, **ACTIVE** (hover / transition / on the ground) or **ASSIST**.
 ASSIST means the rotors spun up in wing-borne flight to prevent a stall
 (`Q_ASSIST_SPEED` and friends), and it also raises a toast. The aircraft stays
 armed in cruise: disarming would stop the pusher too. The GCS reads
-`Q_GUIDED_MODE` at connect and shows an alert if it is 1, because Guide would
+`Q_GUIDED_MODE` at connect and shows an alert if it is 1, because Fly To would
 then end in a rotor hover.
 
 **Planning:** **ROUTE** in the plan strip picks how the waypoints are flown,
@@ -188,6 +188,11 @@ until you press Hold or Land:
 - **⇄ Back & forth**: 1 → 2 → 3 → 2 → 1 → 2 → … forever. With two
   waypoints this is the same flight as the loop.
 - **→ One way, then hold**: 1 → 2 → 3 once, then it circles WP3 on the wing.
+  Select the last point to set the hold circle's **radius** (−50 / −10 / +10
+  / +50 m; default `WP_LOITER_RAD`) and **direction**. While the aircraft is
+  circling there in flight, the same panel as Fly To (**HOLD · END**) changes
+  its radius, direction and altitude live. The panel re-uploads the mission
+  and keeps circling the same point.
 
 The map draws a loop closed, the other two open, and marks the last point
 TURN BACK or HOLD.
@@ -393,7 +398,7 @@ The flight-path marker (circle with three ticks) is where the aircraft is
 actually going. Its track is predicted every frame along with the heading, so it
 stays steady in turns; in wind it sits beside the nose by the crab angle.
 
-In Guide mode, a tap on the video is cast along the real LOS to find the
+In Fly To mode, a tap on the video is cast along the real LOS to find the
 ground point.
 
 **Gimbal angle frame.** The MAVLink spec says a gimbal reports roll and pitch in
@@ -437,6 +442,11 @@ It uses the lower of the two charge readings (mAh used and the autopilot's %).
 It costs the return from the farthest point of the plan, not only from where
 the aircraft is now. The cruise current is learned in flight and the hover
 current during the takeoff (4 × cruise until measured).
+
+The shown time is smoothed so a climb or a gust doesn't make it jump. The cruise
+current is a 5 min average, and between estimates the shown time runs down like
+a clock, moving only part of the way toward each new estimate (3 min time
+constant). The critical alert doesn't wait for the smoothing.
 
 - Under 5 min left: amber, with a "head back soon" card.
 - At 0:00: **LAND NOW** and a warning card.

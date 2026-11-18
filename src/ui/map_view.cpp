@@ -344,6 +344,21 @@ void MapView::setPattern(Pattern pattern) {
     update();
 }
 
+void MapView::setHold(float radius, bool ccw) {
+    if (plan_.hold_radius == radius && plan_.hold_ccw == ccw) {
+        return;
+    }
+    constexpr int kHoldEdit = -100;  // a run of hold presses undoes in one step, like altitude
+    if (alt_edit_wp_ != kHoldEdit) {
+        pushUndo();
+        alt_edit_wp_ = kHoldEdit;
+    }
+    plan_.hold_radius = radius;
+    plan_.hold_ccw = ccw;
+    emit planChanged();
+    update();
+}
+
 void MapView::insertAfter(int index) {
     const int n = static_cast<int>(plan_.wps.size());
     if (index < 0 || index >= n) {
@@ -1214,11 +1229,24 @@ void MapView::paintRoute(QPainter& p, const MissionPlan& plan, const QColor& c, 
     // the final hold: one point, or the end of a one-way route, is circled
     const bool ends_in_hold = pts.size() == 1 || (pts.size() > 1 && plan.pattern == Pattern::OneWay);
     if (ends_in_hold && !compact_) {
+        // the hold circle at its real size, dashes marching in its direction
         const QPointF sp = toScreen(pts.back().lat, pts.back().lon);
-        QPen ring(alpha(c, 0.7), 1.5, Qt::DashLine);
-        p.setPen(ring);
-        p.setBrush(Qt::NoBrush);
-        p.drawEllipse(sp, 30, 30);
+        const double r_m = plan.hold_radius > 0.0f ? plan.hold_radius : default_loiter_radius_;
+        const double rpx = std::max(18.0, r_m / metersPerPixel());
+        if (circleVisible(sp, rpx, QRectF(rect()).adjusted(-40, -40, 40, 40))) {
+            QPen ring(alpha(c, 0.75), 1.6, Qt::CustomDashLine);
+            ring.setDashPattern({6, 5});
+            const double phase = reducedMotion() ? 0.0 : std::fmod(time_ * 10.0, 11.0);
+            ring.setDashOffset(plan.hold_ccw ? phase : -phase);
+            p.setPen(ring);
+            p.setBrush(Qt::NoBrush);
+            p.drawEllipse(sp, rpx, rpx);
+            // a chevron at the top shows the direction of the turn
+            const QPointF top = sp + QPointF(0, -rpx);
+            const double dx = plan.hold_ccw ? -7.0 : 7.0;
+            p.setPen(QPen(alpha(c, 0.9), 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            p.drawPolyline(QPolygonF{top + QPointF(-dx, -6), top + QPointF(dx * 0.3, 0), top + QPointF(-dx, 6)});
+        }
     }
 
     if (compact_) {
@@ -1569,7 +1597,7 @@ void MapView::paintOverlayChrome(QPainter& p) {
 
     // mode hint
     if (mode_ == Mode::Guide) {
-        const QString text = QStringLiteral("GUIDE · tap the map to send the aircraft");
+        const QString text = QStringLiteral("FLY TO · tap the map to send the aircraft");
         const QFont f = labelFont(11);
         const double w = QFontMetricsF(f).horizontalAdvance(text) + 30;
         const QRectF box(width() / 2.0 - w / 2.0, 70, w, 26);

@@ -61,6 +61,10 @@ enum class Pattern { Loop, BackForth, OneWay };
 struct MissionPlan {
     std::vector<UserWaypoint> wps;      // route points, each with its own altitude
     Pattern pattern = Pattern::Loop;
+    // The final hold (the end of a one-way route, or a one-point route):
+    // circle radius (0 = the autopilot's WP_LOITER_RAD) and direction.
+    float hold_radius = 0.0f;
+    bool hold_ccw = false;
     // Separate landing point. Its alt_rel is the approach altitude: the
     // aircraft spirals down to it on the wing, then back-transitions and
     // descends vertically from there.
@@ -121,6 +125,7 @@ LandingApproach computeLandingApproach(const UserWaypoint& land, const ApproachI
 //                (n >= 3; with n == 2 it is the same flight as Loop)
 //     OneWay     WAYPOINT w1..wn-1, LOITER_UNLIM at wn (no jump)
 //     n == 1     LOITER_UNLIM at the point, whatever the pattern
+//     (a LOITER_UNLIM carries the hold: param3 = +-hold_radius, - = CCW)
 //   then, when plan.land is set:
 //   +0         DO_LAND_START at plan.land: with RTL_AUTOLAND = 2 every RTL
 //              (failsafes included) jumps here and flies the same landing as
@@ -159,6 +164,9 @@ int landSeq(const std::vector<MissionItem>& items);
 // item is not a route point (home, takeoff, jump, approach, land). The way
 // back of a back-and-forth maps to the point it revisits.
 int seqToWaypointIndex(const std::vector<MissionItem>& items, int seq);
+
+// The plan has a final hold (one-way end or a single point): its index in wps, else -1.
+int holdIndex(const MissionPlan& plan);
 
 // Horizontal length of one lap (wp1 -> ... -> wpN -> wp1), metres.
 double lapLength(const std::vector<UserWaypoint>& wps);

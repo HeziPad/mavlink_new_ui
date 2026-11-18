@@ -153,17 +153,24 @@ std::vector<MissionItem> buildLoopMission(double home_lat, double home_lon, doub
 
     items.push_back(located(mav::kCmdNavVtolTakeoff, home_lat, home_lon, takeoff_alt));
 
+    // the final hold: param3 = radius (0 = WP_LOITER_RAD), negative = CCW
+    auto hold = [&](const UserWaypoint& wp) {
+        MissionItem it = located(mav::kCmdNavLoiterUnlim, wp.lat, wp.lon, wp.alt_rel);
+        const float r = std::max(0.0f, plan.hold_radius);
+        it.param3 = plan.hold_ccw ? -(r > 0.0f ? r : 1.0f) : r;  // -1: CCW at the default radius
+        return it;
+    };
     if (wps.size() == 1) {
         // a one-point "loop" would re-reach the same waypoint every cycle;
         // circle it on the wing instead
-        items.push_back(located(mav::kCmdNavLoiterUnlim, wps[0].lat, wps[0].lon, wps[0].alt_rel));
+        items.push_back(hold(wps[0]));
     } else if (plan.pattern == Pattern::OneWay) {
         // fly the route once, then circle the last point on the wing (the
         // lift rotors are for takeoff and landing only)
         for (size_t i = 0; i + 1 < wps.size(); ++i) {
             items.push_back(located(mav::kCmdNavWaypoint, wps[i].lat, wps[i].lon, wps[i].alt_rel));
         }
-        items.push_back(located(mav::kCmdNavLoiterUnlim, wps.back().lat, wps.back().lon, wps.back().alt_rel));
+        items.push_back(hold(wps.back()));
     } else {
         for (const auto& wp : wps) {
             items.push_back(located(mav::kCmdNavWaypoint, wp.lat, wp.lon, wp.alt_rel));
@@ -216,6 +223,10 @@ MissionPlan extractPlan(const std::vector<MissionItem>& items) {
         if (isLoopPoint(it)) {
             if (plan.wps.size() < shape.points) {  // the way back of a back-and-forth repeats them
                 plan.wps.push_back({it.lat(), it.lon(), it.z});
+            }
+            if (it.command == mav::kCmdNavLoiterUnlim) {
+                plan.hold_ccw = it.param3 < 0.0f;
+                plan.hold_radius = std::abs(it.param3) > 1.0f ? std::abs(it.param3) : 0.0f;
             }
         } else if (isLand(it) && !plan.land && (it.x != 0 || it.y != 0)) {
             // approach altitude: from the approach circle when there is one
@@ -337,6 +348,13 @@ double lapLength(const std::vector<UserWaypoint>& wps) {
         total += geo::distance(a.lat, a.lon, b.lat, b.lon);
     }
     return total;
+}
+
+int holdIndex(const MissionPlan& plan) {
+    if (plan.wps.size() == 1) {
+        return 0;
+    }
+    return plan.pattern == Pattern::OneWay && plan.wps.size() > 1 ? static_cast<int>(plan.wps.size()) - 1 : -1;
 }
 
 double routeLength(const MissionPlan& plan) {

@@ -481,7 +481,7 @@ void CameraView::paintHud(QPainter& p) {
     }
 
     if (guide_) {
-        const QString text = QStringLiteral("GUIDE · tap the ground to send the aircraft");
+        const QString text = QStringLiteral("FLY TO · tap the ground to send the aircraft");
         const QFont fnt = labelFont(11);
         const double w = QFontMetricsF(fnt).horizontalAdvance(text) + 30;
         const QRectF box(c.x() - w / 2, 156, w, 26);

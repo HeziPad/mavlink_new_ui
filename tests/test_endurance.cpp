@@ -2,6 +2,9 @@
 #include "core/endurance.hpp"
 #include "core/geo.hpp"
 
+#include <algorithm>
+#include <cmath>
+
 using namespace gcs;
 using namespace gcs::endurance;
 
@@ -130,20 +133,59 @@ static void testTracker() {
         t.addSample(time, 10.0, Phase::Cruise);
     }
     CHECK_NEAR(t.cruiseAmps(), 10.0, 1e-6);
-    // a climb: the fast average shows it at once
-    for (int i = 0; i < 5; ++i, time += 2.0) {
+    CHECK(t.cruiseAmps() > 9.0 && t.cruiseAmps() < 10.5);  // converging on 10 A
+    for (int i = 0; i < 300; ++i, time += 2.0) {
+        t.addSample(time, 10.0, Phase::Cruise);
+    }
+    CHECK_NEAR(t.cruiseAmps(), 10.0, 0.05);
+    // a 60 s climb at double the current barely moves it
+    for (int i = 0; i < 30; ++i, time += 2.0) {
         t.addSample(time, 20.0, Phase::Cruise);
     }
-    CHECK(t.cruiseAmps() > 14.0);
-    // ... and a lull after it doesn't drop it below the slow average
-    for (int i = 0; i < 5; ++i, time += 2.0) {
-        t.addSample(time, 5.0, Phase::Cruise);
-    }
-    CHECK(t.cruiseAmps() > 9.0);
+    CHECK(t.cruiseAmps() < 13.0);
     // other phases don't count
     const double before = t.cruiseAmps();
     t.addSample(time, 100.0, Phase::Other);
     CHECK_NEAR(t.cruiseAmps(), before, 1e-9);
+}
+
+static void testFilter() {
+    // steady: counts down 1 s per s
+    TimeLeftFilter f;
+    double raw = 900.0;
+    f.update(raw, 0.0);
+    for (int i = 1; i <= 30; ++i) {
+        raw -= 2.0;
+        f.update(raw, 2.0 * i);
+    }
+    CHECK_NEAR(f.value(), raw, 1e-6);
+    // a 60 s dip of 200 s in the raw estimate (a climb), then back
+    double t = 60.0;
+    double worst = 0.0;  // the shown value against the undipped estimate
+    for (int i = 0; i < 30; ++i) {
+        t += 2.0;
+        raw -= 2.0;
+        worst = std::min(worst, f.update(raw - 200.0, t) - raw);
+    }
+    for (int i = 0; i < 60; ++i) {
+        t += 2.0;
+        raw -= 2.0;
+        f.update(raw, t);
+    }
+    CHECK(worst > -70.0);                 // about a quarter of the swing shows
+    CHECK(std::abs(f.value() - raw) < 60.0);  // and it settles back
+
+    // Critical comes from the raw estimate, not the shown value
+    Estimate e;
+    e.valid = true;
+    e.level = Level::Critical;
+    CHECK(levelFor(e, 1000.0) == Level::Critical);
+    e.level = Level::None;
+    CHECK(levelFor(e, 1000.0) == Level::None);
+    CHECK(levelFor(e, 200.0) == Level::Caution);
+    CHECK(levelFor(e, -1.0) == Level::Warning);
+    e.valid = false;
+    CHECK(levelFor(e, -1.0) == Level::None);
 }
 
 static void testLatch() {
@@ -177,6 +219,7 @@ int main() {
     testReturnCost();
     testEstimate();
     testTracker();
+    testFilter();
     testLatch();
     testText();
     return TEST_MAIN_RESULT();

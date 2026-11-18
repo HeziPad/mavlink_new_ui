@@ -10,8 +10,6 @@ namespace gcs::endurance {
 
 namespace {
 
-constexpr double kSlowTau = 60.0;  // s
-constexpr double kFastTau = 15.0;  // s
 constexpr double kMaxGap = 10.0;   // s; a longer gap between samples restarts the step
 
 double mahOf(double amps, double seconds) {
@@ -41,11 +39,10 @@ void CurrentTracker::addSample(double t, double amps, Phase phase) {
         return;
     }
     if (phase == Phase::Cruise) {
-        if (cruise_s_ <= 0.0 && slow_ <= 0.0) {
-            slow_ = fast_ = amps;
+        if (cruise_s_ <= 0.0 && avg_ <= 0.0) {
+            avg_ = amps;
         } else {
-            slow_ += (amps - slow_) * (1.0 - std::exp(-dt / kSlowTau));
-            fast_ += (amps - fast_) * (1.0 - std::exp(-dt / kFastTau));
+            avg_ += (amps - avg_) * (1.0 - std::exp(-dt / kCruiseTau));
         }
         cruise_s_ += dt;
     } else if (phase == Phase::Hover) {
@@ -55,7 +52,7 @@ void CurrentTracker::addSample(double t, double amps, Phase phase) {
 }
 
 double CurrentTracker::cruiseAmps() const {
-    return cruise_s_ >= kLearnS ? std::max(slow_, fast_) : -1.0;
+    return cruise_s_ >= kLearnS ? avg_ : -1.0;
 }
 
 double CurrentTracker::hoverAmps() const {
@@ -160,6 +157,33 @@ Estimate estimate(const Inputs& in) {
         e.level = Level::Caution;
     }
     return e;
+}
+
+// ---- smoothing --------------------------------------------------------------------------
+
+double TimeLeftFilter::update(double raw_s, double t) {
+    if (t_ < 0.0 || t < t_ || t - t_ > 60.0) {
+        value_ = raw_s;  // first estimate, or a long gap: start from it
+    } else {
+        const double dt = t - t_;
+        const double predicted = value_ - dt;  // the clock ran down meanwhile
+        value_ = predicted + (raw_s - predicted) * (1.0 - std::exp(-dt / kShownTau));
+    }
+    t_ = t;
+    return value_;
+}
+
+Level levelFor(const Estimate& e, double shown_time_left_s) {
+    if (!e.valid) {
+        return Level::None;
+    }
+    if (e.level == Level::Critical) {
+        return Level::Critical;
+    }
+    if (shown_time_left_s <= 0.0) {
+        return Level::Warning;
+    }
+    return shown_time_left_s < kCautionS ? Level::Caution : Level::None;
 }
 
 // ---- hysteresis ------------------------------------------------------------------------
