@@ -50,6 +50,8 @@ add_library(gcs_core STATIC
     src/core/speed_mode.cpp
     src/core/tiles.cpp
     src/core/vehicle_state.cpp
+    src/link/serial_transport.cpp
+    src/link/udp_transport.cpp
     ${GCS_LINK_SOURCES}
 )
 target_include_directories(gcs_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -107,7 +109,7 @@ endif()
 
 # ---- tests ----------------------------------------------------------------------
 enable_testing()
-foreach(name geo altitude coords endurance flight_status mission_builder mission_transfer command_sender lift_rotors health orbit_trim preflight offline_map)
+foreach(name geo altitude coords endurance flight_status mission_builder mission_transfer command_sender lift_rotors health orbit_trim preflight offline_map transport)
     add_executable(test_${name} tests/test_${name}.cpp)
     target_link_libraries(test_${name} PRIVATE gcs_core)
     gcs_warnings(test_${name})

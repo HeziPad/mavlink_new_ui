@@ -18,7 +18,8 @@ namespace gcs::ui {
 
 // Touch-first modal for typed input: coordinates (in the format chosen in
 // Settings: decimal / DMS / UTM), altitudes (ASL / AGL / AFL, checked against
-// the ground at the point) and hold times. Each number has its own box with a
+// the ground at the point), hold times, and the link settings (IP addresses,
+// port numbers). Each number has its own box with a
 // visible cursor; tap a box (or a place in it) to move there. Letters are
 // never typed: hemispheres are toggle buttons. Full-window, dims what's
 // behind. A physical keyboard types into the focused box (digits, '.',
@@ -51,6 +52,21 @@ public:
     // A duration in minutes and seconds, 0..max_s; 0 = none ("fly through").
     void openDuration(const QString& title, double seconds, double max_s, std::function<void(double seconds)> done);
 
+    // An IPv4 address and a port: four boxes and a port box ('.' moves on).
+    // Chips fill in common choices; a chip with an empty host answers at once
+    // with ("", 0) (e.g. "OFF").
+    struct AddressChip {
+        QString label;
+        QString host;
+        int port = 0;
+    };
+    void openAddress(const QString& title, const QString& host, int port, const std::vector<AddressChip>& chips,
+                     std::function<void(const QString& host, int port)> done);
+
+    // A whole number in [min, max], e.g. a port; chips are (label, value).
+    void openNumber(const QString& title, const QString& name, int value, int min, int max,
+                    const std::vector<std::pair<QString, int>>& chips, std::function<void(int)> done);
+
     bool isOpen() const { return isVisible(); }
     void close();
 
@@ -68,7 +84,7 @@ protected:
     bool eventFilter(QObject* obj, QEvent* e) override;
 
 private:
-    enum class Kind { Coordinate, Altitude, Duration };
+    enum class Kind { Coordinate, Altitude, Duration, Address, Number };
     // one number: its box, and the length at which typing moves on to the next box (0 = never)
     struct Box {
         QLineEdit* edit = nullptr;
@@ -87,7 +103,7 @@ private:
     void addLabel(QWidget* row, const QString& text, const char* name = "padUnit");
     void addBox(QWidget* row, int chars, int decimals, int advance_at, const QString& placeholder);
     void addToggle(QWidget* row, const QString& a, const QString& b, bool first);
-    void setPresets(const std::vector<std::pair<QString, double>>& chips);  // label, seconds
+    void setPresets(const std::vector<std::pair<QString, std::function<void()>>>& chips);
     void focusBox(int i);
     int activeIndex() const;
     QString boxText(int i) const;
@@ -99,6 +115,8 @@ private:
     void refreshCoordinate(QString& preview, bool& ok);
     void refreshDuration(QString& preview, bool& ok);
     void refreshAltitude(QString& preview, bool& ok);
+    void refreshAddress(QString& preview, bool& ok);
+    void refreshNumber(QString& preview, bool& ok);
     void accept();
     void layoutCard();
     altitude::Grounds grounds() const;
@@ -114,6 +132,11 @@ private:
     std::function<void(double, double)> coord_done_;
     std::function<void(double, int)> alt_done_;
     std::function<void(double)> dur_done_;
+    std::function<void(const QString&, int)> addr_done_;
+    std::function<void(int)> num_done_;
+    int min_int_ = 0, max_int_ = 0;
+    std::optional<std::pair<QString, int>> address_;  // a valid address
+    std::optional<int> number_;                       // a valid number
     double max_value_ = 0.0;
     std::optional<double> value_;  // a valid duration (s)
     std::optional<coords::LatLon> parsed_;

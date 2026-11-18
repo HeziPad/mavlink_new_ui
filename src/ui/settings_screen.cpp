@@ -49,6 +49,10 @@ SettingsScreen::SettingsScreen(QWidget* parent) : QWidget(parent) {
     for (int pct : reserveChoices()) {
         reserve_.labels << QStringLiteral("%1 %").arg(pct);
     }
+    link_type_.labels = {QStringLiteral("UDP · NETWORK"), QStringLiteral("SERIAL · USB / RADIO")};
+    for (int b : link::serialBauds()) {
+        baud_.labels << QString::number(b);
+    }
     trail_len_.labels = {QStringLiteral("30 S"), QStringLiteral("1 MIN"), QStringLiteral("2 MIN"),
                          QStringLiteral("5 MIN"), QStringLiteral("10 MIN"), QStringLiteral("ALL")};
     hide();
@@ -68,7 +72,10 @@ void SettingsScreen::open(const Values& v) {
     const auto& rc = reserveChoices();
     const auto rit = std::find(rc.begin(), rc.end(), v.reserve_pct);
     reserve_.selected = rit != rc.end() ? static_cast<int>(rit - rc.begin()) : 1;
-    for (Segmented* s : {&alt_, &speed_, &coord_, &trail_on_, &trail_len_, &labels_, &online_, &reserve_}) {
+    setLink(v.link);
+    applied_ = v.link;
+    refreshPorts();
+    for (Segmented* s : {&alt_, &speed_, &coord_, &trail_on_, &trail_len_, &labels_, &online_, &reserve_, &link_type_, &baud_}) {
         s->knob = s->selected;
     }
     confirm_ = Confirm::None;
@@ -117,8 +124,13 @@ void SettingsScreen::tick(double dt) {
         return;
     }
     const double k = reducedMotion() ? 1.0 : 1.0 - std::exp(-16.0 * dt);
-    for (Segmented* s : {&alt_, &speed_, &coord_, &trail_on_, &trail_len_, &labels_, &online_, &reserve_}) {
+    for (Segmented* s : {&alt_, &speed_, &coord_, &trail_on_, &trail_len_, &labels_, &online_, &reserve_, &link_type_, &baud_}) {
         s->knob += (s->selected - s->knob) * k;
+    }
+    // the serial port list follows what is plugged in
+    ports_age_ += dt;
+    if (category_ == kLink && link_.serial && ports_age_ > 2.0 && confirm_ == Confirm::None) {
+        refreshPorts();
     }
     cat_knob_ += (category_ - cat_knob_) * k;
     flash_ = std::max(0.0, flash_ - dt * 2.0);
@@ -127,7 +139,8 @@ void SettingsScreen::tick(double dt) {
 
 QRectF SettingsScreen::panelRect() const {
     const double w = std::min(860.0, width() - 48.0);
-    const double h = std::min(category_ == kOffline || category_ == kUnits ? 560.0 : 480.0, height() - 80.0);
+    const double want = category_ == kLink ? 640.0 : (category_ == kOffline || category_ == kUnits ? 560.0 : 480.0);
+    const double h = std::min(want, height() - 80.0);
     return {(width() - w) / 2.0, (height() - h) / 2.0, w, h};
 }
 
@@ -153,7 +166,12 @@ void SettingsScreen::mousePressEvent(QMouseEvent* e) {
     if (confirm_ != Confirm::None) {
         // the modal owns every tap until it's answered
         if (confirm_yes_.contains(pos)) {
-            confirm_ == Confirm::ClearDetail ? emit offlineClearDetail() : emit offlineDeleteAll();
+            if (confirm_ == Confirm::Relink) {
+                applied_ = link_;
+                emit linkConnect(link_);
+            } else {
+                confirm_ == Confirm::ClearDetail ? emit offlineClearDetail() : emit offlineDeleteAll();
+            }
             confirm_ = Confirm::None;
         } else if (confirm_no_.contains(pos)) {
             confirm_ = Confirm::None;
@@ -172,7 +190,9 @@ void SettingsScreen::mousePressEvent(QMouseEvent* e) {
             return;
         }
     }
-    if (category_ == kUnits) {
+    if (category_ == kLink) {
+        pressLink(pos);
+    } else if (category_ == kUnits) {
         if (pressSegmented(alt_, pos)) {
             emit altUnitChanged(alt_.selected);
         } else if (pressSegmented(speed_, pos)) {
@@ -276,7 +296,9 @@ void SettingsScreen::paintEvent(QPaintEvent*) {
     drawText(p, QRectF(pr.left() + 34, pr.top() + 18, 400, 34), Qt::AlignLeft | Qt::AlignVCenter,
              QStringLiteral("SETTINGS"), titleFont(26), kText);
     drawText(p, QRectF(pr.left() + 36, pr.top() + 50, 400, 16), Qt::AlignLeft | Qt::AlignVCenter,
-             QStringLiteral("changes apply immediately"), labelFont(10), kMuted);
+             category_ == kLink ? QStringLiteral("link changes apply when you press connect")
+                                : QStringLiteral("changes apply immediately"),
+             labelFont(10), kMuted);
 
     close_rect_ = QRectF(pr.right() - 72, pr.top() + 16, 52, 52);
     drawGlass(p, chamferPath(close_rect_, 8), kCyan, 0.6, kGlassDeep);
@@ -287,7 +309,7 @@ void SettingsScreen::paintEvent(QPaintEvent*) {
     const QRectF cat_col(pr.left() + 24, top, 190, pr.bottom() - top - 24);
     p.setPen(QPen(alpha(kCyan, 0.18), 1));
     p.drawLine(QPointF(cat_col.right() + 16, cat_col.top()), QPointF(cat_col.right() + 16, cat_col.bottom()));
-    const char* names[kCategories] = {"UNITS", "MAP", "BATTERY", "OFFLINE"};
+    const char* names[kCategories] = {"CONNECTION", "UNITS", "MAP", "BATTERY", "OFFLINE"};
     cat_rects_.clear();
     for (int i = 0; i < kCategories; ++i) {
         const QRectF item(cat_col.left(), cat_col.top() + i * 60, cat_col.width(), 52);
@@ -305,7 +327,9 @@ void SettingsScreen::paintEvent(QPaintEvent*) {
 
     // ---- rows of the selected category ----------------------------------------------------
     const QRectF body(cat_col.right() + 40, top, pr.right() - cat_col.right() - 64, cat_col.height());
-    if (category_ == kUnits) {
+    if (category_ == kLink) {
+        paintLink(p, body);
+    } else if (category_ == kUnits) {
         paintRow(p, body, QStringLiteral("ALTITUDE"),
                  QStringLiteral("HUD tape, telemetry bar, map labels, panels and steppers"));
         paintSegmented(p, QRectF(body.left(), body.top() + 50, std::min(body.width(), 360.0), 54), alt_);
@@ -440,11 +464,15 @@ void SettingsScreen::paintConfirm(QPainter& p, const QRectF& panel) {
     }
     p.fillRect(panel, alpha(kBg, 0.75));
     const QRectF box(panel.center().x() - 260, panel.center().y() - 110, 520, 220);
-    drawGlass(p, chamferPath(box, 14), kRed, 0.9, alpha(kGlassDeep, 0.98));
+    const bool relink = confirm_ == Confirm::Relink;
+    const QColor tone = relink ? kAmber : kRed;
+    drawGlass(p, chamferPath(box, 14), tone, 0.9, alpha(kGlassDeep, 0.98));
     drawText(p, QRectF(box.left() + 28, box.top() + 20, box.width() - 56, 30), Qt::AlignLeft | Qt::AlignVCenter,
-             QStringLiteral("ARE YOU SURE?"), titleFont(20), kRed);
+             relink ? QStringLiteral("SWITCH LINK IN FLIGHT?") : QStringLiteral("ARE YOU SURE?"), titleFont(20), tone);
     const QString text =
-        confirm_ == Confirm::ClearDetail
+        relink ? QStringLiteral("The aircraft is armed. Telemetry and control stop until it answers on the new link. "
+                                "It keeps flying what it is doing; a long silence triggers its GCS failsafe.")
+        : confirm_ == Confirm::ClearDetail
             ? QStringLiteral("Delete all full-detail satellite and ground height (%1)? The country map, the street map "
                              "and the country satellite stay.")
                   .arg(sizeText(off_.area_bytes))
@@ -456,7 +484,187 @@ void SettingsScreen::paintConfirm(QPainter& p, const QRectF& panel) {
     confirm_no_ = QRectF(box.left() + 28, box.bottom() - 74, 200, 52);
     confirm_yes_ = QRectF(box.right() - 228, box.bottom() - 74, 200, 52);
     paintAction(p, confirm_no_, QStringLiteral("CANCEL"), kCyan, true);
-    paintAction(p, confirm_yes_, QStringLiteral("DELETE"), kRed, true);
+    paintAction(p, confirm_yes_, relink ? QStringLiteral("SWITCH") : QStringLiteral("DELETE"), tone, true);
+}
+
+// ---- CONNECTION ------------------------------------------------------------------------------
+
+void SettingsScreen::setLink(const Link& l) {
+    link_ = l;
+    link_type_.selected = l.serial ? 1 : 0;
+    const auto& bauds = link::serialBauds();
+    const auto it = std::find(bauds.begin(), bauds.end(), l.baud);
+    baud_.selected = it != bauds.end() ? static_cast<int>(it - bauds.begin()) : 0;
+    update();
+}
+
+void SettingsScreen::setLinkStatus(const QString& text, const QColor& color, bool armed) {
+    if (text != link_status_ || color != link_status_color_ || armed != armed_) {
+        link_status_ = text;
+        link_status_color_ = color;
+        armed_ = armed;
+        if (category_ == kLink && isVisible()) {
+            update();
+        }
+    }
+}
+
+void SettingsScreen::refreshPorts() {
+    ports_ = link::listSerialPorts();
+    ports_age_ = 0.0;
+    // nothing chosen yet: take the likeliest autopilot
+    if (link_.serial_port.isEmpty() && !ports_.empty()) {
+        link_.serial_port = QString::fromStdString(ports_.front().path);
+    }
+}
+
+bool SettingsScreen::pressLink(const QPointF& pos) {
+    if (pressSegmented(link_type_, pos)) {
+        link_.serial = link_type_.selected == 1;
+        if (link_.serial) {
+            refreshPorts();
+        }
+        return true;
+    }
+    if (connect_rect_.contains(pos)) {
+        if (armed_) {
+            confirm_ = Confirm::Relink;
+        } else {
+            applied_ = link_;
+            emit linkConnect(link_);
+        }
+        return true;
+    }
+    if (video_rect_.contains(pos)) {
+        emit linkEdit(kVideoField);
+        return true;
+    }
+    if (!link_.serial) {
+        if (listen_rect_.contains(pos)) {
+            emit linkEdit(kListenField);
+            return true;
+        }
+        if (sendto_rect_.contains(pos)) {
+            emit linkEdit(kSendToField);
+            return true;
+        }
+        return false;
+    }
+    if (refresh_rect_.contains(pos)) {
+        refreshPorts();
+        flash_ = 1.0;
+        return true;
+    }
+    for (size_t i = 0; i < port_rects_.size() && i < ports_.size(); ++i) {
+        if (port_rects_[i].contains(pos)) {
+            link_.serial_port = QString::fromStdString(ports_[i].path);
+            flash_ = 1.0;
+            return true;
+        }
+    }
+    if (pressSegmented(baud_, pos)) {
+        link_.baud = link::serialBauds()[baud_.selected];
+        return true;
+    }
+    return false;
+}
+
+void SettingsScreen::paintField(QPainter& p, const QRectF& r, const QString& name, const QString& value,
+                                const QString& note) {
+    drawGlass(p, chamferPath(r, 8), kCyan, 0.45, alpha(kBg, 0.6));
+    drawText(p, QRectF(r.left() + 16, r.top(), 130, r.height()), Qt::AlignLeft | Qt::AlignVCenter, name,
+             labelFont(12), kMuted);
+    const QFont vf = monoFont(15, true);
+    const double vx = r.left() + 150;
+    drawText(p, QRectF(vx, r.top() + 4, r.width() - 230, 26), Qt::AlignLeft | Qt::AlignVCenter, value, vf, kText);
+    drawText(p, QRectF(vx, r.top() + 28, r.width() - 230, 18), Qt::AlignLeft | Qt::AlignVCenter, note,
+             labelFont(9.5, false), kMuted);
+    drawText(p, r.adjusted(0, 0, -16, 0), Qt::AlignRight | Qt::AlignVCenter, QStringLiteral("EDIT"), labelFont(12),
+             kCyan);
+}
+
+void SettingsScreen::paintLink(QPainter& p, const QRectF& body) {
+    paintRow(p, body, QStringLiteral("LINK"),
+             QStringLiteral("how this computer reaches the aircraft · applied when you press CONNECT"));
+    paintSegmented(p, QRectF(body.left(), body.top() + 48, std::min(body.width(), 540.0), 52), link_type_);
+    double y = body.top() + 116;
+    const double fh = 54;
+    listen_rect_ = sendto_rect_ = refresh_rect_ = QRectF();
+    port_rects_.clear();
+    if (!link_.serial) {
+        listen_rect_ = QRectF(body.left(), y, body.width(), fh);
+        const QString where = link_.host == QStringLiteral("0.0.0.0")      ? QStringLiteral("all networks of this computer")
+                              : link_.host.startsWith(QStringLiteral("127.")) ? QStringLiteral("this computer only (simulator)")
+                                                                              : QStringLiteral("this address only");
+        paintField(p, listen_rect_, QStringLiteral("LISTEN ON"), QStringLiteral("%1 : %2").arg(link_.host).arg(link_.port),
+                   where + QStringLiteral(" · telemetry port"));
+        y += fh + 10;
+        sendto_rect_ = QRectF(body.left(), y, body.width(), fh);
+        paintField(p, sendto_rect_, QStringLiteral("SEND TO"),
+                   link_.remote_host.isEmpty() ? QStringLiteral("—")
+                                               : QStringLiteral("%1 : %2").arg(link_.remote_host).arg(link_.remote_port),
+                   link_.remote_host.isEmpty() ? QStringLiteral("off: answers whoever sends telemetry (usual)")
+                                               : QStringLiteral("for radios that wait for the GCS to talk first"));
+        y += fh + 10;
+    } else {
+        drawText(p, QRectF(body.left(), y, 200, 20), Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("PORT"),
+                 labelFont(12), kText);
+        refresh_rect_ = QRectF(body.right() - 130, y - 8, 130, 36);
+        paintAction(p, refresh_rect_, QStringLiteral("⟳ REFRESH"), kCyan, true);
+        y += 34;
+        const int rows = 3;
+        const double rh = 40;
+        if (ports_.empty()) {
+            const QRectF r(body.left(), y, body.width(), rh * 2);
+            drawGlass(p, chamferPath(r, 8), kMuted, 0.35, alpha(kBg, 0.5));
+            drawText(p, r.adjusted(16, 0, -16, 0), Qt::AlignLeft | Qt::AlignVCenter | Qt::TextWordWrap,
+                     QStringLiteral("No serial ports found. Plug in the Pixhawk (USB) or the telemetry radio; "
+                                    "the list updates by itself."),
+                     labelFont(11, false), kMuted);
+        }
+        for (int i = 0; i < rows && i < static_cast<int>(ports_.size()); ++i) {
+            const QRectF r(body.left(), y + i * (rh + 6), body.width(), rh);
+            port_rects_.push_back(r);
+            const auto& port = ports_[static_cast<size_t>(i)];
+            const bool sel = QString::fromStdString(port.path) == link_.serial_port;
+            drawGlass(p, chamferPath(r, 8), sel ? kCyan : kMuted, sel ? 0.9 : 0.35,
+                      alpha(sel ? kCyan : kBg, sel ? 0.16 : 0.5));
+            drawText(p, r.adjusted(16, 0, -16, 0), Qt::AlignLeft | Qt::AlignVCenter,
+                     QString::fromStdString(port.label), labelFont(12.5, sel), sel ? kCyan : kText);
+            drawText(p, r.adjusted(16, 0, -16, 0), Qt::AlignRight | Qt::AlignVCenter,
+                     port.likely_autopilot ? QStringLiteral("AUTOPILOT") : QString::fromStdString(port.path),
+                     monoFont(10), port.likely_autopilot ? kGreen : kMuted);
+        }
+        // the chosen port while it is unplugged
+        const bool chosen_listed =
+            std::any_of(ports_.begin(), ports_.end(),
+                        [&](const link::SerialPortInfo& pi) { return QString::fromStdString(pi.path) == link_.serial_port; });
+        y += rows * (rh + 6);
+        if (!chosen_listed && !link_.serial_port.isEmpty()) {
+            drawText(p, QRectF(body.left(), y - 4, body.width(), 18), Qt::AlignLeft | Qt::AlignVCenter,
+                     QStringLiteral("chosen: %1 (not plugged in)").arg(link_.serial_port), labelFont(10, false), kAmber);
+        }
+        y += 16;
+        drawText(p, QRectF(body.left(), y, 200, 18), Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("SPEED (BAUD)"),
+                 labelFont(12), kText);
+        drawText(p, QRectF(body.left() + 140, y, body.width() - 140, 18), Qt::AlignLeft | Qt::AlignVCenter,
+                 QStringLiteral("SiK radio: 57600 · USB cable: any (ignored)"), labelFont(10, false), kMuted);
+        paintSegmented(p, QRectF(body.left(), y + 24, body.width(), 46), baud_);
+        y += 82;
+    }
+    video_rect_ = QRectF(body.left(), y, body.width(), fh);
+    paintField(p, video_rect_, QStringLiteral("VIDEO PORT"), QString::number(link_.video_port),
+               QStringLiteral("UDP, RTP / H.264 from the camera"));
+
+    // ---- connect + status ----------------------------------------------------------------
+    connect_rect_ = QRectF(body.left(), body.bottom() - 54, 220, 52);
+    const bool dirty = link_ != applied_;
+    const QColor cc = dirty ? kAmber : kCyan;
+    paintAction(p, connect_rect_, dirty ? QStringLiteral("● CONNECT") : QStringLiteral("RECONNECT"), cc, true);
+    const QRectF st(connect_rect_.right() + 18, connect_rect_.top(), body.right() - connect_rect_.right() - 18, 52);
+    drawText(p, st, Qt::AlignLeft | Qt::AlignVCenter | Qt::TextWordWrap,
+             dirty ? QStringLiteral("changed: press CONNECT to use it") : link_status_, labelFont(11, false),
+             dirty ? kAmber : link_status_color_);
 }
 
 }  // namespace gcs::ui

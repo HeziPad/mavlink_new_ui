@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Game-style ground control station for an ArduPilot **QuadPlane**: C++17, Qt 6 Widgets, MAVLink v2 over UDP, optional GStreamer H.264 video. See `README.md` for prerequisites, run flags, controls and settings.
+Game-style ground control station for an ArduPilot **QuadPlane**: C++17, Qt 6 Widgets, MAVLink v2 over UDP or serial (USB / telemetry radio), optional GStreamer H.264 video. See `README.md` for prerequisites, run flags, controls and settings.
 
 ## Commands
 
@@ -10,7 +10,7 @@ Game-style ground control station for an ArduPilot **QuadPlane**: C++17, Qt 6 Wi
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo   # -DGCS_WITH_GSTREAMER=OFF to skip video
 cmake --build build
 ctest --test-dir build --output-on-failure      # all tests
-ctest --test-dir build -R mission_transfer      # one test (geo, endurance, mission_builder, mission_transfer, command_sender, lift_rotors, health, orbit_trim, preflight, offline_map)
+ctest --test-dir build -R mission_transfer      # one test (geo, endurance, mission_builder, mission_transfer, command_sender, lift_rotors, health, orbit_trim, preflight, offline_map, transport, ...)
 ./build/test_geo                                # or run a test binary directly
 ./build/mavlink_gcs_ui                          # listens on udp 127.0.0.1:14551
 ```
@@ -30,10 +30,10 @@ There is no linter; the build uses `-Wall -Wextra -Wpedantic` and should stay wa
 Three layers with a strict dependency direction: `core` ← `link` ← `ui`.
 
 - **`src/core/`**: pure C++, no Qt and no I/O. `VehicleState`, ArduPlane mode numbers and names, geo math including camera-ray-to-ground casting and the camera footprint, the mission builder, `health` (EKF/sensor/GPS/STATUSTEXT → plain-language advisories) and `OrbitTrim`.
-- **`src/link/`**: plain C++ plus POSIX sockets, also Qt-free. It is compiled together with core into the `gcs_core` static library, which is what the tests link against. `MavlinkClient` owns a single worker thread that owns the socket, parser, `MissionTransfer` state machine and `CommandSender` (retries and ACK handling). The UI thread only ever:
+- **`src/link/`**: plain C++, also Qt-free. It is compiled together with core into the `gcs_core` static library, which is what the tests link against. `MavlinkClient` owns a single worker thread that owns the `Transport` (`UdpTransport` or `SerialTransport`), parser, `MissionTransfer` state machine and `CommandSender` (retries and ACK handling). OS calls (sockets, termios) live only in the `*_transport.cpp` files. A transport that fails (port unplugged, autopilot rebooting) is reopened once a second. `reconfigure(Config)` swaps the link live (Settings → CONNECTION): it re-finds the vehicle and keeps its params and mission unless a different sysid answers. The worker loop waits at most 20 ms, so posted requests run within that (no wake fd). The UI thread only ever:
   - calls `snapshot()` to copy the latest `VehicleState`,
   - calls `pollEvents()` to drain `LinkEvent`s (command results, STATUSTEXTs, mission results),
-  - calls request methods (`setMode`, `runSequence`, `uploadMission`, `guidedGoto`, ...), which post closures that run on the worker.
+  - calls request methods (`setMode`, `runSequence`, `uploadMission`, `guidedGoto`, `reconfigure`, ...), which post closures that run on the worker.
 
   Keep it this way: don't touch worker-owned members from other threads.
 - **`src/ui/`**: Qt widgets, touch-first. Map touch is handled in `MapView::event`: one finger goes through the same `pointer*` path as the mouse, and two fingers pinch. In PiP mode touch is ignored, so Qt synthesises the click that `ViewHost` swaps on. Other widgets rely on Qt's touch→mouse synthesis. Keep targets ≥ 44–48 px and don't put information behind hover only. `MainWindow` drives everything from a 16 ms `PreciseTimer` `frame()` tick that snapshots state, drains events and updates widgets. Rendering is mostly custom `paintEvent` code (map, camera HUD, effects overlay), not stock widgets. `ViewHost` handles the full-bleed main view and the swappable PiP. `ControlDock` holds the five action buttons and their lock/reason logic. Map tiles come from `TileCache`:

@@ -1,5 +1,8 @@
 #pragma once
 
+#include "link/serial_transport.hpp"
+
+#include <QColor>
 #include <QPixmap>
 #include <QStringList>
 #include <QWidget>
@@ -18,7 +21,27 @@ class SettingsScreen : public QWidget {
     Q_OBJECT
 
 public:
+    // how the GCS reaches the aircraft (CONNECTION page)
+    struct Link {
+        bool serial = false;
+        QString host = QStringLiteral("0.0.0.0");  // UDP: listen here
+        int port = 14550;
+        QString remote_host;  // UDP: also send here from the start (empty = only reply)
+        int remote_port = 0;
+        QString serial_port;  // "/dev/ttyACM0", "COM4"
+        int baud = 57600;
+        int video_port = 5600;
+        bool operator==(const Link& o) const {
+            return serial == o.serial && host == o.host && port == o.port && remote_host == o.remote_host &&
+                   remote_port == o.remote_port && serial_port == o.serial_port && baud == o.baud &&
+                   video_port == o.video_port;
+        }
+        bool operator!=(const Link& o) const { return !(*this == o); }
+    };
+    enum LinkField { kListenField = 0, kSendToField = 1, kVideoField = 2 };
+
     struct Values {
+        Link link;
         int alt_unit = 0;     // units::Alt
         int speed_unit = 0;   // units::Speed
         int coord_format = 0; // coords::Fmt
@@ -47,6 +70,12 @@ public:
     };
     void setOffline(const Offline& o);
 
+    // the link being edited (not applied until CONNECT)
+    const Link& link() const { return link_; }
+    void setLink(const Link& l);
+    // what the link is doing now, shown under CONNECT; `armed` asks before switching
+    void setLinkStatus(const QString& text, const QColor& color, bool armed);
+
     explicit SettingsScreen(QWidget* parent);
 
     void open(const Values& v);
@@ -68,6 +97,8 @@ signals:
     void offlineChooseFolder();
     void onlineChanged(bool on);
     void labelsEnglishChanged(bool english);
+    void linkEdit(int field);              // LinkField: open the entry pad for it
+    void linkConnect(const Link& link);    // apply (confirmed when armed)
     void closed();
 
 protected:
@@ -75,7 +106,7 @@ protected:
     void mousePressEvent(QMouseEvent* e) override;
 
 private:
-    enum Category { kUnits = 0, kMap = 1, kBattery = 2, kOffline = 3, kCategories };
+    enum Category { kLink = 0, kUnits, kMap, kBattery, kOffline, kCategories };
     // a segmented control: one finger-sized cell per option, sliding highlight
     struct Segmented {
         QStringList labels;
@@ -89,6 +120,10 @@ private:
     void paintSegmented(QPainter& p, const QRectF& r, Segmented& seg);
     void paintRow(QPainter& p, const QRectF& r, const QString& title, const QString& sub);
     void paintOffline(QPainter& p, const QRectF& body);
+    void paintLink(QPainter& p, const QRectF& body);
+    void paintField(QPainter& p, const QRectF& r, const QString& name, const QString& value, const QString& note);
+    void refreshPorts();
+    bool pressLink(const QPointF& pos);
     void paintAction(QPainter& p, const QRectF& r, const QString& label, const QColor& c, bool enabled);
     bool pressSegmented(Segmented& seg, const QPointF& pos);
 
@@ -111,8 +146,20 @@ private:
     Segmented reserve_;
     Offline off_;
     QRectF country_rect_, area_rect_, clear_rect_, delete_rect_, folder_rect_;
+    // CONNECTION
+    Link link_;          // being edited
+    Link applied_;       // in use
+    Segmented link_type_;
+    Segmented baud_;
+    std::vector<link::SerialPortInfo> ports_;
+    double ports_age_ = 0.0;  // s since the list was read
+    std::vector<QRectF> port_rects_;
+    QRectF listen_rect_, sendto_rect_, video_rect_, connect_rect_, refresh_rect_;
+    QString link_status_;
+    QColor link_status_color_;
+    bool armed_ = false;
     // "are you sure?" over the panel
-    enum class Confirm { None, ClearDetail, DeleteAll } confirm_ = Confirm::None;
+    enum class Confirm { None, ClearDetail, DeleteAll, Relink } confirm_ = Confirm::None;
     QRectF confirm_yes_, confirm_no_;
     void paintConfirm(QPainter& p, const QRectF& panel);
 

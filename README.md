@@ -1,7 +1,8 @@
 # QuadPlane GCS
 
 A minimalist, game-style ground control station for an ArduPilot **QuadPlane**
-(4 lift rotors + pusher), talking MAVLink v2 over UDP. It has a full-bleed map or
+(4 lift rotors + pusher), talking MAVLink v2 over UDP or a serial port (a Pixhawk on USB, or a
+telemetry radio). It has a full-bleed map or
 camera with a swappable picture-in-picture, a compact telemetry strip, and five
 buttons. It is touch-first, with the mouse as an alternative.
 
@@ -24,18 +25,41 @@ builds, and the camera view shows the synthetic HUD only.
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build
-ctest --test-dir build        # geo, mission builder, mission transfer, command sender, lift rotors
+ctest --test-dir build        # all suites (geo, mission builder, mission transfer, transport, ...)
 ```
 
 ## Run
 
 ```sh
-./build/mavlink_gcs_ui                      # listens on udp 127.0.0.1:14551, video on 5600
+./build/mavlink_gcs_ui                      # the link chosen in Settings > CONNECTION (first run: udp 127.0.0.1:14551)
 ./build/mavlink_gcs_ui --udp 0.0.0.0:14550 --video-port 5600 --reduced-motion
+./build/mavlink_gcs_ui --serial /dev/ttyACM0            # Pixhawk on USB
+./build/mavlink_gcs_ui --serial /dev/ttyUSB0:57600      # SiK telemetry radio
 ```
 
-The GCS listens on the UDP port and replies to whichever address the vehicle
-sends from. Point the autopilot or MAVProxy output at it.
+### Connecting to the aircraft
+
+Open ⚙ Settings → **CONNECTION**, choose the link, and press **CONNECT**. It switches live, with no
+restart. The line beside the button says what the link is doing (CONNECTED, waiting for the
+aircraft, port not found…). Changing the link while armed asks first.
+
+- **SERIAL · USB / RADIO:** a Pixhawk on a USB cable, or a telemetry radio (SiK, RFD900). Pick the port from
+  the list, which updates as things are plugged in; autopilots are listed first and marked.
+  - **Baud:** 57600 for SiK radios. A USB cable ignores it.
+  - **Unplugging:** if the port disappears (USB unplugged, or the autopilot rebooting), the GCS
+    reopens it once a second until it is back.
+  - **Permissions (Linux):** opening the port needs the `dialout` group:
+    `sudo usermod -aG dialout $USER`, then log in again. If ModemManager grabs the port, run
+    `sudo systemctl disable --now ModemManager`.
+- **UDP · NETWORK:** WiFi/Ethernet radios, Herelink, a companion computer, MAVProxy, SITL.
+  - **LISTEN ON:** the address and telemetry port to listen on. `0.0.0.0` means all networks;
+    `127.0.0.1` means this computer only. The GCS replies to whichever address the vehicle sends from.
+  - **SEND TO** (optional): for radios or companions that wait for the GCS to talk first.
+- **VIDEO PORT:** the UDP port of the RTP/H.264 camera stream.
+
+Addresses and ports are typed on the entry pad. In an address, `.` moves to the next number.
+`--udp` / `--serial` / `--video-port` override the saved link for one run; what you CONNECT in the
+app is saved.
 
 If it feels slow, run it with `GCS_FPS=1`. Once a second it prints how often it
 redrew, its longest stall, and the attitude/position telemetry rates. That
@@ -421,7 +445,8 @@ degrees, D° M′ S″ and UTM (WGS84). Distances stay metric. `core/coords` als
 parses those formats, for coordinate inputs.
 
 `~/.config/mavlink_gcs_ui/mavlink_gcs_ui.conf` is created on first run.
-You can edit the link and video ports, takeoff, default waypoint and landing approach altitude,
+You can edit the link (`link/type` udp|serial, `link/host`, `link/port`, `link/remote_host`,
+`link/remote_port`, `link/serial_port`, `link/serial_baud`) and the video port, takeoff, default waypoint and landing approach altitude,
 cruise speed (used for the lap time), camera HFOV, the fixed-mount tilt used
 when no gimbal reports its angles, and reduced motion. The map
 layer and follow state, the altitude unit, the camera HUD reference and the

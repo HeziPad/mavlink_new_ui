@@ -25,6 +25,8 @@ public:
 
     void start();
     void stop();
+    // Listens on another port (drops the current picture).
+    void restart(int port);
 
     static bool compiledIn();
     int port() const { return port_; }

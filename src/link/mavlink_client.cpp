@@ -3,15 +3,10 @@
 #include "core/geo.hpp"
 #include "core/plane_modes.hpp"
 
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <sys/eventfd.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#include "serial_transport.hpp"
+#include "udp_transport.hpp"
 
 #include <algorithm>
-#include <cerrno>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -81,7 +76,8 @@ CommandRequest messageInterval(uint32_t msg_id, double hz) {
 MavlinkClient::MavlinkClient(Config cfg) : cfg_(std::move(cfg)) {
     ids_.own_sys = cfg_.gcs_sysid;
     ids_.own_comp = cfg_.gcs_compid;
-    state_.endpoint = cfg_.bind_host + ":" + std::to_string(cfg_.port);
+    transport_ = makeTransport(cfg_);
+    state_.endpoint = transport_->describe();
     shared_ = state_;
 
     mission_ = std::make_unique<MissionTransfer>(
@@ -145,7 +141,6 @@ void MavlinkClient::start() {
 
 void MavlinkClient::stop() {
     stop_.store(true);
-    wake();
     if (thread_.joinable()) {
         thread_.join();
     }
@@ -177,14 +172,38 @@ void MavlinkClient::post(Task task) {
         std::lock_guard<std::mutex> lock(mutex_);
         tasks_.push_back(std::move(task));
     }
-    wake();
+    // picked up within one 20 ms wait of the worker loop
 }
 
-void MavlinkClient::wake() {
-    if (wake_fd_ >= 0) {
-        const uint64_t one = 1;
-        [[maybe_unused]] const ssize_t n = ::write(wake_fd_, &one, sizeof(one));
+std::unique_ptr<Transport> MavlinkClient::makeTransport(const Config& cfg) {
+    if (cfg.type == LinkType::Serial) {
+        return std::make_unique<SerialTransport>(cfg.serial_port, cfg.serial_baud);
     }
+    return std::make_unique<UdpTransport>(cfg.bind_host, cfg.port, cfg.remote_host, cfg.remote_port);
+}
+
+void MavlinkClient::reconfigure(Config cfg) {
+    post([this, cfg = std::move(cfg)] { applyConfig(cfg); });
+}
+
+void MavlinkClient::applyConfig(const Config& cfg) {
+    transport_->close();
+    const uint8_t sys = cfg_.gcs_sysid;
+    const uint8_t comp = cfg_.gcs_compid;
+    cfg_ = cfg;
+    cfg_.gcs_sysid = sys;
+    cfg_.gcs_compid = comp;
+    transport_ = makeTransport(cfg_);
+    state_.endpoint = transport_->describe();
+    state_.socket_open = false;
+    state_.peer_known = false;
+    state_.error.clear();
+    state_dirty_ = true;
+    next_open_ = {};  // open it on this loop
+    // find the vehicle again on the new link (the same one, usually)
+    vehicle_locked_ = false;
+    streams_requested_ = false;
+    mavlink_reset_channel_status(MAVLINK_COMM_0);
 }
 
 // ---- request API ---------------------------------------------------------------
@@ -359,69 +378,45 @@ void MavlinkClient::sendParamRequests(Clock::time_point now) {
     }
 }
 
-bool MavlinkClient::openSocket() {
-    auto fail = [this](const std::string& what) {
-        state_.error = what + ": " + std::strerror(errno);
-        state_dirty_ = true;
-        if (fd_ >= 0) {
-            ::close(fd_);
-            fd_ = -1;
-        }
-        return false;
-    };
-
-    fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd_ < 0) {
-        return fail("socket");
+void MavlinkClient::tryOpen(Clock::time_point now) {
+    std::string error;
+    if (transport_->open(error)) {
+        state_.socket_open = true;
+        state_.error.clear();
+        state_.peer_known = transport_->canSend();
+    } else {
+        state_.socket_open = false;
+        state_.error = error;
+        next_open_ = now + std::chrono::seconds(1);  // the port may come back (USB re-plugged, autopilot rebooted)
     }
-    const int reuse = 1;
-    ::setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-    const int flags = ::fcntl(fd_, F_GETFL, 0);
-    if (flags < 0 || ::fcntl(fd_, F_SETFL, flags | O_NONBLOCK) < 0) {
-        return fail("fcntl");
-    }
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(cfg_.port);
-    if (::inet_pton(AF_INET, cfg_.bind_host.c_str(), &addr.sin_addr) != 1) {
-        errno = EINVAL;
-        return fail("invalid bind address " + cfg_.bind_host);
-    }
-    if (::bind(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        return fail("bind " + state_.endpoint);
-    }
-    state_.socket_open = true;
-    state_.error.clear();
     state_dirty_ = true;
-    return true;
+}
+
+void MavlinkClient::linkFailed(const std::string& error, Clock::time_point now) {
+    transport_->close();
+    state_.socket_open = false;
+    state_.peer_known = false;
+    state_.error = error;
+    state_dirty_ = true;
+    next_open_ = now + std::chrono::seconds(1);
 }
 
 void MavlinkClient::run() {
-    wake_fd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    if (!openSocket()) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        shared_ = state_;
-        return;
-    }
-
     uint8_t buffer[4096];
     while (!stop_.load()) {
-        pollfd pfds[2]{};
-        pfds[0].fd = fd_;
-        pfds[0].events = POLLIN;
-        pfds[1].fd = wake_fd_;
-        pfds[1].events = POLLIN;
-        const int ready = ::poll(pfds, wake_fd_ >= 0 ? 2 : 1, 20);
-        if (ready < 0 && errno != EINTR) {
-            state_.error = std::string("poll: ") + std::strerror(errno);
-            state_dirty_ = true;
-            break;
+        if (!transport_->isOpen() && Clock::now() >= next_open_) {
+            tryOpen(Clock::now());
         }
 
-        if (ready > 0 && (pfds[1].revents & POLLIN) != 0) {
-            uint64_t drain = 0;
-            [[maybe_unused]] const ssize_t n = ::read(wake_fd_, &drain, sizeof(drain));
+        int ready = 0;
+        if (transport_->isOpen()) {
+            std::string error;
+            ready = transport_->waitReadable(20, error);
+            if (ready < 0) {
+                linkFailed(error, Clock::now());
+            }
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
 
         std::vector<Task> tasks;
@@ -430,27 +425,21 @@ void MavlinkClient::run() {
             tasks.swap(tasks_);
         }
         for (auto& task : tasks) {
-            task();
+            task();  // may swap the transport (reconfigure)
         }
 
-        if (ready > 0 && (pfds[0].revents & POLLIN) != 0) {
+        if (ready > 0 && transport_->isOpen()) {
             for (;;) {
-                sockaddr_in from{};
-                socklen_t from_len = sizeof(from);
-                const ssize_t n = ::recvfrom(fd_, buffer, sizeof(buffer), 0,
-                                             reinterpret_cast<sockaddr*>(&from), &from_len);
+                std::string error;
+                const long n = transport_->read(buffer, sizeof(buffer), error);
                 if (n < 0) {
-                    if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR &&
-                        errno != ECONNREFUSED) {
-                        state_.error = std::string("recvfrom: ") + std::strerror(errno);
-                        state_dirty_ = true;
-                    }
+                    linkFailed(error, Clock::now());
                     break;
                 }
                 if (n == 0) {
                     break;
                 }
-                handleDatagram(buffer, static_cast<size_t>(n), from);
+                handleBytes(buffer, static_cast<size_t>(n));
             }
         }
 
@@ -463,24 +452,17 @@ void MavlinkClient::run() {
         }
     }
 
-    ::close(fd_);
-    fd_ = -1;
-    if (wake_fd_ >= 0) {
-        ::close(wake_fd_);
-        wake_fd_ = -1;
-    }
+    transport_->close();
     std::lock_guard<std::mutex> lock(mutex_);
     state_.socket_open = false;
     shared_ = state_;
 }
 
-void MavlinkClient::handleDatagram(const uint8_t* data, size_t len, const sockaddr_in& from) {
+void MavlinkClient::handleBytes(const uint8_t* data, size_t len) {
     state_.datagrams += 1;
     state_.bytes += len;
     state_dirty_ = true;
-    peer_ = from;
-    peer_known_ = true;
-    state_.peer_known = true;
+    state_.peer_known = transport_->canSend();
 
     mavlink_message_t msg{};
     mavlink_status_t status{};
@@ -498,6 +480,16 @@ void MavlinkClient::handleMessage(const mavlink_message_t& msg) {
         mavlink_heartbeat_t hb{};
         mavlink_msg_heartbeat_decode(&msg, &hb);
         if (isVehicleHeartbeat(hb)) {
+            if (had_vehicle_ && msg.sysid != ids_.target_sys) {
+                // a different aircraft on the new link: forget the old one's plan and params
+                state_.params.clear();
+                param_types_.clear();
+                state_.mission.clear();
+                state_.mission_known = false;
+                initial_download_done_ = false;
+                param_rounds_ = 0;
+            }
+            had_vehicle_ = true;
             vehicle_locked_ = true;
             ids_.target_sys = msg.sysid;
             ids_.target_comp = msg.compid;
@@ -1063,7 +1055,7 @@ void MavlinkClient::periodic(Clock::time_point now) {
     using std::chrono::milliseconds;
     using std::chrono::seconds;
 
-    if (peer_known_ && now - last_gcs_heartbeat_ >= seconds(1)) {
+    if (transport_->canSend() && now - last_gcs_heartbeat_ >= seconds(1)) {
         last_gcs_heartbeat_ = now;
         mavlink_message_t msg{};
         mavlink_msg_heartbeat_pack(ids_.own_sys, ids_.own_comp, &msg, MAV_TYPE_GCS,
@@ -1137,12 +1129,12 @@ void MavlinkClient::periodic(Clock::time_point now) {
 }
 
 void MavlinkClient::sendMessage(const mavlink_message_t& msg) {
-    if (!peer_known_ || fd_ < 0) {
+    if (!transport_->isOpen() || !transport_->canSend()) {
         return;
     }
     uint8_t buf[MAVLINK_MAX_PACKET_LEN];
     const uint16_t len = mavlink_msg_to_send_buffer(buf, &msg);
-    ::sendto(fd_, buf, len, 0, reinterpret_cast<const sockaddr*>(&peer_), sizeof(peer_));
+    transport_->write(buf, len);
 }
 
 }  // namespace gcs::link

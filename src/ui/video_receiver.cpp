@@ -46,6 +46,17 @@ void VideoReceiver::stop() {
     }
 }
 
+void VideoReceiver::restart(int port) {
+    stop();
+    port_ = port;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        frame_ = QImage();
+        status_.clear();
+    }
+    start();
+}
+
 bool VideoReceiver::takeFrame(QImage& out, uint64_t& seq) const {
     std::lock_guard<std::mutex> lock(mutex_);
     if (seq_ == seq || frame_.isNull()) {
