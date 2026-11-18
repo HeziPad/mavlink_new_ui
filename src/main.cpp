@@ -1,14 +1,25 @@
+#include "ui/app_icon.hpp"
 #include "ui/main_window.hpp"
 
 #include <QApplication>
 #include <QCommandLineParser>
+#include <QDir>
 #include <QFont>
+#include <QThreadPool>
 
 int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
+    // Qt's raster engine splits large fills, gradients and scaling across the
+    // global thread pool (one thread per core). Measured at 1920x1200: two
+    // threads paint a frame as fast as sixteen, and the other fourteen only
+    // burned ~40 % CPU waking up. GCS_PAINT_THREADS overrides.
+    const int paint_threads = qEnvironmentVariableIntValue("GCS_PAINT_THREADS");
+    QThreadPool::globalInstance()->setMaxThreadCount(paint_threads > 0 ? paint_threads : 2);
     QApplication::setApplicationName(QStringLiteral("mavlink_gcs_ui"));
     QApplication::setOrganizationName(QStringLiteral("mavlink_gcs_ui"));
     QApplication::setStyle(QStringLiteral("Fusion"));
+    QApplication::setWindowIcon(gcs::ui::appIcon());
+    QApplication::setDesktopFileName(QStringLiteral("mavlink_gcs_ui"));
     qSetMessagePattern(QStringLiteral("%{message}"));
 
     QFont base(QStringLiteral("DejaVu Sans"));
@@ -34,8 +45,23 @@ int main(int argc, char* argv[]) {
                                QStringLiteral("Disable glitch, scanline, ripple and pulse effects"));
     parser.addOption(udp);
     parser.addOption(video);
+    QCommandLineOption export_icon(QStringLiteral("export-icon"),
+                                   QStringLiteral("Write the app icon as PNGs (16-512 px) into <dir> and exit"),
+                                   QStringLiteral("dir"));
     parser.addOption(reduced);
+    parser.addOption(export_icon);
     parser.process(app);
+
+    if (parser.isSet(export_icon)) {
+        const QDir dir(parser.value(export_icon));
+        QDir().mkpath(dir.path());
+        for (int s : {16, 24, 32, 48, 64, 128, 256, 512}) {
+            if (!gcs::ui::appIconImage(s).save(dir.filePath(QStringLiteral("mavlink_gcs_ui_%1.png").arg(s)))) {
+                return 1;
+            }
+        }
+        return 0;
+    }
 
     if (parser.isSet(udp)) {
         const QString v = parser.value(udp);

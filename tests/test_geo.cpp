@@ -1,5 +1,6 @@
 #include "check.hpp"
 #include "core/geo.hpp"
+#include "core/tiles.hpp"
 #include "core/vehicle_state.hpp"
 
 using namespace gcs::geo;
@@ -281,7 +282,59 @@ static void testTrackPredictor() {
     CHECK(!TrackPredictor{}.valid());
 }
 
+static void testTiles() {
+    namespace t = gcs::tiles;
+    // well-known tile: zoom 0 is one tile; Tel Aviv at z13 (OSM 4887/3324)
+    const t::TilePos z0 = t::locate(32.0853, 34.7818, 0);
+    CHECK(z0.x == 0 && z0.y == 0);
+    const t::TilePos p = t::locate(32.0853, 34.7818, 13);
+    CHECK(p.x == 4887);
+    CHECK(p.y == 3324);
+    CHECK(p.px >= 0.0 && p.px < 256.0 && p.py >= 0.0 && p.py < 256.0);
+    // terrarium: (128, 0, 0) is sea level; 1 m per G step
+    CHECK_NEAR(t::terrarium(128, 0, 0), 0.0, 1e-9);
+    CHECK_NEAR(t::terrarium(128, 100, 128), 100.5, 1e-9);
+    CHECK_NEAR(t::terrarium(127, 255, 0), -1.0, 1e-9);
+    // range: a 10 km radius at z13 (tile ~4.15 km at 32 N) spans 5-6 tiles a side
+    const t::Range r = t::around(32.0853, 34.7818, 10000.0, 13);
+    CHECK(r.x1 - r.x0 + 1 >= 5 && r.x1 - r.x0 + 1 <= 7);
+    CHECK(r.y1 - r.y0 + 1 >= 5 && r.y1 - r.y0 + 1 <= 7);
+    CHECK(r.x0 <= p.x && p.x <= r.x1 && r.y0 <= p.y && p.y <= r.y1);
+    CHECK(r.count() == static_cast<size_t>((r.x1 - r.x0 + 1) * (r.y1 - r.y0 + 1)));
+    CHECK_NEAR(t::tileMeters(32.0853, 13), 4148.0, 20.0);
+}
+
+static void testRayToTerrain() {
+    using namespace gcs::geo;
+    // flat ground at 100 m AMSL, aircraft at 200 m, looking 45 deg down: hits 100 m out
+    auto flat = [](double, double) -> std::optional<double> { return 100.0; };
+    TerrainHit h = rayToTerrain(47.0, 8.0, 200.0, 90.0, -45.0, flat, 0.0);
+    CHECK(h.hit && !h.approximate);
+    CHECK_NEAR(distance(47.0, 8.0, h.lat, h.lon), 100.0, 1.0);
+    CHECK_NEAR(h.slant, 100.0 * std::sqrt(2.0), 1.0);
+    CHECK_NEAR(h.ground, 100.0, 1e-9);
+    // a hill rising toward the east is hit sooner
+    auto slope = [](double lat0, double lon) -> std::optional<double> {
+        (void)lat0;
+        return 100.0 + (lon - 8.0) * 111320.0 * std::cos(47.0 * kDegToRad) * 0.5;  // +0.5 m per m east
+    };
+    h = rayToTerrain(47.0, 8.0, 200.0, 90.0, -45.0, slope, 0.0);
+    CHECK(h.hit);
+    CHECK_NEAR(distance(47.0, 8.0, h.lat, h.lon), 66.7, 1.0);  // 100 - x = 0.5 x
+    // above the horizon: no hit
+    CHECK(!rayToTerrain(47.0, 8.0, 200.0, 90.0, 5.0, flat, 0.0).hit);
+    // beyond range: no hit
+    CHECK(!rayToTerrain(47.0, 8.0, 200.0, 90.0, -1.0, flat, 0.0, 3000.0).hit);
+    // unknown terrain: the flat fallback, marked approximate
+    auto none = [](double, double) -> std::optional<double> { return std::nullopt; };
+    h = rayToTerrain(47.0, 8.0, 200.0, 0.0, -45.0, none, 150.0);
+    CHECK(h.hit && h.approximate);
+    CHECK_NEAR(h.slant, 50.0 * std::sqrt(2.0), 1.0);
+}
+
 int main() {
+    testRayToTerrain();
+    testTiles();
     testTrackPredictor();
     testPredictVelocity();
     testFootprint();

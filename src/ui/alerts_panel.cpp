@@ -88,11 +88,18 @@ void AlertsPanel::setAdvisories(const std::vector<Advisory>& list, bool link_ali
     alive_ = link_alive;
     list_ = list;
     std::map<std::string, double> next;
+    std::set<std::string> open;
     for (const auto& a : list_) {
         const auto it = age_.find(a.id);
-        next[a.id] = it != age_.end() ? it->second : 0.0;
+        const bool fresh = it == age_.end();
+        next[a.id] = fresh ? 0.0 : it->second;
+        // a new critical card arrives open; the rest show their title only
+        if (expanded_.count(a.id) || (fresh && a.severity == Severity::Critical)) {
+            open.insert(a.id);
+        }
     }
     age_.swap(next);
+    expanded_.swap(open);
     if (isVisible()) {
         place(area_);
         update();
@@ -101,6 +108,10 @@ void AlertsPanel::setAdvisories(const std::vector<Advisory>& list, bool link_ali
 
 double AlertsPanel::cardHeight(const Advisory& a, double w) const {
     const double inner = w - kStripe - 2 * kPad;
+    if (!isExpanded(a)) {
+        // title only: a finger-sized row
+        return std::max(52.0, wrapHeight(bodyFont(14, true), inner - 40, qs(a.title)) + 2 * 14);
+    }
     double h = kPad;
     h += 18;  // severity tag line
     h += wrapHeight(bodyFont(15, true), inner, qs(a.title)) + 4;
@@ -177,10 +188,40 @@ void AlertsPanel::mouseMoveEvent(QMouseEvent* e) {
 }
 
 void AlertsPanel::mouseReleaseEvent(QMouseEvent* e) {
-    if (pressing_ && !dragged_ && close_rect_.contains(e->position())) {
-        emit closeRequested();
-    }
+    const bool tap = pressing_ && !dragged_;
     pressing_ = false;
+    if (!tap) {
+        return;
+    }
+    // a tap on a card opens it (or folds it back to its title)
+    const int i = cardAt(e->position());
+    if (i < 0) {
+        return;
+    }
+    const std::string& id = list_[static_cast<size_t>(i)].id;
+    if (!expanded_.erase(id)) {
+        expanded_.insert(id);
+    }
+    place(area_);
+    update();
+}
+
+int AlertsPanel::cardAt(const QPointF& pos) const {
+    const QRectF r = QRectF(rect()).adjusted(1, 1, -1, -1);
+    const QRectF view(r.left() + kPad, r.top() + kHeader + kPills, r.width() - 2 * kPad,
+                      r.height() - kHeader - kPills - kPad);
+    if (!view.contains(pos)) {
+        return -1;
+    }
+    double y = view.top() - scroll_;
+    for (size_t i = 0; i < list_.size(); ++i) {
+        const double h = cardHeight(list_[i], view.width());
+        if (pos.y() >= y && pos.y() < y + h) {
+            return static_cast<int>(i);
+        }
+        y += h + kGap;
+    }
+    return -1;
 }
 
 void AlertsPanel::wheelEvent(QWheelEvent* e) {
@@ -223,9 +264,6 @@ void AlertsPanel::paintEvent(QPaintEvent*) {
     }
     drawText(p, QRectF(r.left() + 18, r.top() + 33, 300, 16), Qt::AlignLeft | Qt::AlignVCenter, summary,
              labelFont(10.5), sc);
-    close_rect_ = QRectF(r.right() - 58, r.top() + 6, 50, 48);
-    drawGlass(p, chamferPath(close_rect_.adjusted(4, 4, -4, -4), 6), kCyan, 0.5, kGlassDeep);
-    drawText(p, close_rect_, Qt::AlignCenter, QStringLiteral("✕"), monoFont(17, true), kText);
 
     // ---- group pills ----------------------------------------------------------------
     std::array<int, kGroups> worst;
@@ -309,6 +347,31 @@ void AlertsPanel::paintEvent(QPaintEvent*) {
 
         const double x = card.left() + kStripe + kPad;
         const double inner = w - kStripe - 2 * kPad;
+        // open / closed mark at the right
+        p.setPen(QPen(alpha(kText, 0.6), 1.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        p.setBrush(Qt::NoBrush);
+        {
+            const QPointF m(card.right() - 20, isExpanded(a) ? card.top() + kPad + 7 : card.center().y());
+            if (isExpanded(a)) {
+                p.drawPolyline(QPolygonF{m + QPointF(-6, -3), m + QPointF(0, 3), m + QPointF(6, -3)});
+            } else {
+                p.drawPolyline(QPolygonF{m + QPointF(-3, -6), m + QPointF(3, 0), m + QPointF(-3, 6)});
+            }
+        }
+        if (!isExpanded(a)) {
+            // title only: severity dot + title, tap for the rest
+            const QString title = qs(a.title);
+            const double th = wrapHeight(bodyFont(14, true), inner - 40, title);
+            p.setPen(Qt::NoPen);
+            p.setBrush(c);
+            p.drawEllipse(QPointF(x + 5, card.center().y()), 5, 5);
+            p.setFont(bodyFont(14, true));
+            p.setPen(kText);
+            p.drawText(QRectF(x + 18, card.center().y() - th / 2.0, inner - 40, th), Qt::TextWordWrap, title);
+            p.restore();
+            y += h + kGap;
+            continue;
+        }
         double cy = card.top() + kPad;
         drawText(p, QRectF(x, cy, inner, 14), Qt::AlignLeft | Qt::AlignVCenter,
                  QString::fromLatin1(severityName(a.severity)), labelFont(9), c);

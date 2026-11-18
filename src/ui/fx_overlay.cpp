@@ -25,13 +25,27 @@ FxOverlay::FxOverlay(QWidget* parent) : QWidget(parent) {
     setAttribute(Qt::WA_TransparentForMouseEvents);
 }
 
+bool FxOverlay::active() const {
+    return !toasts_.empty() || banner_.t >= 0.0 || !alert_.isEmpty() || alert_fade_ > 0.0;
+}
+
+void FxOverlay::wake() {
+    // A transparent full-window layer costs a full recomposite every frame
+    // even when it shows nothing, so it is hidden while idle. show() keeps its
+    // place in the stacking order.
+    if (!isVisible() && active()) {
+        show();
+    }
+    update();
+}
+
 void FxOverlay::toast(const QString& text, const QColor& color, const QString& tag) {
     // collapse repeats of a recent identical message into a counter
     for (auto& t : toasts_) {
         if (t.text == text && t.age < kToastLife - 1.0) {
             ++t.count;
             t.age = std::min(t.age, kToastSlide);
-            update();
+            wake();
             return;
         }
     }
@@ -45,14 +59,14 @@ void FxOverlay::toast(const QString& text, const QColor& color, const QString& t
     while (toasts_.size() > 12) {
         toasts_.pop_back();
     }
-    update();
+    wake();
 }
 
 void FxOverlay::banner(const QString& text, const QColor& color) {
     banner_.text = text;
     banner_.color = color;
     banner_.t = 0.0;
-    update();
+    wake();
 }
 
 void FxOverlay::setAlert(const QString& text) {
@@ -65,7 +79,7 @@ void FxOverlay::setAlert(const QString& text) {
             alert_fade_ = std::min(alert_fade_, 1.0);
             alert_.clear();
         }
-        update();
+        wake();
     }
 }
 
@@ -101,6 +115,16 @@ void FxOverlay::tick(double dt) {
     if (!alert_.isEmpty()) {
         alert_t_ += dt;
         dirty = true;
+    }
+    if (!active()) {
+        if (isVisible()) {
+            alert_rect_ = QRectF();
+            hide();
+        }
+        return;
+    }
+    if (!isVisible()) {
+        show();
     }
     if (dirty) {
         update();

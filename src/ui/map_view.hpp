@@ -1,18 +1,22 @@
 #pragma once
 
 #include "anim.hpp"
+#include "core/flight_status.hpp"
 #include "core/mission.hpp"
 #include "core/vehicle_state.hpp"
 #include "view_host.hpp"
 
 #include <QColor>
 
+#include <array>
 #include <optional>
 #include <vector>
 
 class QTouchEvent;
 
 namespace gcs::ui {
+
+class ElevationCache;
 
 class TileCache;
 
@@ -21,7 +25,7 @@ class MapView : public HudView {
     Q_OBJECT
 
 public:
-    enum class Mode { Normal, Plan, Guide };
+    enum class Mode { Normal, Plan, Guide, Area };
     enum class AddTool { Waypoint, Landing };
     // selection ids: >= 0 a loop waypoint index, kLandId the landing point
     static constexpr int kNone = -1;
@@ -40,6 +44,15 @@ public:
     bool follow() const { return follow_; }
     void setDefaultAltitude(float alt) { default_alt_ = alt; }
     void setDefaultLandAltitude(float alt) { default_land_alt_ = alt; }
+    // the autopilot's WP_LOITER_RAD: a hold with radius 0 circles at this
+    void setDefaultLoiterRadius(double m) { default_loiter_radius_ = m; }
+    // the nav box (bottom right): the ground under the aircraft, and where it is going
+    struct NavInfo {
+        QString aircraft_ground;  // "GROUND 512 m MSL · AGL 80 m (rangefinder)"
+        NavTarget target;
+    };
+    void setNav(NavInfo nav) { nav_ = std::move(nav); }
+    double defaultLoiterRadius() const { return default_loiter_radius_; }
 
     // ---- plan editing ------------------------------------------------------
     const MissionPlan& plan() const { return plan_; }
@@ -53,7 +66,9 @@ public:
     void select(int id);
     void adjustAltitude(int id, float delta);  // waypoint or kLandId; one undo step per point
     void deletePoint(int id);
-    void insertAfter(int index);                  // midpoint to the next loop point
+    void insertAfter(int index);                  // midpoint to the next point (past the end of an open route)
+    void setPattern(Pattern pattern);             // how the route is flown (undoable)
+    void setHold(float radius, bool ccw);         // the final hold circle (undoable; radius 0 = default)
 
     // ---- motion (predicted, set every frame) ---------------------------------
     void setAircraftPosition(double lat, double lon);
@@ -71,6 +86,23 @@ public:
     void setBallCollapsed(bool on);
     // flight trail: off, or the last `secs` seconds (0 = everything kept)
     void setTrail(bool on, int secs);
+    // ground height for the mouse readout (lat, lon, ground, distance from the aircraft)
+    void setElevation(ElevationCache* elev);
+
+    // ---- full-detail area selection (Mode::Area) ----------------------------------
+    struct GeoBox {
+        double min_lon = 0, min_lat = 0, max_lon = 0, max_lat = 0;
+    };
+    void setAreas(std::vector<GeoBox> areas);  // already downloaded (outlines)
+    std::optional<GeoBox> areaSelection() const { return area_sel_; }
+    void clearAreaSelection();
+    // the panel under the selection: two lines and whether DOWNLOAD is allowed
+    void setAreaInfo(const QString& line1, const QString& line2, bool can_download, bool warn);
+    // a chip while an offline download runs ("" hides it)
+    void setDownloadStatus(const QString& text);
+    void tileSourcesChanged();  // offline data changed: redraw the backdrop
+    double centerLat() const { return clat_; }
+    double centerLon() const { return clon_; }
 
     // ---- the circle commanded in GUIDED (Hold / Guide) --------------------------
     struct OrbitDraw {
@@ -95,14 +127,23 @@ signals:
     void followChanged(bool on);
     void layerChanged(int layer);
     void ballCollapsedChanged(bool collapsed);
+    void areaChanged(GeoBox box, bool final);  // final: the finger / button was released
+    void areaDownload();
+    void areaCancel();
 
 protected:
     bool event(QEvent* e) override;
     void paintEvent(QPaintEvent* e) override;
+
+public:
+    int paints_ = 0;  // paint events since the last GCS_FPS report
+
+protected:
     void mousePressEvent(QMouseEvent* e) override;
     void mouseMoveEvent(QMouseEvent* e) override;
     void mouseReleaseEvent(QMouseEvent* e) override;
     void wheelEvent(QWheelEvent* e) override;
+    void leaveEvent(QEvent* e) override;
     void compactChanged() override { updateCursor(); }
 
 private:
@@ -117,7 +158,13 @@ private:
     void handleTouch(QTouchEvent* e);
     void updateCursor();
 
-    void paintTiles(QPainter& p);
+    // the slow-changing background (grid, tiles, the trail but its newest
+    // points) is drawn into bd_ with a margin and only shifted per frame
+    void paintBackdrop(QPainter& p);
+    void buildBackdrop(const QPointF& world_tl, const QSize& size);
+    void paintTiles(QPainter& p, const QPointF& world_tl, const QSizeF& size);
+    void paintTrail(QPainter& p, const QPointF& world_tl, size_t from, size_t to, size_t first, size_t span);
+    size_t trailFirst() const;  // first trail point inside the time window
     void paintRoute(QPainter& p, const MissionPlan& plan, const QColor& c, bool editable, int active_index);
     void paintAircraft(QPainter& p);
     void paintOrbit(QPainter& p);
@@ -126,8 +173,21 @@ private:
     void paintBall(QPainter& p);
     double metersPerPixel() const;
     void paintOverlayChrome(QPainter& p);
+    void paintArea(QPainter& p);
+    bool areaPress(const QPointF& pos);  // true: handled
+    std::array<QPointF, 4> areaCorners() const;  // NW NE SE SW on screen
+    void paintNavBox(QPainter& p, double right, double bottom);
 
     TileCache* tiles_;
+    ElevationCache* elev_ = nullptr;
+    std::optional<QPointF> hover_pos_;  // mouse over the map (never set by touch)
+    // last ground-height lookup, redone only when the point or the data changes
+    struct HoverElev {
+        double lat = 1e9, lon = 1e9;
+        quint64 gen = ~0ull;
+        std::optional<double> h;
+    } hover_elev_;
+    quint64 elev_gen_ = 0;
     VehicleState s_;
     MissionPlan vehicle_plan_;
     bool centred_ = false;
@@ -145,6 +205,8 @@ private:
     bool follow_ = true;
     float default_alt_ = 80.0f;
     float default_land_alt_ = kDefaultLandApproachAlt;
+    double default_loiter_radius_ = 80.0;
+    NavInfo nav_;
 
     MissionPlan plan_;
     std::vector<MissionPlan> undo_;
@@ -187,6 +249,33 @@ private:
     double ball_open_ = 1.0;  // 0 collapsed .. 1 open, animated
 
     AngleTween heading_;
+
+    struct Backdrop {
+        QPixmap pm;
+        QPointF world_tl;          // world px (at `zoom`) of the pixmap's top-left
+        double zoom = -1.0;
+        int layer = -1;
+        quint64 tiles_gen = 0;
+        int missing = 0;           // tiles not available when it was drawn
+        int drawn = 0;             // tiles (or enlarged parents) drawn
+        qint64 built_ms = 0;
+        size_t trail_n = 0;        // trail points baked in
+        size_t trail_first = 0;
+        bool trail_on = false;
+        int trail_secs = -1;
+    } bd_;
+    quint64 tiles_gen_ = 0;        // bumped when a tile arrives
+    // area selection
+    std::vector<GeoBox> areas_;
+    std::optional<GeoBox> area_sel_;
+    int area_handle_ = -1;         // corner being dragged (0 NW 1 NE 2 SE 3 SW)
+    double area_anchor_lat_ = 0, area_anchor_lon_ = 0;  // the fixed corner while drawing a new one
+    bool area_new_ = false;
+    QString area_info1_, area_info2_;
+    bool area_can_dl_ = false, area_warn_ = false;
+    QRectF area_dl_rect_, area_cancel_rect_;
+    QString dl_status_;
+    static constexpr int kBackdropMargin = 320;
 };
 
 }  // namespace gcs::ui

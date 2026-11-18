@@ -1,5 +1,7 @@
 #include "geo.hpp"
 
+#include <functional>
+
 #include <algorithm>
 #include <cmath>
 
@@ -217,6 +219,50 @@ Footprint cameraFootprint(const CameraModel& cam, const Attitude& att, double al
     for (int i = 0; i < per_edge; ++i) cast(0.0, h - h * i / per_edge);
     fp.center = cameraRayToGround(cam, att, w / 2.0, h / 2.0, alt_agl, max_range, max_range);
     return fp;
+}
+
+TerrainHit rayToTerrain(double lat, double lon, double alt_amsl, double yaw_deg, double pitch_deg,
+                        const std::function<std::optional<double>(double, double)>& ground, double fallback_ground,
+                        double max_range, double step) {
+    TerrainHit r;
+    const double horiz = std::cos(pitch_deg * kDegToRad);
+    const double vert = std::sin(pitch_deg * kDegToRad);
+    bool approx = false;
+    // height of the ray above the ground at slant distance s (> 0: above)
+    auto clearance = [&](double s, double& out_lat, double& out_lon, double& out_ground) {
+        destination(lat, lon, yaw_deg, s * horiz, out_lat, out_lon);
+        const std::optional<double> g = ground ? ground(out_lat, out_lon) : std::nullopt;
+        if (!g) {
+            approx = true;
+        }
+        out_ground = g ? *g : fallback_ground;
+        return alt_amsl + s * vert - out_ground;
+    };
+    double plat = lat, plon = lon, pg = 0.0;
+    double prev_s = 0.0;
+    if (clearance(0.0, plat, plon, pg) <= 0.0) {
+        return r;  // on (or below) the ground already
+    }
+    for (double s = step; s <= max_range + 1e-9; s += step) {
+        double la = 0.0, lo = 0.0, g = 0.0;
+        const double c = clearance(s, la, lo, g);
+        if (c <= 0.0) {
+            // bisect between the last point above and this one below
+            double a = prev_s, b = s;
+            for (int k = 0; k < 8 && b - a > 0.5; ++k) {
+                const double m = 0.5 * (a + b);
+                double ml = 0.0, mo = 0.0, mg = 0.0;
+                (clearance(m, ml, mo, mg) > 0.0 ? a : b) = m;
+            }
+            r.hit = true;
+            r.slant = b;
+            clearance(b, r.lat, r.lon, r.ground);
+            r.approximate = approx;
+            return r;
+        }
+        prev_s = s;
+    }
+    return r;
 }
 
 }  // namespace gcs::geo

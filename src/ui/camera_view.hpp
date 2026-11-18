@@ -5,6 +5,7 @@
 #include "view_host.hpp"
 
 #include <QImage>
+#include <QPixmap>
 
 namespace gcs::ui {
 
@@ -43,6 +44,18 @@ public:
     void setVelocity(double vn, double ve, double vd);
     void setCamera(double hfov_deg, double mount_pitch_deg);
     void setGuideMode(bool on);
+    // the plain flight state, shown in the status line
+    void setFlightLabel(const QString& label) { flight_label_ = label; }
+    // where the line of sight meets the ground (bottom-right box)
+    struct LosTarget {
+        bool valid = false;        // there is an estimate at all (position, attitude)
+        bool hit = false;          // false: above the horizon / beyond range
+        bool approximate = false;  // terrain unknown: flat ground at home level
+        double lat = 0.0, lon = 0.0;
+        double ground = 0.0;       // AMSL
+        double slant = 0.0;        // m
+    };
+    void setLosTarget(const LosTarget& t) { los_target_ = t; }
     void tick(double dt);
     bool live() const;
     // width / height of the picture: the video's when live, else 16:9
@@ -55,10 +68,18 @@ signals:
 
 protected:
     void paintEvent(QPaintEvent* e) override;
+
+public:
+    int paints_ = 0;  // paint events since the last GCS_FPS report
+
+protected:
     void mousePressEvent(QMouseEvent* e) override;
     void compactChanged() override { setGuideMode(guide_); }
 
 private:
+    void paintLosTarget(QPainter& p);
+    QString flight_label_;
+    LosTarget los_target_;
     double focal() const;
     double elevationToY(double elevation_deg) const;  // camera frame, roll-rotated
     // the same for the HUD rulers, centred on the selected reference
@@ -73,7 +94,7 @@ private:
     // Left column (AIRCRAFT, LOS, HUD chip, WIND), the tapes just inside it
     // and the ladder between the tapes. One place, so paint and hit-tests agree.
     struct Layout {
-        QRectF aircraft, los, chip, wind;
+        QRectF target, aircraft, los, chip, wind;
         QRectF as_tape, alt_tape;
         QRectF ladder_clip;
     };
@@ -90,6 +111,12 @@ private:
     uint64_t frame_seq_ = 0;
     QImage scaled_;             // frame_ scaled to the widget, redone per new frame / resize
     uint64_t scaled_seq_ = 0;
+    // vignette + scanlines: the same every frame for a given size, so drawn once
+    QPixmap overlay_;
+    QSize overlay_size_;
+    bool overlay_scan_ = false;
+    // the HUD over live video and its dark outline, reused between frames
+    QImage hud_img_, hud_shadow_;
     double frame_age_ = 1e9;
 
     VehicleState s_;

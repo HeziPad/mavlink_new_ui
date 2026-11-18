@@ -2,7 +2,7 @@
 
 A minimalist, game-style ground control station for an ArduPilot **QuadPlane**
 (4 lift rotors + pusher), talking MAVLink v2 over UDP. It has a full-bleed map or
-camera with a swappable picture-in-picture, a compact telemetry strip, and six
+camera with a swappable picture-in-picture, a compact telemetry strip, and five
 buttons. It is touch-first, with the mouse as an alternative.
 
 C++17 · Qt 6 Widgets · MAVLink `c_library_v2` · GStreamer (optional, for video).
@@ -37,12 +37,30 @@ ctest --test-dir build        # geo, mission builder, mission transfer, command 
 The GCS listens on the UDP port and replies to whichever address the vehicle
 sends from. Point the autopilot or MAVProxy output at it.
 
+If it feels slow, run it with `GCS_FPS=1`. Once a second it prints how often it
+redrew, its longest stall, and the attitude/position telemetry rates. That
+tells a slow UI apart from slow telemetry. Through MAVProxy, use
+`--streamrate=-1`; otherwise MAVProxy forces every stream to 4 Hz.
+
 ### With SITL
 
 ```sh
-cd ~/ardupilot && Tools/autotest/sim_vehicle.py -v ArduPlane -f quadplane --out=udp:127.0.0.1:14551
+tools/sitl.sh                 # ArduPlane quadplane SITL at your location, output to 127.0.0.1:14551
 ./build/mavlink_gcs_ui
 ```
+
+`tools/sitl.sh` starts `sim_vehicle.py` (checkout in `$ARDUPILOT`, default
+`~/ardupilot`) with `tools/sitl_extra.parm`. That file sets safety ON at boot,
+a 30 Ah simulated battery (about 2 h of flight: cruise draws ~12.6 A), a
+battery monitor, and the failsafe settings below. The start location comes from:
+
+1. `GCS_SITL_LOCATION=lat,lon,alt,heading`, if set;
+2. otherwise your public IP's approximate location (ipinfo.io, falling back to
+   ip-api.com), with the ground altitude from Open-Meteo. **This sends your IP
+   address to those services.** `tools/sitl.sh --no-geo` skips it;
+3. otherwise Israel (Tel Aviv, `32.0853,34.7818,17,0`).
+
+Any other arguments go to `sim_vehicle.py` (e.g. `tools/sitl.sh --speedup 2`).
 
 ### Test video
 
@@ -58,18 +76,18 @@ and shows `NO VIDEO`.
 
 | Key | Button | What it does |
 |-----|--------|--------------|
-| 1 | **Plan / Sync ↑** | First press: edit the mission on the map. Second press: upload it. **Hold**: re-download the vehicle's mission |
-| 2 | **Takeoff / Launch / Resume Plan** | On the ground (**hold 1 s** to confirm): with a mission → AUTO + arm; without → GUIDED + arm + VTOL takeoff, then Hold (circle) on the wing at takeoff altitude. Locked while the safety switch is on. Airborne: **Resume Plan** goes back to the planned loop on the wing (AUTO), also mid-landing (aborts it). If the vehicle's current item isn't a loop waypoint (still the VTOL takeoff after a Hold during the climb, or the landing), it is reset to the loop first, so AUTO never re-runs a rotor takeoff. While flying the loop it reads **On Plan** |
-| 3 | **Guide** | Toggle. Tap the map, or the ground in the camera view, to circle there on the wing (GUIDED) |
+| 1 | **Plan / Sync ↑** | First press: edit the mission on the map. Second press: upload it; if the aircraft is flying the plan (AUTO), it switches to the new plan right away at its nearest waypoint. **Hold**: re-download the vehicle's mission |
+| 2 | **Takeoff / Launch / Resume Plan** | On the ground (**hold 1 s** to confirm): GUIDED + arm + vertical takeoff. At the takeoff altitude it flies a **straight climb-out leg** (300 m, into the wind when there is some, else straight ahead) for the transition, and only once it is wing-borne does it turn to the plan (AUTO from WP1), or Hold when there is no mission. Locked while the safety switch is on. Airborne: **Resume Plan** goes back to the planned loop on the wing (AUTO), also mid-landing (aborts it). If the vehicle's current item isn't a loop waypoint (still the VTOL takeoff after a Hold during the climb, or the landing), it is reset to the loop first, so AUTO never re-runs a rotor takeoff. While flying the loop it reads **On Plan** |
+| 3 | **Fly To** | Toggle. Tap the map, or the ground in the camera view, to circle there on the wing (GUIDED) |
 | 4 | **Hold** | Instant. Circle where the aircraft is, on the wing (GUIDED). During a landing this is a go-around |
-| 5 | **Land** | **Hold 1 s**. Circle down beside the planned landing point on the wing, leave into the wind, back-transition and land vertically. Locked until the vehicle's mission has a landing point |
-| 6 | **QRTL** | Instant. Return home on the wing and land vertically |
+| 5 | **Land** | **Hold 1 s**. Circle down beside the landing point **L** on the wing, leave into the wind, back-transition and land vertically. Without an L it lands at home the same way |
 
-**Hold and Guide circles:** while circling, a panel above the dock sets the
+**Hold and Fly To circles:** while holding (press **Hold** again to hide or show it), or while the **Fly To** button is on, a panel above the dock sets the
 **altitude** (−10 / −1 / +1 / +10 m, or −50 … +50 ft; 20–5000 m), the
 **radius** (−50 … +50 m, 40–5000 m) and the **direction** (CW / CCW). Holding a
 button repeats and speeds up (×5 after 1 s, ×10 after 2.5 s). Changes apply
-live. The circle starts at the vehicle's `WP_LOITER_RAD`.
+live. The circle starts at the vehicle's `WP_LOITER_RAD`. Turn Fly To off to hide
+the panel; the circle keeps flying.
 
 ArduPlane flies a loiter **bigger than commanded**: `AP_L1_Control` scales the
 radius by EAS2TAS² (about +7 % at 700 m above sea level, more at higher fields,
@@ -82,14 +100,27 @@ GUIDED. In AUTO the altitude comes from the plan: edit the waypoint instead.
 The ALT chip shows the commanded altitude as `62→80` while the aircraft climbs
 or descends to it.
 
-**Land vs QRTL:**
+**Landing and failsafes:** there is one way down, and the failsafes use it too.
 
-| | **Land** | **QRTL** |
-|---|---|---|
-| Where | The landing point you planned (**L**) | Home, or the nearest rally point |
-| Descent | On the wing, on a circle beside L, down to the approach altitude | On the wing at RTL altitude, then on the rotors from about `Q_RTL_ALT` |
-| Approach direction | Into the current wind, with the circle on the side the aircraft comes from | Straight from wherever the aircraft is |
-| Needs | A landing point in the mission | Nothing: always available, so it's the emergency button |
+- **Land** recomputes the approach with the current wind and uploads it. It
+  circles down beside **L** on the wing, leaves the circle on a straight leg
+  into the wind, back-transitions and lands vertically. If the plan has no L,
+  **L is home**: every uploaded mission gets a landing, at L or at home.
+- **Failsafes fly the same landing.** The mission has a `DO_LAND_START` marker
+  just before the approach. With `RTL_AUTOLAND = 2`, any RTL jumps straight
+  into that landing instead of circling over home. Those RTLs are long RC loss
+  (`FS_LONG_ACTN = RTL`), GCS link loss (`FS_GCS_ENABL = 1`) and low battery
+  (`BATT_FS_LOW_ACT = RTL`). `Q_RTL_MODE` must be 0: other values make RTL do
+  its own vertical landing at home and skip L.
+- **Critical battery** stays `QLand`, landing vertically where it is, because
+  there may not be enough left to reach L.
+- **The on-board approach follows the wind.** In flight, the GCS re-uploads it
+  when the wind direction moves 30° or more (at most once a minute), so a
+  failsafe also lands into the current wind. A toast says when it does.
+- **Preflight checks all of these** and fixes them with one tap.
+- **Arming is refused if `RTL_AUTOLAND` is 0.** ArduPilot won't arm with a
+  `DO_LAND_START` in the mission and `RTL_AUTOLAND` at 0 ("DO_LAND_START set
+  and RTL_AUTOLAND disabled"); SYSTEMS explains it.
 
 **Bank angle:** how hard the aircraft banks is the autopilot's job.
 `ROLL_LIMIT_DEG` caps it (the SITL quadplane uses 65°, the ArduPlane default is
@@ -104,40 +135,90 @@ Everything is made for touch first, with the mouse as an alternative. Locked
 buttons say why when pressed (and on hover with a mouse).
 
 **SYSTEMS** in the telemetry bar counts problems. Tap it (or the red alert
-banner) to open the alerts panel: status pills (link, GPS, navigation, sensors,
-power, arming) and one card per problem. Each card says what's wrong, why it
-matters and what to try, with the raw data (EKF flags, the autopilot's
+banner) to open the alerts panel; tap it again, tap anywhere outside the panel
+or press `Esc` to close it. It shows status pills (link, GPS, navigation, sensors,
+power, arming) and one card per problem. Cards show their **title only**; tap a
+title to open it (critical ones arrive open). An open card says what's wrong,
+why it matters and what to try, with the raw data (EKF flags, the autopilot's
 message) in small print. The cards come from the EKF status, `SYS_STATUS` sensor
 health, GPS, battery and the link, plus the autopilot's PreArm and failsafe
 messages in plain language. PreArm cards stay while ArduPilot keeps repeating
 them (every 30 s) and clear when the vehicle arms. The panel only explains: it
 never changes the vehicle.
 
+The **FLIGHT** chip says in plain words what the aircraft is doing: ON GROUND,
+TAKEOFF, TRANSITION, CLIMB-OUT, ON PLAN · WP3, END HOLD, HOLD, FLY TO,
+LANDING · APPROACH / VERTICAL, RTL, QLAND (other modes by their ArduPilot name,
+which is also in the chip's small print). The **ETA** chip beside it shows what
+it is flying to and when it gets there. A rotor glyph lights while the lift
+rotors spin, and "· ROTOR ASSIST" flags Q_ASSIST in cruise.
+
+The **ALT** chip switches reference on a tap: **ASL** (sea level), **AGL**
+(the ground below: the rangefinder when its reading is valid, i.e. pointing
+down, fresh, inside its range and not at its maximum, the aircraft not banked
+or pitched over 30°; otherwise the terrain map, marked "terrain") and **AFL**
+(above the landing point's ground). AS · GS show whole numbers.
+
+The map's **nav box** (bottom right) shows the aircraft's coordinates and the
+ground below it, the target it is flying to (WPn, APPROACH, L, HOLD, FLY TO,
+END HOLD, CLIMB-OUT) with its distance (the ETA is on the ETA chip), and, under a mouse cursor, the
+cursor's coordinates, ground height, distance and ETA. The camera view shows
+the **CAMERA TARGET** (top of the left column, above AIRCRAFT): where the line of sight meets the
+terrain, its ground height and the slant range (≈ when no terrain tile is
+there and flat ground at home level is used).
+
 The **⚙** at the end of the bar opens **Settings**: altitude in metres or feet,
-and the flight trail (on/off, last 30 s / 1 / 2 / 5 / 10 min / all).
+speeds in m/s or knots, coordinates as decimal degrees, D° M′ S″ or UTM, the
+flight trail (on/off, last 30 s / 1 / 2 / 5 / 10 min / all), the
+**landing reserve** for the battery time left (20–40 %), and **offline maps**
+(see below).
+
+**Mouse over the map** shows the point under the cursor, bottom right:
+
+- its latitude and longitude;
+- the **ground height** above sea level, and above or below home;
+- its distance and bearing from the aircraft.
+
+Ground height comes from SRTM elevation data (AWS Terrain Tiles, about ±10 m).
+It measures the surface, so it includes roofs and tree tops.
 
 **SAFETY** in the bar is the hardware safety switch: `ON` (amber, motor
 outputs cut, Launch locked) or `OFF` (red, motors live). Hold it for 1 s to switch, in either
 direction (`MAV_CMD_DO_SET_SAFETY_SWITCH_STATE`). It's locked while armed:
 engaging safety in flight would cut the pusher and servos too. The GCS never
-changes it on its own.
+changes it on its own. **Safety is ON after every power-up**
+(`BRD_SAFETY_DEFLT = 1`, checked and fixed by preflight, applied after a
+reboot), so turning it off is always a deliberate step.
 
-After a QRTL (or RTL / QLAND) landing the vehicle sits in a mode ArduPlane can't
+After an RTL / QLAND landing (a failsafe) the vehicle sits in a mode ArduPlane can't
 arm in, so its pre-arm check fails. SYSTEMS shows that as an info card, not a
 fault: Launch switches mode before arming. `Esc` deselects or leaves
-Plan/Guide, `Del` deletes the selected point, and `Ctrl+Z` undoes a plan edit.
+Plan/Fly To, `Del` deletes the selected point, and `Ctrl+Z` undoes a plan edit.
 
 **The lift rotors are for takeoff and landing only.** Every flight action above
-keeps the aircraft on the wing. The **LIFT ROTORS** chip in the telemetry bar
-shows **OFF**, **ACTIVE** (hover / transition / on the ground) or **ASSIST**.
-ASSIST means the rotors spun up in wing-borne flight to prevent a stall
+keeps the aircraft on the wing. The rotor glyph on the **FLIGHT** chip lights
+while the lift rotors spin, and the chip adds **ROTOR ASSIST** when they spin
+in wing-borne flight. ASSIST means the rotors spun up in wing-borne flight to prevent a stall
 (`Q_ASSIST_SPEED` and friends), and it also raises a toast. The aircraft stays
 armed in cruise: disarming would stop the pusher too. The GCS reads
-`Q_GUIDED_MODE` at connect and shows an alert if it is 1, because Guide would
+`Q_GUIDED_MODE` at connect and shows an alert if it is 1, because Fly To would
 then end in a rotor hover.
 
-**Planning:** the waypoints form a **loop that is flown forever** until you
-press Hold, Land or QRTL.
+**Planning:** **ROUTE** in the plan strip picks how the waypoints are flown,
+until you press Hold or Land:
+
+- **⟳ Loop** (default): 1 → 2 → 3 → 1 → … forever.
+- **⇄ Back & forth**: 1 → 2 → 3 → 2 → 1 → 2 → … forever. With two
+  waypoints this is the same flight as the loop.
+- **→ One way, then hold**: 1 → 2 → 3 once, then it circles WP3 on the wing.
+  Select the last point to set the hold circle's **radius** (−50 / −10 / +10
+  / +50 m; default `WP_LOITER_RAD`) and **direction**. While the aircraft is
+  circling there in flight, the same panel as Fly To (**HOLD · END**) changes
+  its radius, direction and altitude live. The panel re-uploads the mission
+  and keeps circling the same point.
+
+The map draws a loop closed, the other two open, and marks the last point
+TURN BACK or HOLD.
 
 - **Map:** tap to add a waypoint, drag to move one, pinch to zoom.
 - **Editing a point:** tap a point to select it. A panel then lets you set
@@ -154,12 +235,16 @@ press Hold, Land or QRTL.
 The upload is built as:
 
 ```
-HOME → NAV_VTOL_TAKEOFF (40 m) → WP1 … WPn → DO_JUMP(WP1, forever)
-     [→ NAV_LOITER_TO_ALT (approach circle beside L) → NAV_VTOL_LAND at L]
+HOME → NAV_VTOL_TAKEOFF (40 m) → route → DO_LAND_START
+     → NAV_LOITER_TO_ALT (approach circle beside L) → NAV_VTOL_LAND at L
+
+route, Loop:          WP1 … WPn → DO_JUMP(WP1, forever)
+route, Back & forth:  WP1 … WPn, WPn-1 … WP2 → DO_JUMP(WP1, forever)
+route, One way:       WP1 … WPn-1 → NAV_LOITER_UNLIM at WPn
 ```
 
-With a single waypoint, the aircraft circles it (`NAV_LOITER_UNLIM`) instead of
-jumping. The mission never reaches the landing by itself.
+With a single waypoint, the aircraft circles it (`NAV_LOITER_UNLIM`) whatever
+the route. The mission never reaches the landing by itself.
 
 **The landing approach.** When you press **Land**, the GCS does four things:
 
@@ -185,11 +270,118 @@ The approach is laid out like this:
 The map draws the circle, the leg and a wind arrow. They are faint while
 circling the loop and bright while landing.
 
+## Preflight
+
+On the ground, dock slot 3 is **PREFLIGHT** (a progress ring shows how far
+you are). **Launch stays locked until it passes.** A 3 s hold on "launch
+without preflight" overrides that, and the override is written to the report.
+
+It is a full-window checklist in 12 stages:
+
+| Stage | What happens |
+|---|---|
+| Aircraft | Firmware, frame (`Q_FRAME_CLASS/TYPE`) and output map are read; you set the battery chemistry, cells, capacity and typical flight time once |
+| Site | Airspace, weather, a clear 10 m takeoff circle, the landing point, bystanders, GCS power |
+| Airframe | Wing and booms, props (CW/CCW per position shown), linkages, **pitot cover off**, CG, battery, antennas |
+| Power | Charge per cell for the chemistry, cell balance, current sensor, autopilot supply |
+| Links & RC | Telemetry rate and radio margin; move each stick to both ends; mode-switch positions with their modes; **RC failsafe test** (turn the transmitter off) |
+| Sensors | Gyro, level, accelerometer (simple or 6-position with each pose drawn), **compass** (from a known heading, or rotate it while a sphere fills in), baro/airspeed zero, pitot blow test, attitude follows the aircraft, heading matches; health, EKF, GPS, home, logging, vibration |
+| Surfaces | The GCS sweeps ailerons, elevator and rudder in MANUAL (disarmed) while the picture shows which way each must move; a wrong one can be reversed with one tap; stabilisation check in FBWA |
+| Motors | Props off (or tied down), safety OFF, then each lift motor A–D spins 2 s at 15 %: the picture lights the position and spin direction it must have, and the GCS checks the right output moved. The pusher spins 2 s at 12 % in MANUAL and is force-disarmed |
+| Payload | Gimbal sweep, video frames arriving |
+| Settings | 18 parameter checks (Q_GUIDED_MODE, weathervaning into the wind, Q_ASSIST_SPEED, airspeed limits, arming checks, RC/GCS/battery failsafes and voltages for your pack, fence, loiter radius vs bank limit, ...), each with the reason and a one-tap fix (confirmed, read back, logged) where there is a safe value |
+| Mission | On the vehicle, landing point, altitudes, range, laps per pack |
+| Ready | The GCS selects AUTO, resets the mission to its takeoff and runs the pre-arm checks (their messages are listed if any fail); then safety OFF and **READY TO LAUNCH** |
+
+Tests that move or spin anything need a 1 s hold, have a **STOP ALL** button,
+and have vehicle-side timeouts as well. A pass stays valid until the autopilot
+reboots, the battery is swapped, a parameter is changed elsewhere, an hour
+passes, or it flies; after a flight a short **turnaround** preflight is offered.
+Every run is saved as JSON under `~/.local/share/mavlink_gcs_ui/mavlink_gcs_ui/preflight/`.
+
+## Offline maps
+
+The map works **offline only** by default: nothing is fetched while you
+browse. You choose what to download in Settings ⚙ → **OFFLINE**. Settings →
+OFFLINE → **ONLINE TILES: ON** fetches missing satellite while browsing, if
+you want that.
+
+| Layer | Where it comes from | Coverage |
+|---|---|---|
+| **Map** (streets) | OpenStreetMap vector data (Protomaps daily build, ODbL), drawn by the app in the HUD's style | the **country pack**: Israel + ~50 km, every zoom, sharp to the deepest |
+| **Sat** | Esri World Imagery | **country pack**: zoom 8–14 (≈10 m/px); **full-detail areas** you draw: zoom 15–18 (≈0.5 m/px) |
+| Ground height (hover) | AWS Terrain Tiles (SRTM) | country: zoom 12 (≈30 m); full-detail areas: zoom 13 |
+
+- **Missing satellite is filled in.** Where there's no satellite imagery (outside your areas, or deeper
+  than Esri has, which Esri answers with a grey "Map data not yet available" tile), the map shows the
+  nearest coarser imagery enlarged, or the street map. The no-data answer is remembered (`{y}.none`),
+  so it isn't fetched again.
+- **Street labels:** Hebrew or English, under Settings → MAP → MAP LABELS.
+
+**Country pack.** Settings → OFFLINE → **DOWNLOAD COUNTRY**:
+
+1. The street map: about 175,000 tiles, about 235 MB, about a minute. Only the index pieces and tile
+   ranges covering the area are read from the 140 GB planet file.
+2. Then elevation and satellite: about 46,000 tiles, about 1 GB.
+
+Afterwards the button reads **CHECK & COMPLETE**. It fetches only what's new or missing:
+
+- **The street map:** only if a newer daily build exists than the one installed (recorded in
+  `map.build`). It's a ~1 s check otherwise.
+- **The country's satellite and ground height:** missing tiles only.
+- **Your full-detail areas:** their missing tiles, for example ones that failed before.
+
+Nothing already on disk is downloaded again.
+
+**Full-detail areas.** Settings → OFFLINE → **SELECT AREA ON MAP**:
+
+- Drag a rectangle with a finger or the mouse, and drag a corner to adjust it.
+- The panel shows its size, the **new tiles** and the tiles **already on disk** before you press
+  **DOWNLOAD**. Areas you already have show as dashed outlines.
+- Each tile is stored once, by its position, so overlapping areas share tiles and only the missing ones
+  are downloaded.
+- **CLEAR FULL DETAIL** removes all full-detail satellite and ground height after an "are you sure?".
+  The country pack and the street map stay. **DELETE ALL** asks the same way.
+
+**Without the app** (another computer, or preparing in advance), `tools/fetch_offline.py` does the same
+and needs only Python 3:
+
+```sh
+tools/fetch_offline.py --country israel --out ./offline              # street map + country satellite + ground height
+tools/fetch_offline.py --country israel --only vector --out ./offline
+tools/fetch_offline.py --bbox 34.75,32.05,34.82,32.12 --out ./offline  # a full-detail area (min_lon,min_lat,max_lon,max_lat)
+tools/fetch_offline.py --country israel --out ./offline --dry-run    # sizes only
+```
+
+The street map can also be cut with the official PMTiles tool:
+`pmtiles extract https://build.protomaps.com/<YYYYMMDD>.pmtiles map.pmtiles --bbox=33.7,29.0,36.5,33.8`
+(the dates are listed at `https://build-metadata.protomaps.dev/builds.json`).
+
+Copy the folder to `~/.local/share/mavlink_gcs_ui/mavlink_gcs_ui/offline/` (the app name appears twice) on the field computer, or point
+Settings → OFFLINE → CHANGE at it. Its layout:
+
+```
+offline/map.pmtiles                     street map (any *.pmtiles with vector tiles is used)
+offline/esri_imagery/{z}/{x}/{y}.jpg    satellite        ({y}.none: no imagery at that zoom)
+offline/elevation/{z}/{x}/{y}.png       ground height    ("terrarium": m = R*256 + G + B/256 - 32768)
+offline/map.build                       which street map build is installed
+offline/areas.json                      the full-detail areas (outlines on the map)
+```
+
+- **Other sources work too.** Any slippy-tile source in that layout works for satellite (e.g. tiles
+  exported from QGIS or MOBAC). Each layer accepts `.png`, `.jpg`, `.jpeg`, `.webp` or `.img`.
+- **Tile providers have terms.** Esri imagery and others have their own terms; OpenStreetMap's tile
+  server refuses bulk downloads, which is why the street map comes from the vector data instead.
+- **Online URLs are configurable.** `map/satellite_url`, `map/elevation_url` and `map/streets_url`
+  (`{z}` `{x}` `{y}` templates) in the settings file change where online tiles come from.
+
 ## Settings
 
 The in-app settings screen (⚙) switches altitudes between metres and feet
-everywhere: HUD tape, telemetry bar, map labels, panels and steppers.
-Distances and speeds stay metric.
+everywhere (HUD tape, telemetry bar, map labels, panels and steppers), speeds
+between m/s and knots (AS/GS, HUD, wind), and coordinates between decimal
+degrees, D° M′ S″ and UTM (WGS84). Distances stay metric. `core/coords` also
+parses those formats, for coordinate inputs.
 
 `~/.config/mavlink_gcs_ui/mavlink_gcs_ui.conf` is created on first run.
 You can edit the link and video ports, takeoff, default waypoint and landing approach altitude,
@@ -231,7 +423,7 @@ The flight-path marker (circle with three ticks) is where the aircraft is
 actually going. Its track is predicted every frame along with the heading, so it
 stays steady in turns; in wind it sits beside the nose by the crab angle.
 
-In Guide mode, a tap on the video is cast along the real LOS to find the
+In Fly To mode, a tap on the video is cast along the real LOS to find the
 ground point.
 
 **Gimbal angle frame.** The MAVLink spec says a gimbal reports roll and pitch in
@@ -256,8 +448,38 @@ components for the current heading (tap either to shrink both). The camera HUD
 has the same gauge, relative to the nose by default; tap it to switch to
 north-up.
 
-**Resume Plan** rejoins the loop at the **nearest waypoint** (the next one if
-the aircraft is already on top of the nearest), not where it left off.
+**Resume Plan** rejoins the route at the **nearest waypoint** (the next one if
+the aircraft is already on top of the nearest), not where it left off. On a
+back-and-forth it keeps the direction the aircraft is flying. On a one-way
+route it never wraps back to WP1.
+
+**Battery time left.** In flight the battery chip shows, for example, **14:20
+left**. That's how long the aircraft can keep flying the mission and still have
+enough to do all of this, recomputed every 2 s:
+
+- fly back to L (or home), into a wind taken **50 % stronger** than measured;
+- circle down the approach, **go around once**, and land on the lift rotors.
+  The rotor time covers the transition, the descent and 30 s of extra hover;
+- with all of that **× 1.3**, and the **landing reserve** (Settings → BATTERY,
+  default 25 % of the pack) left untouched.
+
+It uses the lower of the two charge readings (mAh used and the autopilot's %).
+It costs the return from the farthest point of the plan, not only from where
+the aircraft is now. The cruise current is learned in flight and the hover
+current during the takeoff (4 × cruise until measured).
+
+The shown time is smoothed so a climb or a gust doesn't make it jump. The cruise
+current is a 5 min average, and between estimates the shown time runs down like
+a clock, moving only part of the way toward each new estimate (3 min time
+constant). The critical alert doesn't wait for the smoothing.
+
+- Under 5 min left: amber, with a "head back soon" card.
+- At 0:00: **LAND NOW** and a warning card.
+- If even a return from here would eat into the reserve: a critical card and
+  the red banner.
+
+It only warns; it never lands by itself. Tap the chip for the card that
+explains the numbers. It needs `BATT_CAPACITY` and a current sensor.
 
 Map tiles (OpenStreetMap / Esri World Imagery) are cached under
 `~/.cache/mavlink_gcs_ui/tiles`. The map works offline with whatever is
@@ -270,4 +492,8 @@ src/core/   pure C++: vehicle state, ArduPlane modes, geo + camera ray casting, 
 src/link/   UDP worker thread, MAVLink decode, mission transfer state machine, command sender
 src/ui/     Qt widgets: view host/PiP, map, camera HUD, telemetry bar, dock, effects, tiles, video
 tests/      unit tests for core + link (no Qt, no network)
+tools/      sitl.sh (SITL at your location), fetch_offline.py (offline map data without the app)
+resources/  app icon PNGs (from `mavlink_gcs_ui --export-icon DIR`) and the .desktop entry
 ```
+
+`cmake --install build` installs the binary, the desktop entry and the icon.

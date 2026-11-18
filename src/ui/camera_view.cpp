@@ -201,6 +201,7 @@ void CameraView::mousePressEvent(QMouseEvent* e) {
 }
 
 void CameraView::paintEvent(QPaintEvent*) {
+    ++paints_;
     QPainter p(this);
     beginView(p);
     const QRectF r = rect();
@@ -217,37 +218,55 @@ void CameraView::paintEvent(QPaintEvent*) {
         paintSynthetic(p);
     }
 
-    // vignette + scanlines make it read as a sensor feed
-    QRadialGradient vg(r.center(), std::hypot(r.width(), r.height()) / 2.0);
-    vg.setColorAt(0.55, QColor(0, 0, 0, 0));
-    vg.setColorAt(1.0, QColor(0, 0, 0, 150));
-    p.fillRect(r, vg);
-    if (!reducedMotion() && !compact_) {
-        drawScanlines(p, r, 0.6);
+    // vignette + scanlines make it read as a sensor feed (one cached layer)
+    const bool scan = !reducedMotion() && !compact_;
+    const qreal dpr = devicePixelRatioF();
+    if (overlay_.isNull() || overlay_size_ != size() || overlay_scan_ != scan || overlay_.devicePixelRatio() != dpr) {
+        overlay_ = QPixmap((QSizeF(size()) * dpr).toSize());
+        overlay_.setDevicePixelRatio(dpr);
+        overlay_.fill(Qt::transparent);
+        QPainter op(&overlay_);
+        QRadialGradient vg(r.center(), std::hypot(r.width(), r.height()) / 2.0);
+        vg.setColorAt(0.55, QColor(0, 0, 0, 0));
+        vg.setColorAt(1.0, QColor(0, 0, 0, 150));
+        op.fillRect(r, vg);
+        if (scan) {
+            drawScanlines(op, r, 0.6);
+        }
+        overlay_size_ = size();
+        overlay_scan_ = scan;
     }
+    p.drawPixmap(QPointF(0, 0), overlay_);
 
     if (live() && !compact_) {
         // Over real video the thin green symbology vanishes on bright scenes:
         // render it once, then stamp a dark copy at +-1 px underneath as an outline.
-        const qreal dpr = devicePixelRatioF();
-        QImage hud((QSizeF(size()) * dpr).toSize(), QImage::Format_ARGB32_Premultiplied);
-        hud.setDevicePixelRatio(dpr);
-        hud.fill(Qt::transparent);
+        const QSize px = (QSizeF(size()) * dpr).toSize();
+        if (hud_img_.size() != px) {
+            hud_img_ = QImage(px, QImage::Format_ARGB32_Premultiplied);
+            hud_shadow_ = QImage(px, QImage::Format_ARGB32_Premultiplied);
+        }
+        hud_img_.setDevicePixelRatio(dpr);
+        hud_shadow_.setDevicePixelRatio(dpr);
+        hud_img_.fill(Qt::transparent);
         {
-            QPainter hp(&hud);
+            QPainter hp(&hud_img_);
             hp.setRenderHint(QPainter::Antialiasing);
             paintHud(hp);
         }
-        QImage shadow = hud;
         {
-            QPainter sp(&shadow);
+            // the same shapes in near-black: copy, then recolour keeping alpha
+            QPainter sp(&hud_shadow_);
+            sp.setCompositionMode(QPainter::CompositionMode_Source);
+            sp.drawImage(QPointF(0, 0), hud_img_);
             sp.setCompositionMode(QPainter::CompositionMode_SourceIn);
             sp.fillRect(QRectF(QPointF(0, 0), QSizeF(size())), QColor(0, 0, 0, 210));
         }
-        for (const QPointF off : {QPointF(-1, 0), QPointF(1, 0), QPointF(0, -1), QPointF(0, 1)}) {
-            p.drawImage(off, shadow);
+        // a diagonal pair of offsets outlines every edge well enough, at half the cost of four
+        for (const QPointF off : {QPointF(-1, -1), QPointF(1, 1)}) {
+            p.drawImage(off, hud_shadow_);
         }
-        p.drawImage(QPointF(0, 0), hud);
+        p.drawImage(QPointF(0, 0), hud_img_);
     } else {
         paintHud(p);
     }
@@ -326,7 +345,8 @@ CameraView::Layout CameraView::layout() const {
     const QRectF r = rect();
     const QPointF c = r.center();
     constexpr double kColX = 16, kColW = 200;
-    l.aircraft = QRectF(kColX, 120, kColW, 92);
+    l.target = QRectF(kColX, 120, kColW, 112);
+    l.aircraft = QRectF(kColX, l.target.bottom() + 8, kColW, 92);
     l.los = QRectF(kColX, l.aircraft.bottom() + 8, kColW, 104);
     l.chip = QRectF(kColX, l.los.bottom() + 8, kColW, 48);
     l.wind = QRectF(kColX, l.chip.bottom() + 8, kColW, 120);
@@ -443,26 +463,29 @@ void CameraView::paintHud(QPainter& p) {
     paintReadouts(p);
     paintRefChip(p);
     paintWind(p);
+    paintLosTarget(p);
     const Layout lay = layout();
-    paintVerticalTape(p, lay.as_tape, as_.value, 2.0, true, QStringLiteral("AS"));
+    paintVerticalTape(p, lay.as_tape, units::speedToDisplay(as_.value),
+                      units::speedUnit() == units::Speed::Knots ? 5.0 : 2.0, true,
+                      QStringLiteral("AS %1").arg(units::speedUnitLabel()));
     paintVerticalTape(p, lay.alt_tape, units::altToDisplay(alt_.value), units::feet() ? 20.0 : 5.0, false,
                       QStringLiteral("ALT %1").arg(units::altUnitLabel()));
 
     // status line under the crosshair
     {
-        const VtolState v = effectiveVtolState(s_);
-        QString text = QStringLiteral("%1  ·  %2  ·  GS %3  ·  VS %4")
-                           .arg(s_.has_heartbeat ? QString::fromStdString(s_.mode_name) : QStringLiteral("—"))
-                           .arg(QString::fromUtf8(vtolStateName(v)))
-                           .arg(s_.groundspeed, 0, 'f', 1)
-                           .arg(s_.climb, 0, 'f', 1);
+        const QString vs = units::feet() ? QStringLiteral("%1 ft/min").arg(std::lround(s_.climb * units::kFeetPerMeter * 60.0))
+                                         : QStringLiteral("%1 m/s").arg(s_.climb, 0, 'f', 1);
+        QString text = QStringLiteral("%1  ·  GS %2  ·  VS %3")
+                           .arg(flight_label_.isEmpty() ? QStringLiteral("—") : flight_label_)
+                           .arg(units::speedText(s_.groundspeed))
+                           .arg(vs);
         const QFont fnt = monoFont(12, true);
         // under the heading box: the bottom centre is where the dock panels open
         drawText(p, QRectF(c.x() - 300, 130, 600, 20), Qt::AlignCenter, text, fnt, alpha(hud, 0.9));
     }
 
     if (guide_) {
-        const QString text = QStringLiteral("GUIDE · tap the ground to send the aircraft");
+        const QString text = QStringLiteral("FLY TO · tap the ground to send the aircraft");
         const QFont fnt = labelFont(11);
         const double w = QFontMetricsF(fnt).horizontalAdvance(text) + 30;
         const QRectF box(c.x() - w / 2, 156, w, 26);
@@ -540,7 +563,7 @@ void CameraView::paintRollScale(QPainter& p, const QPointF& c, double rad) {
 void CameraView::paintRefChip(QPainter& p) {
     // under the AIRCRAFT box (see paintReadouts)
     const bool body = ref_ == HudRef::Body;
-    const QColor col = body ? kAmber : kGreen;
+    const QColor col = body ? kGreen : kAmber;  // matches the AIRCRAFT (green) and LOS (yellow) boxes
     ref_chip_ = layout().chip;
     drawGlass(p, chamferPath(ref_chip_, 7), col, 0.85, kGlassDeep);
     const bool misaligned = body && live();
@@ -623,7 +646,7 @@ void CameraView::paintHeadingTape(QPainter& p, const QRectF& r) {
     if (std::abs(other) < span / 2) {
         const double x = r.center().x() + other * ppd;
         p.setPen(Qt::NoPen);
-        p.setBrush(alpha(body ? kAmber : kCyan, 0.9));
+        p.setBrush(alpha(body ? kAmber : kGreen, 0.9));
         p.drawPolygon(QPolygonF({QPointF(x, r.top() + 2), QPointF(x - 5, r.top() - 6), QPointF(x + 5, r.top() - 6)}));
     }
     p.restore();
@@ -692,7 +715,7 @@ void CameraView::paintReadouts(QPainter& p) {
         p.drawRect(box);
         drawText(p, QRectF(box.left() + 10, box.top() + 5, box.width() - 20, 16), Qt::AlignLeft | Qt::AlignVCenter,
                  gimbal_ ? QStringLiteral("GIMBAL · LOS") : QStringLiteral("FIXED MOUNT · LOS"), labelFont(10.5),
-                 gimbal_ ? hud : kAmber);
+                 kAmber);
         // relative to the platform: the main numbers
         row(box, 0, QStringLiteral("PAN"), signedDeg(pan_rel_.value), hud);
         row(box, 1, QStringLiteral("TILT"), signedDeg(tilt_rel_.value), hud);
@@ -705,6 +728,48 @@ void CameraView::paintReadouts(QPainter& p) {
         drawText(p, QRectF(box.left() + 56, box.top() + 26 + 2 * 19 + 2, box.width() - 64, 16),
                  Qt::AlignRight | Qt::AlignVCenter, earth, monoFont(11), alpha(hud, 0.8));
     }
+}
+
+void CameraView::paintLosTarget(QPainter& p) {
+    // top of the left column, above AIRCRAFT: what the camera looks at
+    if (compact() || !los_target_.valid) {
+        return;
+    }
+    const QColor hud = kGreen;
+    const QRectF box = layout().target;
+    p.setPen(QPen(alpha(hud, 0.5), 1));
+    p.setBrush(alpha(kBg, 0.55));
+    p.drawRect(box);
+    drawText(p, QRectF(box.left() + 10, box.top() + 5, box.width() - 20, 16), Qt::AlignLeft | Qt::AlignVCenter,
+             QStringLiteral("CAMERA TARGET") + (los_target_.approximate ? QStringLiteral(" ≈") : QString()),
+             labelFont(10.5), los_target_.approximate ? kAmber : hud);
+    if (!los_target_.hit) {
+        drawText(p, box.adjusted(10, 24, -10, -8), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
+                 QStringLiteral("above the horizon or beyond 3 km"), monoFont(11, true), alpha(hud, 0.7));
+        return;
+    }
+    // the coordinates, full width: latitude and longitude on their own lines
+    // (UTM fits on one)
+    const QString pos = units::coordText(los_target_.lat, los_target_.lon);
+    const QStringList parts = pos.split(QStringLiteral("  "), Qt::SkipEmptyParts);
+    const QFont cf = monoFont(11.5, true);
+    double y = box.top() + 24;
+    for (const QString& line : parts.size() == 2 ? parts : QStringList{pos}) {
+        drawText(p, QRectF(box.left() + 10, y, box.width() - 20, 17), Qt::AlignLeft | Qt::AlignVCenter, line, cf, hud);
+        y += 17;
+    }
+    if (parts.size() != 2) {
+        y += 17;
+    }
+    const QFont lf = labelFont(10);
+    auto row = [&](const QString& k, const QString& v) {
+        drawText(p, QRectF(box.left() + 10, y, 64, 18), Qt::AlignLeft | Qt::AlignVCenter, k, lf, alpha(hud, 0.65));
+        drawText(p, QRectF(box.left() + 70, y, box.width() - 80, 18), Qt::AlignRight | Qt::AlignVCenter, v,
+                 monoFont(13, true), hud);
+        y += 19;
+    };
+    row(QStringLiteral("GROUND"), QStringLiteral("%1 MSL").arg(units::altText(los_target_.ground)));
+    row(QStringLiteral("SLANT"), units::distanceText(los_target_.slant));
 }
 
 void CameraView::paintVerticalTape(QPainter& p, const QRectF& r, double value, double step, bool left,

@@ -67,14 +67,36 @@ PlanStrip::PlanStrip(QWidget* parent) : QWidget(parent) {
     row->addWidget(cancel_);
     outer->addLayout(row);
 
+    // how the route is flown: one exclusive, finger-sized choice
+    auto* route_row = new QHBoxLayout;
+    route_row->setSpacing(0);
+    auto* route_title = new QLabel(QStringLiteral("ROUTE"));
+    route_title->setObjectName(QStringLiteral("planTitle"));
+    loop_ = new QPushButton(QStringLiteral("⟳ LOOP"));
+    back_forth_ = new QPushButton(QStringLiteral("⇄ BACK && FORTH"));
+    one_way_ = new QPushButton(QStringLiteral("→ ONE WAY, THEN HOLD"));
+    route_row->addWidget(route_title);
+    route_row->addSpacing(8);
+    for (auto* b : {loop_, back_forth_, one_way_}) {
+        b->setObjectName(QStringLiteral("planTool"));
+        b->setCheckable(true);
+        b->setFocusPolicy(Qt::NoFocus);
+        b->setCursor(Qt::PointingHandCursor);
+        b->setMinimumHeight(48);
+        route_row->addWidget(b);
+    }
+    loop_->setChecked(true);
+    route_row->addSpacing(12);
     warn_ = new QLabel;
     warn_->setObjectName(QStringLiteral("planWarn"));
     warn_->hide();
-    outer->addWidget(warn_);
+    route_row->addWidget(warn_, 1);
+    outer->addSpacing(4);
+    outer->addLayout(route_row);
 
-    auto hint = new QLabel(QStringLiteral("tap: add  ·  tap a point: edit altitude / delete  ·  drag: move  ·  pinch: zoom  ·  the route loops until you Land"));
-    hint->setObjectName(QStringLiteral("planHint"));
-    outer->addWidget(hint);
+    hint_ = new QLabel;
+    hint_->setObjectName(QStringLiteral("planHint"));
+    outer->addWidget(hint_);
 
     setStyleSheet(QStringLiteral(R"(
         QLabel { background: transparent; color: #e6f1f8; }
@@ -100,7 +122,10 @@ PlanStrip::PlanStrip(QWidget* parent) : QWidget(parent) {
     connect(undo_, &QPushButton::clicked, this, &PlanStrip::undoRequested);
     connect(clear_, &QPushButton::clicked, this, &PlanStrip::clearRequested);
     connect(cancel_, &QPushButton::clicked, this, &PlanStrip::cancelRequested);
-    setInfo(0, 0, 0, false, false);
+    connect(loop_, &QPushButton::clicked, this, [this] { emit patternChanged(Pattern::Loop); });
+    connect(back_forth_, &QPushButton::clicked, this, [this] { emit patternChanged(Pattern::BackForth); });
+    connect(one_way_, &QPushButton::clicked, this, [this] { emit patternChanged(Pattern::OneWay); });
+    setInfo(0, 0, 0, false, false, Pattern::Loop);
 }
 
 void PlanStrip::setLandingTool(bool on) {
@@ -108,18 +133,32 @@ void PlanStrip::setLandingTool(bool on) {
     land_tool_->setChecked(on);
 }
 
-void PlanStrip::setInfo(int waypoints, double lap_m, double lap_s, bool has_land, bool can_undo) {
+void PlanStrip::setInfo(int waypoints, double route_m, double route_s, bool has_land, bool can_undo,
+                        Pattern pattern) {
     QString text = QStringLiteral("%1 pts").arg(waypoints);
     if (waypoints > 1) {
-        text += QStringLiteral("  ·  lap %1  ·  %2").arg(formatDistance(lap_m), formatDuration(lap_s));
+        const QString what = pattern == Pattern::OneWay      ? QStringLiteral("one way")
+                             : pattern == Pattern::BackForth ? QStringLiteral("out & back")
+                                                             : QStringLiteral("lap");
+        text += QStringLiteral("  ·  %1 %2  ·  %3").arg(what, formatDistance(route_m), formatDuration(route_s));
     } else if (waypoints == 1) {
         text += QStringLiteral("  ·  circle");
     }
     text += has_land ? QStringLiteral("  ·  L set") : QStringLiteral("  ·  no L");
     info_->setText(text);
     warn_->setVisible(!has_land && waypoints > 0);
-    warn_->setText(QStringLiteral("No landing point: the Land button stays locked; QRTL still returns home"));
+    warn_->setText(QStringLiteral("No landing point: it will land at home (Land and failsafes)"));
     info_->setMinimumWidth(info_->fontMetrics().horizontalAdvance(info_->text()) + 8);
+    loop_->setChecked(pattern == Pattern::Loop);
+    back_forth_->setChecked(pattern == Pattern::BackForth);
+    one_way_->setChecked(pattern == Pattern::OneWay);
+    const QString flown = pattern == Pattern::OneWay
+                              ? QStringLiteral("flies the route once, then circles the last point until you Land")
+                          : pattern == Pattern::BackForth
+                              ? QStringLiteral("flies to the last point and back, over and over, until you Land")
+                              : QStringLiteral("the route loops until you Land");
+    hint_->setText(QStringLiteral("tap: add  ·  tap a point: edit altitude / delete  ·  drag: move  ·  pinch: zoom  ·  ") +
+                   flown);
     undo_->setEnabled(can_undo);
     clear_->setEnabled(waypoints > 0 || has_land);
     adjustSize();

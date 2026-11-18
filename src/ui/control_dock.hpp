@@ -11,7 +11,7 @@
 
 namespace gcs::ui {
 
-enum class DockIcon { Plan, Upload, Launch, Takeoff, Auto, Guide, Hold, Land, Qrtl };
+enum class DockIcon { Plan, Upload, Launch, Takeoff, Auto, Guide, Hold, Land, Preflight };
 
 struct DockSlotSpec {
     QString label;
@@ -25,14 +25,14 @@ struct DockSlotSpec {
     bool long_press = false;       // tap = triggered, hold = longPressed
 };
 
-// Floating "ability bar" with exactly six slots. Purely presentational: it
+// Floating "ability bar" with exactly five slots. Purely presentational: it
 // reports intents (triggered / longPressed / blocked) and the MainWindow
-// decides what they mean. Keys 1-6 are routed in via pressSlot/releaseSlot.
+// decides what they mean. Keys 1-5 are routed in via pressSlot/releaseSlot.
 class ControlDock : public QWidget {
     Q_OBJECT
 
 public:
-    static constexpr int kSlots = 6;
+    static constexpr int kSlots = 5;
     static constexpr double kHoldSeconds = 1.0;
     static constexpr double kLongPressSeconds = 0.8;
 

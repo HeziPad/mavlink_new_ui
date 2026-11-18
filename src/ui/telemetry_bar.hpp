@@ -1,7 +1,10 @@
 #pragma once
 
 #include "anim.hpp"
+#include "core/flight_status.hpp"
 #include "core/health.hpp"
+
+#include <optional>
 
 #include <QWidget>
 
@@ -23,11 +26,23 @@ public:
     void setState(const VehicleState& s, Clock::time_point now);
     void setAdvisories(const std::vector<Advisory>& list);
     void setSystemsOpen(bool open);
+    void setFlightStatus(const FlightStatus& f);
+    void setNavTarget(const NavTarget& t) { nav_ = t; }  // the ETA chip
+    // the altitude chip's other references (ASL comes from the state):
+    // AGL (from the rangefinder when `agl_rangefinder`, else terrain) and
+    // AFL (above the landing point's ground); nullopt = unknown
+    void setAltitudes(std::optional<double> agl, bool agl_rangefinder, std::optional<double> afl);
+    void setAltRef(int ref) { alt_ref_ = ref; }
+    // Battery time left (core/endurance): flying time before it must head
+    // back, estimated at `at`; the chip counts down from there. level:
+    // endurance::Level (0 none .. 3 critical).
+    void setEndurance(bool valid, double time_left_s, int level, Clock::time_point at);
     void tick(double dt);
-    QSize sizeHint() const override { return {1330, 50}; }
+    QSize sizeHint() const override { return {1440, 50}; }
 
 signals:
     void settingsRequested();
+    void altRefChanged(int ref);  // tapped: 0 ASL, 1 AGL, 2 AFL
     void systemsTapped();
     // SAFETY held for kSafetyHold: toggle it (`make_safe` = engage)
     void safetyToggleRequested(bool make_safe);
@@ -48,9 +63,13 @@ private:
     Clock::time_point rate_t_{};
 
     Tween alt_, as_, gs_, batt_;
-    Pulse mode_flash_, vtol_flash_;
-    std::string last_mode_;
-    int last_vtol_ = -1;
+    Pulse mode_flash_;  // the flight chip, on a change of state
+    FlightStatus flight_;
+    NavTarget nav_;
+    int alt_ref_ = 0;
+    std::optional<double> agl_, afl_;
+    bool agl_rangefinder_ = false;
+    QRectF alt_rect_;
     double time_ = 0.0;
 
     QRectF sys_rect_;
@@ -68,6 +87,12 @@ private:
     int adv_bad_ = 0;   // Warning + Critical
     int adv_warn_ = 0;  // Caution
     bool adv_critical_ = false;
+
+    bool endurance_valid_ = false;
+    double endurance_s_ = 0.0;
+    int endurance_level_ = 0;
+    Clock::time_point endurance_at_{};
+    QRectF batt_rect_;
 };
 
 }  // namespace gcs::ui

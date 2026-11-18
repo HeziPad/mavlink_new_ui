@@ -20,7 +20,7 @@ static void testLayout() {
     const LandingApproach appr = computeLandingApproach(*plan.land, in);
     const auto items = buildLoopMission(-35.363, 149.165, 584.0, plan, 40.0f, &appr);
     const size_t n = plan.wps.size();
-    CHECK(items.size() == n + 5);  // home, takeoff, n wps, jump, approach circle, land
+    CHECK(items.size() == n + 6);  // home, takeoff, n wps, jump, land start, approach circle, land
 
     for (size_t i = 0; i < items.size(); ++i) {
         CHECK(items[i].seq == i);
@@ -49,7 +49,11 @@ static void testLayout() {
     CHECK_NEAR(jump.param1, 2.0, 1e-6);
     CHECK_NEAR(jump.param2, -1.0, 1e-6);  // forever
 
-    const auto& circle = items[n + 3];
+    const auto& start = items[n + 3];
+    CHECK(start.command == mav::kCmdDoLandStart);
+    CHECK(start.x == toE7(-35.362));
+    CHECK(seqToWaypointIndex(items, static_cast<int>(n + 3)) == -1);  // not a loop point
+    const auto& circle = items[n + 4];
     CHECK(circle.command == mav::kCmdNavLoiterToAlt);
     CHECK(circle.x == toE7(appr.c_lat));
     CHECK_NEAR(std::abs(circle.param2), appr.radius, 1e-3);
@@ -57,13 +61,13 @@ static void testLayout() {
     CHECK_NEAR(circle.param4, 1.0, 1e-6);  // exit on the tangent
     CHECK_NEAR(circle.z, 35.0, 1e-6);
 
-    const auto& land = items[n + 4];
+    const auto& land = items[n + 5];
     CHECK(land.command == mav::kCmdNavVtolLand);
     CHECK_NEAR(land.param1, 0.0, 1e-6);  // straight in, not the spiral option
     CHECK(land.x == toE7(-35.362));
     CHECK_NEAR(land.z, 0.0, 1e-6);  // ground: ArduPlane's descent profile reference
     CHECK_NEAR(extractPlan(items).land->alt_rel, 35.0, 1e-6);  // approach alt kept via the circle
-    CHECK(landSeq(items) == static_cast<int>(n + 3));  // landing starts at the circle
+    CHECK(landSeq(items) == static_cast<int>(n + 4));  // landing starts at the circle
 
     // the uploaded approach can be recovered for drawing
     const auto back = extractApproach(items);
@@ -282,7 +286,134 @@ static void testNearestLoopSeq() {
     CHECK(nearestLoopSeq({}, 0, 0, 0) == -1);
 }
 
+static std::vector<MissionItem> patternMission(Pattern pattern, size_t n, bool with_land) {
+    MissionPlan plan;
+    plan.pattern = pattern;
+    for (size_t i = 0; i < n; ++i) {
+        plan.wps.push_back({47.0 + 0.01 * static_cast<double>(i), 8.0 + 0.003 * static_cast<double>(i * i),
+                            80.0f + 5.0f * static_cast<float>(i)});
+    }
+    LandingApproach appr;
+    if (with_land) {
+        plan.land = UserWaypoint{46.99, 7.99, 30.0f};
+        ApproachInputs in;
+        in.from_lat = 47.0;
+        in.from_lon = 8.0;
+        appr = computeLandingApproach(*plan.land, in);
+    }
+    return buildLoopMission(46.995, 7.995, 400.0, plan, 40.0f, with_land ? &appr : nullptr);
+}
+
+static void testPatterns() {
+    // back and forth, 4 points: 1 2 3 4 3 2, jump -> 2
+    {
+        const auto items = patternMission(Pattern::BackForth, 4, true);
+        CHECK(items.size() == 2 + 6 + 1 + 3);
+        const int order[] = {0, 1, 2, 3, 2, 1};
+        for (int k = 0; k < 6; ++k) {
+            CHECK(items[2 + k].command == mav::kCmdNavWaypoint);
+            CHECK(seqToWaypointIndex(items, 2 + k) == order[k]);
+        }
+        CHECK(items[8].command == mav::kCmdDoJump);
+        CHECK_NEAR(items[8].param1, 2.0, 1e-6);
+        CHECK(items[3].x == items[7].x && items[4].x == items[6].x);
+        const MissionPlan back = extractPlan(items);
+        CHECK(back.pattern == Pattern::BackForth);
+        CHECK(back.wps.size() == 4);
+        CHECK(back.land.has_value());
+        CHECK_NEAR(back.wps[3].alt_rel, 95.0, 1e-4);
+        CHECK(landSeq(items) == 10);
+        // rebuilt from what came back: identical (wind refresh relies on the same count)
+        CHECK(patternMission(Pattern::BackForth, 4, true).size() == items.size());
+        // at WP3 heading back toward WP2: carry on to WP2 (seq 7); heading out: WP4 (seq 5)
+        const auto& w3 = items[4];
+        const double to_w2 = geo::bearing(w3.lat(), w3.lon(), items[3].lat(), items[3].lon());
+        const double to_w4 = geo::bearing(w3.lat(), w3.lon(), items[5].lat(), items[5].lon());
+        CHECK(nearestLoopSeq(items, w3.lat(), w3.lon(), 50.0, to_w2) == 7);
+        CHECK(nearestLoopSeq(items, w3.lat(), w3.lon(), 50.0, to_w4) == 5);
+        // far from WP3, flying back: rejoin at its way-back visit
+        double lat = 0.0, lon = 0.0;
+        geo::destination(w3.lat(), w3.lon(), to_w4, 300.0, lat, lon);
+        CHECK(nearestLoopSeq(items, lat, lon, 50.0, to_w2) == 6);
+    }
+    // back and forth with 2 points is the same flight as the loop
+    {
+        const auto items = patternMission(Pattern::BackForth, 2, false);
+        CHECK(items.size() == 2 + 2 + 1);
+        CHECK(extractPlan(items).pattern == Pattern::Loop);
+    }
+    // 3 points
+    {
+        const auto items = patternMission(Pattern::BackForth, 3, false);
+        CHECK(items.size() == 2 + 4 + 1);
+        CHECK(extractPlan(items).pattern == Pattern::BackForth);
+        CHECK(extractPlan(items).wps.size() == 3);
+        CHECK(seqToWaypointIndex(items, 5) == 1);
+    }
+    // one way, then hold at the last point
+    {
+        const auto items = patternMission(Pattern::OneWay, 3, true);
+        CHECK(items.size() == 2 + 3 + 3);
+        CHECK(items[2].command == mav::kCmdNavWaypoint);
+        CHECK(items[3].command == mav::kCmdNavWaypoint);
+        CHECK(items[4].command == mav::kCmdNavLoiterUnlim);
+        CHECK(items[5].command == mav::kCmdDoLandStart);
+        const MissionPlan back = extractPlan(items);
+        CHECK(back.pattern == Pattern::OneWay);
+        CHECK(back.wps.size() == 3);
+        CHECK(seqToWaypointIndex(items, 4) == 2);
+        // at the last point: stay on the hold, don't wrap to WP1
+        CHECK(nearestLoopSeq(items, items[4].lat(), items[4].lon(), 50.0) == 4);
+        CHECK(nearestLoopSeq(items, items[2].lat(), items[2].lon(), 50.0) == 3);
+    }
+    // one point: a loiter whatever the pattern, read back as a loop
+    for (Pattern pt : {Pattern::Loop, Pattern::BackForth, Pattern::OneWay}) {
+        const auto items = patternMission(pt, 1, false);
+        CHECK(items.size() == 3);
+        CHECK(items[2].command == mav::kCmdNavLoiterUnlim);
+        CHECK(extractPlan(items).pattern == Pattern::Loop);
+    }
+    // the hold radius and direction ride on the LOITER_UNLIM's param3
+    {
+        MissionPlan p;
+        p.pattern = Pattern::OneWay;
+        p.wps = {{47.0, 8.0, 80.0f}, {47.01, 8.0, 90.0f}};
+        p.hold_radius = 150.0f;
+        p.hold_ccw = true;
+        const auto items = buildLoopMission(47.0, 8.0, 400.0, p);
+        CHECK(items[3].command == mav::kCmdNavLoiterUnlim);
+        CHECK_NEAR(items[3].param3, -150.0, 1e-4);
+        const MissionPlan back = extractPlan(items);
+        CHECK_NEAR(back.hold_radius, 150.0, 1e-4);
+        CHECK(back.hold_ccw);
+        CHECK(holdIndex(back) == 1);
+        p.hold_radius = 0.0f;  // default radius, CCW: -1
+        CHECK_NEAR(buildLoopMission(47.0, 8.0, 400.0, p)[3].param3, -1.0, 1e-6);
+        CHECK(extractPlan(buildLoopMission(47.0, 8.0, 400.0, p)).hold_radius == 0.0f);
+        CHECK(extractPlan(buildLoopMission(47.0, 8.0, 400.0, p)).hold_ccw);
+        p.hold_ccw = false;
+        CHECK_NEAR(buildLoopMission(47.0, 8.0, 400.0, p)[3].param3, 0.0, 1e-6);
+        p.pattern = Pattern::Loop;
+        CHECK(holdIndex(p) == -1);
+        p.wps.resize(1);
+        CHECK(holdIndex(p) == 0);
+    }
+    // loop round trip keeps Loop
+    CHECK(extractPlan(patternMission(Pattern::Loop, 4, true)).pattern == Pattern::Loop);
+
+    // route length by pattern
+    MissionPlan p;
+    p.wps = {{47.0, 8.0, 0.0f}, {47.001, 8.0, 0.0f}, {47.002, 8.0, 0.0f}};
+    p.pattern = Pattern::OneWay;
+    CHECK_NEAR(routeLength(p), 2 * 111.2, 1.0);
+    p.pattern = Pattern::BackForth;
+    CHECK_NEAR(routeLength(p), 4 * 111.2, 1.5);
+    p.pattern = Pattern::Loop;
+    CHECK_NEAR(routeLength(p), 4 * 111.2, 1.5);
+}
+
 int main() {
+    testPatterns();
     testNearestLoopSeq();
     testLandingInMission();
     testApproachGeometry();

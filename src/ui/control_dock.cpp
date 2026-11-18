@@ -492,6 +492,16 @@ void drawDockIcon(QPainter& p, DockIcon icon, const QRectF& r, const QColor& c) 
         p.drawEllipse(QPointF(15, 15), 1.6, 1.6);
         break;
     }
+    case DockIcon::Preflight: {
+        // clipboard with ticks
+        p.drawRoundedRect(QRectF(6, 5, 18, 22), 2, 2);
+        p.drawRect(QRectF(11, 3, 8, 4));
+        p.drawPolyline(QPolygonF({QPointF(9, 13), QPointF(11, 15), QPointF(14, 11)}));
+        p.drawLine(QPointF(16, 13), QPointF(21, 13));
+        p.drawPolyline(QPolygonF({QPointF(9, 20), QPointF(11, 22), QPointF(14, 18)}));
+        p.drawLine(QPointF(16, 20), QPointF(21, 20));
+        break;
+    }
     case DockIcon::Hold: {
         p.drawEllipse(QPointF(15, 15), 12, 12);
         p.setBrush(c);
@@ -509,13 +519,6 @@ void drawDockIcon(QPainter& p, DockIcon icon, const QRectF& r, const QColor& c) 
         p.drawLine(QPointF(15, 13), QPointF(15, 23));
         p.drawPolyline(QPolygonF({{11, 19}, {15, 23}, {19, 19}}));
         p.drawLine(QPointF(5, 27), QPointF(25, 27));
-        break;
-    }
-    case DockIcon::Qrtl: {
-        p.drawPolyline(QPolygonF({{4, 14}, {15, 4}, {26, 14}}));
-        p.drawPolyline(QPolygonF({{7, 12}, {7, 26}, {23, 26}, {23, 12}}));
-        p.drawLine(QPointF(15, 12), QPointF(15, 22));
-        p.drawPolyline(QPolygonF({{11, 18}, {15, 22}, {19, 18}}));
         break;
     }
     }

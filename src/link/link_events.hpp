@@ -19,6 +19,7 @@ struct LinkEvent {
         MissionFailed,     // upload flag, text
         VehicleConnected,  // first heartbeat from a vehicle (sysid in done)
         Error,             // text
+        ParamSet,          // tag = name, ok, text = value read back (or the reason)
     };
 
     Type type = Type::StatusText;

@@ -41,6 +41,62 @@ bool isApproachCircle(const std::vector<MissionItem>& items, size_t i) {
     return items[i].command == mav::kCmdNavLoiterToAlt && i + 1 < items.size() && isLand(items[i + 1]);
 }
 
+// seqs of the route points, in flying order (skips the approach circle)
+std::vector<int> routeSeqs(const std::vector<MissionItem>& items) {
+    std::vector<int> out;
+    for (size_t i = 1; i < items.size(); ++i) {
+        if (isLoopPoint(items[i]) && !isApproachCircle(items, i)) {
+            out.push_back(static_cast<int>(i));
+        }
+    }
+    return out;
+}
+
+bool hasJump(const std::vector<MissionItem>& items) {
+    return std::any_of(items.begin(), items.end(), [](const MissionItem& it) { return it.command == mav::kCmdDoJump; });
+}
+
+bool samePoint(const MissionItem& a, const MissionItem& b) {
+    return a.x == b.x && a.y == b.y && a.z == b.z;
+}
+
+// How the route was laid out, and how many distinct points it has.
+struct RouteShape {
+    Pattern pattern = Pattern::Loop;
+    size_t points = 0;
+};
+
+RouteShape routeShape(const std::vector<MissionItem>& items, const std::vector<int>& seqs) {
+    RouteShape r;
+    r.points = seqs.size();
+    const size_t m = seqs.size();
+    if (m >= 2 && !hasJump(items) && items[seqs.back()].command == mav::kCmdNavLoiterUnlim) {
+        r.pattern = Pattern::OneWay;
+        return r;
+    }
+    // w1..wn, wn-1..w2: m = 2n - 2 with n >= 3
+    if (m >= 4 && m % 2 == 0 && hasJump(items)) {
+        const size_t n = (m + 2) / 2;
+        bool mirrored = true;
+        for (size_t k = n; k < m && mirrored; ++k) {
+            mirrored = samePoint(items[seqs[k]], items[seqs[2 * (n - 1) - k]]);
+        }
+        if (mirrored) {
+            r.pattern = Pattern::BackForth;
+            r.points = n;
+        }
+    }
+    return r;
+}
+
+double pathLength(const std::vector<UserWaypoint>& wps) {
+    double total = 0.0;
+    for (size_t i = 1; i < wps.size(); ++i) {
+        total += geo::distance(wps[i - 1].lat, wps[i - 1].lon, wps[i].lat, wps[i].lon);
+    }
+    return total;
+}
+
 }  // namespace
 
 int32_t toE7(double deg) {
@@ -97,13 +153,34 @@ std::vector<MissionItem> buildLoopMission(double home_lat, double home_lon, doub
 
     items.push_back(located(mav::kCmdNavVtolTakeoff, home_lat, home_lon, takeoff_alt));
 
+    // the final hold: param3 = radius (0 = WP_LOITER_RAD), negative = CCW
+    auto hold = [&](const UserWaypoint& wp) {
+        MissionItem it = located(mav::kCmdNavLoiterUnlim, wp.lat, wp.lon, wp.alt_rel);
+        const float r = std::max(0.0f, plan.hold_radius);
+        it.param3 = plan.hold_ccw ? -(r > 0.0f ? r : 1.0f) : r;  // -1: CCW at the default radius
+        return it;
+    };
     if (wps.size() == 1) {
         // a one-point "loop" would re-reach the same waypoint every cycle;
         // circle it on the wing instead
-        items.push_back(located(mav::kCmdNavLoiterUnlim, wps[0].lat, wps[0].lon, wps[0].alt_rel));
+        items.push_back(hold(wps[0]));
+    } else if (plan.pattern == Pattern::OneWay) {
+        // fly the route once, then circle the last point on the wing (the
+        // lift rotors are for takeoff and landing only)
+        for (size_t i = 0; i + 1 < wps.size(); ++i) {
+            items.push_back(located(mav::kCmdNavWaypoint, wps[i].lat, wps[i].lon, wps[i].alt_rel));
+        }
+        items.push_back(hold(wps.back()));
     } else {
         for (const auto& wp : wps) {
             items.push_back(located(mav::kCmdNavWaypoint, wp.lat, wp.lon, wp.alt_rel));
+        }
+        if (plan.pattern == Pattern::BackForth && wps.size() >= 3) {
+            // the way back, without repeating the end points: the jump to w1
+            // closes it (with 2 points this is the same flight as Loop)
+            for (size_t i = wps.size() - 1; i-- > 1;) {
+                items.push_back(located(mav::kCmdNavWaypoint, wps[i].lat, wps[i].lon, wps[i].alt_rel));
+            }
         }
         MissionItem jump;
         jump.frame = mav::kFrameGlobalRelativeAlt;
@@ -114,6 +191,8 @@ std::vector<MissionItem> buildLoopMission(double home_lat, double home_lon, doub
     }
 
     if (plan.land && approach) {
+        // RTL_AUTOLAND jumps to the DO_LAND_START nearest the aircraft
+        items.push_back(located(mav::kCmdDoLandStart, plan.land->lat, plan.land->lon, 0.0f));
         MissionItem circle = located(mav::kCmdNavLoiterToAlt, approach->c_lat, approach->c_lon, approach->alt);
         circle.param2 = static_cast<float>(approach->ccw ? -approach->radius : approach->radius);
         circle.param4 = 1.0f;  // leave on the tangent toward the land point
@@ -134,13 +213,21 @@ std::vector<MissionItem> buildLoopMission(double home_lat, double home_lon, doub
 
 MissionPlan extractPlan(const std::vector<MissionItem>& items) {
     MissionPlan plan;
+    const RouteShape shape = routeShape(items, routeSeqs(items));
+    plan.pattern = shape.pattern;
     for (size_t i = 1; i < items.size(); ++i) {
         const auto& it = items[i];
         if (isApproachCircle(items, i)) {
             continue;
         }
         if (isLoopPoint(it)) {
-            plan.wps.push_back({it.lat(), it.lon(), it.z});
+            if (plan.wps.size() < shape.points) {  // the way back of a back-and-forth repeats them
+                plan.wps.push_back({it.lat(), it.lon(), it.z});
+            }
+            if (it.command == mav::kCmdNavLoiterUnlim) {
+                plan.hold_ccw = it.param3 < 0.0f;
+                plan.hold_radius = std::abs(it.param3) > 1.0f ? std::abs(it.param3) : 0.0f;
+            }
         } else if (isLand(it) && !plan.land && (it.x != 0 || it.y != 0)) {
             // approach altitude: from the approach circle when there is one
             const float z = i >= 1 && isApproachCircle(items, i - 1) ? items[i - 1].z : it.z;
@@ -198,37 +285,54 @@ int seqToWaypointIndex(const std::vector<MissionItem>& items, int seq) {
         isApproachCircle(items, static_cast<size_t>(seq))) {
         return -1;
     }
-    int idx = 0;
-    for (int i = 1; i < seq; ++i) {
-        if (isLoopPoint(items[i]) && !isApproachCircle(items, static_cast<size_t>(i))) {
-            ++idx;
-        }
+    const std::vector<int> seqs = routeSeqs(items);
+    const auto at = std::find(seqs.begin(), seqs.end(), seq);
+    if (at == seqs.end()) {
+        return -1;
     }
-    return idx;
+    const size_t k = static_cast<size_t>(at - seqs.begin());
+    const RouteShape shape = routeShape(items, seqs);
+    if (shape.pattern == Pattern::BackForth && k >= shape.points) {
+        return static_cast<int>(2 * (shape.points - 1) - k);  // on the way back
+    }
+    return static_cast<int>(k);
 }
 
-int nearestLoopSeq(const std::vector<MissionItem>& items, double lat, double lon, double skip_within_m) {
-    std::vector<int> loop;
-    for (size_t i = 1; i < items.size(); ++i) {
-        if (seqToWaypointIndex(items, static_cast<int>(i)) >= 0) {
-            loop.push_back(static_cast<int>(i));
-        }
-    }
+int nearestLoopSeq(const std::vector<MissionItem>& items, double lat, double lon, double skip_within_m,
+                   double track_deg) {
+    const std::vector<int> loop = routeSeqs(items);
     if (loop.empty()) {
         return -1;
     }
+    const bool one_way = routeShape(items, loop).pattern == Pattern::OneWay;
+    auto next = [&](size_t k) { return one_way ? std::min(k + 1, loop.size() - 1) : (k + 1) % loop.size(); };
+    auto pos = [&](size_t k) { return std::pair<double, double>{items[loop[k]].lat(), items[loop[k]].lon()}; };
+    // how well flying on from copy k matches the aircraft's track (lower = better)
+    auto turn = [&](size_t k) {
+        if (track_deg < 0.0 || loop.size() < 2) {
+            return 0.0;
+        }
+        const auto [a_lat, a_lon] = pos(k);
+        const auto [b_lat, b_lon] = pos(next(k));
+        if (geo::distance(a_lat, a_lon, b_lat, b_lon) < 1.0) {
+            return 0.0;
+        }
+        return std::abs(geo::wrap180(geo::bearing(a_lat, a_lon, b_lat, b_lon) - track_deg));
+    };
     size_t best = 0;
     double best_d = 1e18;
     for (size_t k = 0; k < loop.size(); ++k) {
-        const auto& it = items[loop[k]];
-        const double d = geo::distance(lat, lon, it.x * 1e-7, it.y * 1e-7);
-        if (d < best_d) {
-            best_d = d;
+        const auto [p_lat, p_lon] = pos(k);
+        const double d = geo::distance(lat, lon, p_lat, p_lon);
+        // the same point visited twice (back and forth): take the visit that
+        // carries on in the direction the aircraft is flying
+        if (d < best_d - 1.0 || (d < best_d + 1.0 && turn(k) < turn(best))) {
+            best_d = std::min(best_d, d);
             best = k;
         }
     }
     if (best_d < skip_within_m && loop.size() > 1) {
-        best = (best + 1) % loop.size();
+        best = next(best);  // a one-way route stays on its final hold
     }
     return loop[best];
 }
@@ -244,6 +348,28 @@ double lapLength(const std::vector<UserWaypoint>& wps) {
         total += geo::distance(a.lat, a.lon, b.lat, b.lon);
     }
     return total;
+}
+
+int holdIndex(const MissionPlan& plan) {
+    if (plan.wps.size() == 1) {
+        return 0;
+    }
+    return plan.pattern == Pattern::OneWay && plan.wps.size() > 1 ? static_cast<int>(plan.wps.size()) - 1 : -1;
+}
+
+double routeLength(const MissionPlan& plan) {
+    if (plan.wps.size() < 2) {
+        return 0.0;
+    }
+    switch (plan.pattern) {
+    case Pattern::BackForth:
+        return 2.0 * pathLength(plan.wps);
+    case Pattern::OneWay:
+        return pathLength(plan.wps);
+    case Pattern::Loop:
+        break;
+    }
+    return lapLength(plan.wps);
 }
 
 }  // namespace gcs

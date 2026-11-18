@@ -21,11 +21,17 @@ struct CommandRequest {
     int32_t y = 0;
     float z = 0.0f;
     bool optional = false;   // a failure does not abort the sequence
+    // Commands the vehicle executes before it ACKs (calibrations block for
+    // seconds) must not be re-sent: a repeat would restart them.
+    int max_attempts = 3;
+    std::chrono::milliseconds ack_timeout{0};  // per attempt; 0 = the default retry interval
     std::string label;       // human readable, e.g. "ARM"
 };
 
 CommandRequest makeSetMode(uint32_t custom_mode, const std::string& label);
-CommandRequest makeArm(bool arm);
+// force: ArduPilot's magic 21196 (skip checks). Used only to disarm on the
+// ground after a GCS-driven test, where a refused disarm would leave it armed.
+CommandRequest makeArm(bool arm, bool force = false);
 CommandRequest makeVtolTakeoff(float alt_rel);
 // MAV_CMD_DO_SET_MISSION_CURRENT: continue the mission from `seq`.
 // reset: also restart the mission (jump counters, completed -> active)
@@ -36,6 +42,26 @@ CommandRequest makeSetSafety(bool safe);
 // at alt_rel with the given radius and direction. Re-sending with the same
 // centre changes radius / altitude / direction in place.
 CommandRequest makeReposition(double lat, double lon, float alt_rel, float radius_m, bool ccw);
+
+// ---- preflight ------------------------------------------------------------------
+// MAV_CMD_DO_MOTOR_TEST: lift motor `seq` (1-based test order A=1..), `pct` %
+// throttle for `seconds`, `count` motors in sequence from seq. Disarmed only.
+CommandRequest makeMotorTest(int seq, float pct, float seconds, int count = 1);
+enum class Calibration { Gyro, Level, AccelSimple, AccelFull, BaroAirspeed };
+CommandRequest makeCalibration(Calibration c);
+// MAV_CMD_DO_START_MAG_CAL for all compasses; the vehicle saves on success
+CommandRequest makeStartMagCal();
+CommandRequest makeAcceptMagCal();
+CommandRequest makeCancelMagCal();
+// MAV_CMD_FIXED_MAG_CAL_YAW: the aircraft's nose points at `yaw_deg` true
+CommandRequest makeFixedMagCalYaw(float yaw_deg);
+// answer to the vehicle's ACCELCAL_VEHICLE_POS request: it is placed in `pos`
+CommandRequest makeAccelCalPos(int pos);
+CommandRequest makeRunPrearmChecks();
+CommandRequest makeReboot();
+// MAV_CMD_DO_MOUNT_CONTROL in MAVLink targeting: pitch / yaw in degrees
+CommandRequest makeMountControl(float pitch_deg, float yaw_deg);
+CommandRequest makeRequestMessage(uint32_t msg_id);
 
 // COMMAND_LONG sender with COMMAND_ACK tracking and retransmission.
 //

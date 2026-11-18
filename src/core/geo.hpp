@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+#include <optional>
 #include <vector>
 
 namespace gcs::geo {
@@ -94,5 +96,24 @@ struct Footprint {
 };
 Footprint cameraFootprint(const CameraModel& cam, const Attitude& att, double alt_agl, double max_range,
                           int per_edge = 8);
+
+// ---- line of sight to the terrain ----------------------------------------------------
+// Where a ray from (lat, lon, alt_amsl) along azimuth `yaw_deg` and elevation
+// `pitch_deg` (negative = down) first meets the ground. `ground(lat, lon)`
+// gives the terrain height (AMSL), nullopt where unknown; where it is
+// unknown the ray is tested against `fallback_ground` and the hit is marked
+// approximate. Marches in `step` m up to `max_range` m of slant range, then
+// bisects to ~0.5 m.
+struct TerrainHit {
+    bool hit = false;
+    bool approximate = false;  // terrain unknown somewhere on the way: flat fallback used
+    double lat = 0.0;
+    double lon = 0.0;
+    double ground = 0.0;       // AMSL at the hit
+    double slant = 0.0;        // m from the aircraft
+};
+TerrainHit rayToTerrain(double lat, double lon, double alt_amsl, double yaw_deg, double pitch_deg,
+                        const std::function<std::optional<double>(double, double)>& ground, double fallback_ground,
+                        double max_range = 3000.0, double step = 15.0);
 
 }  // namespace gcs::geo

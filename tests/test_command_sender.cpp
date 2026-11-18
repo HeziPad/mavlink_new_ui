@@ -178,7 +178,45 @@ static void testRepositionIsCommandInt() {
     CHECK(h.results.back().final && h.results.back().ok);
 }
 
+static void testCalibrationIsNotResent() {
+    // a calibration blocks the vehicle until done; a re-send would restart it
+    Harness h;
+    h.cs.runSequence("cal", {makeCalibration(Calibration::Gyro)}, h.now);
+    CHECK(h.sent.size() == 1);
+    CHECK_NEAR(h.lastCmd().param1, 1.0, 1e-6);
+    for (int i = 0; i < 30; ++i) {  // 30 s of silence
+        h.now += milliseconds(1000);
+        h.cs.tick(h.now);
+    }
+    CHECK(h.sent.size() == 1);
+    CHECK(h.results.empty());
+    h.ack(MAV_CMD_PREFLIGHT_CALIBRATION, MAV_RESULT_ACCEPTED);
+    CHECK(!h.results.empty() && h.results.back().final && h.results.back().ok);
+
+    // and it does give up eventually
+    Harness g;
+    g.cs.runSequence("cal", {makeCalibration(Calibration::Level)}, g.now);
+    g.now += milliseconds(46000);
+    g.cs.tick(g.now);
+    CHECK(g.sent.size() == 1);
+    CHECK(!g.results.empty() && g.results.back().final && !g.results.back().ok);
+}
+
+static void testMotorTestFields() {
+    Harness h;
+    h.cs.runSequence("motor", {makeMotorTest(3, 7.0f, 2.0f)}, h.now);
+    const auto c = h.lastCmd();
+    CHECK(c.command == MAV_CMD_DO_MOTOR_TEST);
+    CHECK_NEAR(c.param1, 3.0, 1e-6);
+    CHECK_NEAR(c.param2, MOTOR_TEST_THROTTLE_PERCENT, 1e-6);
+    CHECK_NEAR(c.param3, 7.0, 1e-6);
+    CHECK_NEAR(c.param4, 2.0, 1e-6);
+    CHECK_NEAR(c.param5, 1.0, 1e-6);
+}
+
 int main() {
+    testCalibrationIsNotResent();
+    testMotorTestFields();
     testRepositionIsCommandInt();
     testLandSequence();
     testSequenceHappy();

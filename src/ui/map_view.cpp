@@ -1,12 +1,14 @@
 #include "map_view.hpp"
 
 #include "attitude_ball.hpp"
+#include "elevation_cache.hpp"
 #include "wind_gauge.hpp"
 #include "core/geo.hpp"
 #include "theme.hpp"
 #include "tile_cache.hpp"
 #include "units.hpp"
 
+#include <QDateTime>
 #include <QFontMetricsF>
 #include <QMouseEvent>
 #include <QPainter>
@@ -50,6 +52,95 @@ void worldToLatLon(const QPointF& p, double zoom, double& lat, double& lon) {
     lat = std::atan(std::sinh(yy)) * geo::kRadToDeg;
 }
 
+// Map lines must be clipped before they're stroked: a leg to a point far off
+// screen (an old mission on the other side of the world, zoomed in) is
+// millions of pixels long, and Qt rasterises every dash of it. One such line
+// held the UI thread for ~3 s per frame.
+bool clipSegment(QPointF& a, QPointF& b, const QRectF& r) {
+    // Liang-Barsky
+    const double dx = b.x() - a.x(), dy = b.y() - a.y();
+    double t0 = 0.0, t1 = 1.0;
+    const double pp[4] = {-dx, dx, -dy, dy};
+    const double qq[4] = {a.x() - r.left(), r.right() - a.x(), a.y() - r.top(), r.bottom() - a.y()};
+    for (int i = 0; i < 4; ++i) {
+        if (pp[i] == 0.0) {
+            if (qq[i] < 0.0) {
+                return false;
+            }
+            continue;
+        }
+        const double t = qq[i] / pp[i];
+        if (pp[i] < 0.0) {
+            t0 = std::max(t0, t);
+        } else {
+            t1 = std::min(t1, t);
+        }
+        if (t0 > t1) {
+            return false;
+        }
+    }
+    const QPointF a0 = a;
+    a = a0 + QPointF(dx, dy) * t0;
+    b = a0 + QPointF(dx, dy) * t1;
+    return true;
+}
+
+// Draws the visible runs of a polyline (or closed polygon outline) only.
+void drawClipped(QPainter& p, const QPolygonF& line, bool closed, const QRectF& r) {
+    const int n = line.size();
+    if (n < 2) {
+        return;
+    }
+    QPolygonF run;
+    const int segs = closed ? n : n - 1;
+    for (int i = 0; i < segs; ++i) {
+        QPointF a = line[i], b = line[(i + 1) % n];
+        const QPointF a_in = a;
+        if (!clipSegment(a, b, r)) {
+            if (run.size() > 1) {
+                p.drawPolyline(run);
+            }
+            run.clear();
+            continue;
+        }
+        if (run.isEmpty() || a != a_in || run.back() != a) {
+            if (run.size() > 1) {
+                p.drawPolyline(run);
+            }
+            run.clear();
+            run << a;
+        }
+        run << b;
+        if (b != line[(i + 1) % n]) {  // left the view: end this run
+            p.drawPolyline(run);
+            run.clear();
+        }
+    }
+    if (run.size() > 1) {
+        p.drawPolyline(run);
+    }
+}
+
+void drawLineClipped(QPainter& p, QPointF a, QPointF b, const QRectF& r) {
+    if (clipSegment(a, b, r)) {
+        p.drawLine(a, b);
+    }
+}
+
+// a circle worth drawing: it crosses the view (not wholly outside, and the
+// view not wholly inside it)
+bool circleVisible(const QPointF& c, double rad, const QRectF& r) {
+    const double nx = std::clamp(c.x(), r.left(), r.right()), ny = std::clamp(c.y(), r.top(), r.bottom());
+    if (std::hypot(c.x() - nx, c.y() - ny) > rad) {
+        return false;  // outside
+    }
+    double far = 0.0;
+    for (const QPointF q : {r.topLeft(), r.topRight(), r.bottomLeft(), r.bottomRight()}) {
+        far = std::max(far, std::hypot(q.x() - c.x(), q.y() - c.y()));
+    }
+    return far > rad;  // otherwise the view is inside the circle: no edge to see
+}
+
 QString formatDistance(double m) {
     if (m >= 1000.0) {
         return QStringLiteral("%1 km").arg(m / 1000.0, 0, 'f', m >= 10000.0 ? 1 : 2);
@@ -72,7 +163,11 @@ MapView::MapView(TileCache* tiles, QWidget* parent) : HudView(parent), tiles_(ti
     // Touch is handled here (pinch zoom + one-finger tap/drag); in PiP mode it
     // is ignored so Qt synthesises the mouse click the ViewHost swaps on.
     setAttribute(Qt::WA_AcceptTouchEvents);
-    connect(tiles_, &TileCache::tileReady, this, qOverload<>(&QWidget::update));
+    setMouseTracking(true);  // the lat / lon / ground readout follows the mouse
+    connect(tiles_, &TileCache::tileReady, this, [this] {
+        ++tiles_gen_;
+        update();
+    });
     heading_.rate = 25.0;  // light smoothing on top of the per-frame prediction
     updateCursor();
 }
@@ -110,6 +205,12 @@ void MapView::setState(const VehicleState& s) {
 void MapView::setMode(Mode m) {
     mode_ = m;
     drag_wp_ = kNone;
+    area_handle_ = -1;
+    if (m == Mode::Area) {
+        setFollow(false);  // one finger draws, so the map must not run away
+    } else {
+        area_sel_.reset();
+    }
     if (m != Mode::Plan) {
         select(kNone);
         setAddTool(AddTool::Waypoint);
@@ -148,7 +249,9 @@ void MapView::clearPlan() {
         return;
     }
     editPlan();
+    const Pattern pattern = plan_.pattern;  // clearing the points keeps the chosen route
     plan_ = MissionPlan{};
+    plan_.pattern = pattern;
     select(kNone);
     emit planChanged();
     update();
@@ -231,6 +334,31 @@ void MapView::deletePoint(int id) {
     update();
 }
 
+void MapView::setPattern(Pattern pattern) {
+    if (plan_.pattern == pattern) {
+        return;
+    }
+    editPlan();
+    plan_.pattern = pattern;
+    emit planChanged();
+    update();
+}
+
+void MapView::setHold(float radius, bool ccw) {
+    if (plan_.hold_radius == radius && plan_.hold_ccw == ccw) {
+        return;
+    }
+    constexpr int kHoldEdit = -100;  // a run of hold presses undoes in one step, like altitude
+    if (alt_edit_wp_ != kHoldEdit) {
+        pushUndo();
+        alt_edit_wp_ = kHoldEdit;
+    }
+    plan_.hold_radius = radius;
+    plan_.hold_ccw = ccw;
+    emit planChanged();
+    update();
+}
+
 void MapView::insertAfter(int index) {
     const int n = static_cast<int>(plan_.wps.size());
     if (index < 0 || index >= n) {
@@ -239,7 +367,11 @@ void MapView::insertAfter(int index) {
     editPlan();
     const auto& a = plan_.wps[index];
     UserWaypoint mid = a;
-    if (n > 1) {
+    if (n > 1 && index == n - 1 && plan_.pattern != Pattern::Loop) {
+        // an open route: extend it 150 m beyond its end, along the last leg
+        const auto& prev = plan_.wps[index - 1];
+        geo::destination(a.lat, a.lon, geo::bearing(prev.lat, prev.lon, a.lat, a.lon), 150.0, mid.lat, mid.lon);
+    } else if (n > 1) {
         const auto& b = plan_.wps[(index + 1) % n];  // the loop closes back to WP1
         mid = {(a.lat + b.lat) / 2.0, (a.lon + b.lon) / 2.0, (a.alt_rel + b.alt_rel) / 2.0f};
     } else {
@@ -501,6 +633,10 @@ void MapView::mouseMoveEvent(QMouseEvent* e) {
         return;
     }
     touch_input_ = false;  // hovering only happens with a mouse
+    if (e->source() == Qt::MouseEventNotSynthesized) {
+        hover_pos_ = pos;
+        update();
+    }
     if (mode_ == Mode::Plan) {
         const int h = planPointAt(pos);
         if (h != hover_wp_) {
@@ -508,6 +644,101 @@ void MapView::mouseMoveEvent(QMouseEvent* e) {
             updateCursor();
             update();
         }
+    }
+}
+
+void MapView::leaveEvent(QEvent* e) {
+    hover_pos_.reset();
+    update();
+    HudView::leaveEvent(e);
+}
+
+void MapView::setElevation(ElevationCache* elev) {
+    elev_ = elev;
+    if (elev_) {
+        connect(elev_, &ElevationCache::ready, this, [this] {
+            ++elev_gen_;
+            update();
+        });
+    }
+}
+
+void MapView::paintNavBox(QPainter& p, double right, double bottom) {
+    // bottom-right: where the aircraft is, where it is going and when it
+    // gets there, and (mouse only) what is under the cursor
+    if (compact_) {
+        return;
+    }
+    struct Line {
+        QString text;
+        QColor color;
+        bool strong;
+    };
+    std::vector<Line> lines;
+    if (has_ac_) {
+        lines.push_back({QStringLiteral("AIRCRAFT  ") + units::coordText(ac_lat_, ac_lon_), kText, true});
+        if (!nav_.aircraft_ground.isEmpty()) {
+            lines.push_back({nav_.aircraft_ground, kGreen, false});
+        }
+    }
+    if (nav_.target.valid) {
+        // distance only: the ETA is on the telemetry bar's ETA chip
+        lines.push_back({QStringLiteral("→ %1  %2")
+                             .arg(QString::fromStdString(nav_.target.name), units::distanceText(nav_.target.dist_m)),
+                         kCyan, true});
+    }
+    const bool hover = hover_pos_ && !touch_input_ && !pressing_ && rect().contains(hover_pos_->toPoint());
+    if (hover) {
+        double lat = 0.0, lon = 0.0;
+        toLatLon(*hover_pos_, lat, lon);
+        lines.push_back({QStringLiteral("CURSOR  ") + units::coordText(lat, lon), kText, true});
+        QString ground = QStringLiteral("GROUND  —");
+        if (elev_) {
+            if (hover_elev_.lat != lat || hover_elev_.lon != lon || hover_elev_.gen != elev_gen_) {
+                hover_elev_ = {lat, lon, elev_gen_, elev_->elevation(lat, lon)};
+            }
+            if (const auto h = hover_elev_.h) {
+                ground = QStringLiteral("GROUND  %1 MSL").arg(units::altText(*h));
+                if (s_.has_home) {
+                    const double rel = *h - s_.home_alt_amsl;
+                    ground += QStringLiteral("  ·  %1%2 vs HOME")
+                                  .arg(rel >= 0 ? QStringLiteral("+") : QString())
+                                  .arg(units::altText(rel));
+                }
+            } else {
+                ground = QStringLiteral("GROUND  loading…");
+            }
+        }
+        lines.push_back({ground, kGreen, false});
+        if (has_ac_) {
+            const double d = geo::distance(ac_lat_, ac_lon_, lat, lon);
+            const double gs = std::hypot(s_.vn, s_.ve);
+            lines.push_back({QStringLiteral("%1  ·  %2° from AIRCRAFT  ·  ETA %3")
+                                 .arg(units::distanceText(d))
+                                 .arg(static_cast<int>(std::lround(geo::wrap360(geo::bearing(ac_lat_, ac_lon_, lat, lon)))) % 360,
+                                      3, 10, QLatin1Char('0'))
+                                 .arg(units::durationText(etaSeconds(d, gs))),
+                             kMuted, false});
+        }
+    }
+    if (lines.empty()) {
+        return;
+    }
+    const QFont mf = monoFont(12, true);
+    const QFont sf = monoFont(11);
+    double w = 0.0;
+    for (const auto& l : lines) {
+        w = std::max(w, QFontMetricsF(l.strong ? mf : sf).horizontalAdvance(l.text));
+    }
+    w += 28;
+    const double h = 12 + lines.size() * 18.0;
+    const QRectF box(right - w, bottom - h, w, h);
+    drawGlass(p, chamferPath(box, 7), kCyan, 0.35, alpha(kGlassDeep, 0.9));
+    double y = box.top() + 6;
+    for (const auto& l : lines) {
+        drawText(p, QRectF(box.left() + 14, y, w - 28, 18), Qt::AlignLeft | Qt::AlignVCenter, l.text,
+                 l.strong ? mf : sf, l.color);
+        y += 18;
     }
 }
 
@@ -532,11 +763,88 @@ void MapView::pointerPress(const QPointF& pos) {
         setLayer(layer_ == TileCache::Streets ? TileCache::Satellite : TileCache::Streets);
         return;
     }
+    if (mode_ == Mode::Area && areaPress(pos)) {
+        return;
+    }
     pressing_ = true;
     dragged_ = false;
     press_pos_ = last_pos_ = pos;
     drag_wp_ = mode_ == Mode::Plan ? planPointAt(pos) : kNone;
     updateCursor();
+}
+
+std::array<QPointF, 4> MapView::areaCorners() const {
+    const GeoBox& b = *area_sel_;
+    return {toScreen(b.max_lat, b.min_lon), toScreen(b.max_lat, b.max_lon), toScreen(b.min_lat, b.max_lon),
+            toScreen(b.min_lat, b.min_lon)};
+}
+
+bool MapView::areaPress(const QPointF& pos) {
+    if (area_cancel_rect_.contains(pos)) {
+        emit areaCancel();
+        return true;
+    }
+    if (area_dl_rect_.contains(pos)) {
+        if (area_can_dl_ && area_sel_) emit areaDownload();
+        return true;
+    }
+    pressing_ = true;
+    dragged_ = false;
+    press_pos_ = last_pos_ = pos;
+    area_handle_ = -1;
+    area_new_ = false;
+    if (area_sel_) {
+        const double hit = touch_input_ ? kHitRadiusTouch : kHitRadiusMouse + 6;
+        const auto c = areaCorners();
+        for (int i = 0; i < 4; ++i) {
+            if (QLineF(pos, c[i]).length() <= hit) {
+                area_handle_ = i;
+                // the opposite corner stays put
+                const QPointF opp = c[(i + 2) % 4];
+                toLatLon(opp, area_anchor_lat_, area_anchor_lon_);
+                return true;
+            }
+        }
+    }
+    // a new rectangle from here
+    area_new_ = true;
+    area_handle_ = 2;
+    toLatLon(pos, area_anchor_lat_, area_anchor_lon_);
+    return true;
+}
+
+void MapView::clearAreaSelection() {
+    area_sel_.reset();
+    area_info1_.clear();
+    area_info2_.clear();
+    area_can_dl_ = false;
+    update();
+}
+
+void MapView::setAreas(std::vector<GeoBox> areas) {
+    areas_ = std::move(areas);
+    update();
+}
+
+void MapView::setAreaInfo(const QString& line1, const QString& line2, bool can_download, bool warn) {
+    area_info1_ = line1;
+    area_info2_ = line2;
+    area_can_dl_ = can_download;
+    area_warn_ = warn;
+    update();
+}
+
+void MapView::setDownloadStatus(const QString& text) {
+    if (text != dl_status_) {
+        dl_status_ = text;
+        update();
+    }
+}
+
+void MapView::tileSourcesChanged() {
+    ++tiles_gen_;
+    bd_.missing = 1;
+    update();
 }
 
 void MapView::pointerMove(const QPointF& pos) {
@@ -551,6 +859,24 @@ void MapView::pointerMove(const QPointF& pos) {
             select(drag_wp_);
         }
         updateCursor();
+    }
+    if (mode_ == Mode::Area && area_handle_ >= 0) {
+        if (dragged_ || area_sel_) {
+            double lat = 0.0, lon = 0.0;
+            toLatLon(pos, lat, lon);
+            GeoBox b;
+            b.min_lat = std::min(lat, area_anchor_lat_);
+            b.max_lat = std::max(lat, area_anchor_lat_);
+            b.min_lon = std::min(lon, area_anchor_lon_);
+            b.max_lon = std::max(lon, area_anchor_lon_);
+            if (dragged_) {
+                area_sel_ = b;
+                emit areaChanged(b, false);
+                update();
+            }
+        }
+        last_pos_ = pos;
+        return;
     }
     if (dragged_) {
         if (drag_wp_ != kNone) {
@@ -574,6 +900,19 @@ void MapView::pointerRelease(const QPointF& pos) {
         return;
     }
     pressing_ = false;
+    if (mode_ == Mode::Area) {
+        if (dragged_ && area_sel_) {
+            emit areaChanged(*area_sel_, true);
+        } else if (area_new_ && !dragged_) {
+            clearAreaSelection();  // a tap clears
+            emit areaChanged(GeoBox{}, true);
+        }
+        area_handle_ = -1;
+        area_new_ = false;
+        dragged_ = false;
+        update();
+        return;
+    }
     if (!dragged_) {
         double lat = 0.0, lon = 0.0;
         toLatLon(pos, lat, lon);
@@ -631,25 +970,10 @@ void MapView::wheelEvent(QWheelEvent* e) {
 // ---- painting --------------------------------------------------------------------
 
 void MapView::paintEvent(QPaintEvent*) {
+    ++paints_;
     QPainter p(this);
     beginView(p);
-    const QRectF r = rect();
-
-    // background + tactical grid (visible where tiles are missing / offline)
-    p.fillRect(r, kBg);
-    p.setPen(QPen(alpha(kCyan, 0.05), 1));
-    const double grid = 64.0;
-    const QPointF c0 = worldPx(clat_, clon_, zoom_);
-    const double ox = std::fmod(-c0.x() + width() / 2.0, grid);
-    const double oy = std::fmod(-c0.y() + height() / 2.0, grid);
-    for (double x = ox; x < r.right(); x += grid) {
-        p.drawLine(QPointF(x, 0), QPointF(x, r.bottom()));
-    }
-    for (double y = oy; y < r.bottom(); y += grid) {
-        p.drawLine(QPointF(0, y), QPointF(r.right(), y));
-    }
-
-    paintTiles(p);
+    paintBackdrop(p);
 
     // home
     if (s_.has_home) {
@@ -680,30 +1004,11 @@ void MapView::paintEvent(QPaintEvent*) {
         paintRoute(p, vehicle_plan_, kCyan, false, active);
     }
 
-    // trail: the chosen time window, fading toward its oldest end
-    if (trail_on_ && s_.trail.size() > 1) {
-        const size_t n = s_.trail.size();
-        size_t first = 0;
-        if (trail_secs_ > 0) {
-            const auto cutoff = Clock::now() - std::chrono::seconds(trail_secs_);
-            first = static_cast<size_t>(
-                std::lower_bound(s_.trail.begin(), s_.trail.end(), cutoff,
-                                 [](const TrailPoint& tp, Clock::time_point c) { return tp.t < c; }) -
-                s_.trail.begin());
-        }
-        const size_t span = n - first;
-        const size_t chunk = 12;
-        for (size_t i = first + 1; span > 1 && i < n; i += chunk) {
-            QPolygonF poly;
-            const size_t end = std::min(n, i + chunk);
-            for (size_t k = i - 1; k < end; ++k) {
-                poly << toScreen(s_.trail[k].lat, s_.trail[k].lon);
-            }
-            const double a = 0.08 + 0.75 * static_cast<double>(end - first) / span;
-            p.setPen(QPen(alpha(kCyan, a), compact_ ? 1.5 : 2.2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-            p.setBrush(Qt::NoBrush);
-            p.drawPolyline(poly);
-        }
+    // trail head: the points that arrived after the backdrop was drawn
+    if (trail_on_ && bd_.trail_on && bd_.trail_n > 0 && s_.trail.size() > bd_.trail_n) {
+        const QPointF world_tl = worldPx(clat_, clon_, zoom_) - QPointF(width() / 2.0, height() / 2.0);
+        const size_t first = trailFirst();
+        paintTrail(p, world_tl, bd_.trail_n - 1, s_.trail.size(), first, s_.trail.size() - first);
     }
 
     paintApproach(p);
@@ -726,26 +1031,146 @@ void MapView::paintEvent(QPaintEvent*) {
     finishView(p);
 }
 
-void MapView::paintTiles(QPainter& p) {
+size_t MapView::trailFirst() const {
+    if (trail_secs_ <= 0) {
+        return 0;
+    }
+    const auto cutoff = Clock::now() - std::chrono::seconds(trail_secs_);
+    return static_cast<size_t>(std::lower_bound(s_.trail.begin(), s_.trail.end(), cutoff,
+                                                [](const TrailPoint& tp, Clock::time_point c) { return tp.t < c; }) -
+                               s_.trail.begin());
+}
+
+void MapView::paintTrail(QPainter& p, const QPointF& world_tl, size_t from, size_t to, size_t first, size_t span) {
+    // fading toward the oldest end; points closer than ~2 px on screen are
+    // skipped, so a long trail costs what it covers on screen, not its length
+    from = std::max(from, first);
+    if (to <= from + 1 || span < 2) {
+        return;
+    }
+    p.save();
+    p.setBrush(Qt::NoBrush);
+    // the device the painter draws on: the view, or the backdrop pixmap
+    const QRectF clip = QRectF(QPointF(0, 0), QSizeF(p.device()->width(), p.device()->height()) /
+                                                  p.device()->devicePixelRatioF())
+                            .adjusted(-16, -16, 16, 16);
+    constexpr int kBuckets = 10;  // alpha steps along the trail
+    QPolygonF poly;
+    int bucket = -1;
+    QPointF last;
+    auto flush = [&] {
+        if (poly.size() > 1) {
+            const double a = 0.08 + 0.75 * (bucket + 1.0) / kBuckets;
+            p.setPen(QPen(alpha(kCyan, a), compact_ ? 1.5 : 2.2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            drawClipped(p, poly, false, clip);
+        }
+    };
+    for (size_t k = from; k < to; ++k) {
+        const QPointF pt = worldPx(s_.trail[k].lat, s_.trail[k].lon, zoom_) - world_tl;
+        const int b = std::min(kBuckets - 1, static_cast<int>(kBuckets * static_cast<double>(k - first) / span));
+        if (b != bucket) {
+            flush();
+            const QPointF join = poly.isEmpty() ? pt : poly.back();
+            poly.clear();
+            poly << join;
+            bucket = b;
+            last = join;
+        }
+        const QPointF d = pt - last;
+        if (k + 1 == to || d.x() * d.x() + d.y() * d.y() >= 4.0) {
+            poly << pt;
+            last = pt;
+        }
+    }
+    flush();
+    p.restore();
+}
+
+void MapView::buildBackdrop(const QPointF& world_tl, const QSize& size) {
+    const qreal dpr = devicePixelRatioF();
+    if (bd_.pm.size() != size * dpr) {
+        bd_.pm = QPixmap(size * dpr);
+    }
+    bd_.pm.setDevicePixelRatio(dpr);
+    QPainter p(&bd_.pm);
+    p.fillRect(QRectF(QPointF(0, 0), QSizeF(size)), kBg);
+    // tactical grid (visible where tiles are missing / offline)
+    const QColor grid_c = alpha(kCyan, 0.05);
+    const double grid = 64.0;
+    // first grid line at or after the pixmap's left / top edge, fixed to the world
+    auto first = [grid](double w) { return std::fmod(grid - std::fmod(w, grid), grid); };
+    for (double x = first(world_tl.x()); x < size.width(); x += grid) {
+        p.fillRect(QRectF(std::floor(x), 0, 1, size.height()), grid_c);
+    }
+    for (double y = first(world_tl.y()); y < size.height(); y += grid) {
+        p.fillRect(QRectF(0, std::floor(y), size.width(), 1), grid_c);
+    }
+    paintTiles(p, world_tl, QSizeF(size));
+    p.setRenderHint(QPainter::Antialiasing, true);
+    bd_.trail_on = trail_on_;
+    bd_.trail_secs = trail_secs_;
+    bd_.trail_n = s_.trail.size();
+    bd_.trail_first = 0;
+    if (trail_on_ && s_.trail.size() > 1) {
+        const size_t first = trailFirst();
+        bd_.trail_first = first;
+        paintTrail(p, world_tl, first, s_.trail.size(), first, s_.trail.size() - first);
+    }
+    bd_.world_tl = world_tl;
+    bd_.zoom = zoom_;
+    bd_.layer = layer_;
+    bd_.tiles_gen = tiles_gen_;
+    bd_.built_ms = QDateTime::currentMSecsSinceEpoch();
+}
+
+void MapView::paintBackdrop(QPainter& p) {
+    const QPointF centre = worldPx(clat_, clon_, zoom_);
+    const QPointF view_tl = centre - QPointF(width() / 2.0, height() / 2.0);
+    const QSize want(width() + 2 * kBackdropMargin, height() + 2 * kBackdropMargin);
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const QPointF off = view_tl - bd_.world_tl;  // where the view sits inside the pixmap
+    const bool inside = off.x() >= 0 && off.y() >= 0 && off.x() + width() <= bd_.pm.width() / bd_.pm.devicePixelRatio() &&
+                        off.y() + height() <= bd_.pm.height() / bd_.pm.devicePixelRatio();
+    const bool stale =
+        bd_.pm.isNull() || bd_.zoom != zoom_ || bd_.layer != layer_ || !inside ||
+        bd_.pm.size() != want * devicePixelRatioF() || bd_.trail_on != trail_on_ || bd_.trail_secs != trail_secs_ ||
+        (bd_.tiles_gen != tiles_gen_ && now - bd_.built_ms > 100) ||  // tiles arrive in bursts: batch them
+        (bd_.missing > 0 && now - bd_.built_ms > 2000) ||                      // retry tiles that failed
+        (trail_on_ && s_.trail.size() != bd_.trail_n && now - bd_.built_ms > 1000) ||  // fold the trail head in
+        (trail_on_ && s_.trail.size() < bd_.trail_n);                           // trail restarted
+    if (stale) {
+        // snap to whole pixels so the shifted copy stays crisp
+        const QPointF tl(std::floor(view_tl.x()) - kBackdropMargin, std::floor(view_tl.y()) - kBackdropMargin);
+        buildBackdrop(tl, want);
+    }
+    const QPointF at = bd_.world_tl - view_tl;
+    p.save();
+    p.setRenderHint(QPainter::SmoothPixmapTransform, false);
+    p.drawPixmap(QPointF(std::round(at.x()), std::round(at.y())), bd_.pm);
+    p.restore();
+}
+
+void MapView::paintTiles(QPainter& p, const QPointF& world_tl, const QSizeF& size) {
     const int maxz = TileCache::maxZoom(layer_);
     const int z = std::clamp(static_cast<int>(std::floor(zoom_ + 0.25)), TileCache::kMinZoom, maxz);
     const double scale = std::exp2(zoom_ - z);
     const double ts = kTile * scale;
-    const QPointF cw = worldPx(clat_, clon_, z) * scale;
-    const QPointF origin = QPointF(width() / 2.0, height() / 2.0) - cw;
+    const QPointF origin = -world_tl;  // world px at zoom_ == worldPx(z) * scale
     const int n = 1 << z;
 
     const int x0 = static_cast<int>(std::floor(-origin.x() / ts));
-    const int x1 = static_cast<int>(std::floor((width() - origin.x()) / ts));
+    const int x1 = static_cast<int>(std::floor((size.width() - origin.x()) / ts));
     const int y0 = std::max(0, static_cast<int>(std::floor(-origin.y() / ts)));
-    const int y1 = std::min(n - 1, static_cast<int>(std::floor((height() - origin.y()) / ts)));
+    const int y1 = std::min(n - 1, static_cast<int>(std::floor((size.height() - origin.y()) / ts)));
+    bd_.missing = 0;
+    bd_.drawn = 0;
 
     p.save();
     p.setRenderHint(QPainter::Antialiasing, false);
     p.setRenderHint(QPainter::SmoothPixmapTransform, std::abs(scale - 1.0) > 1e-3);
     // request the centre tiles first so the area under the aircraft fills in first
-    const double cx = (width() / 2.0 - origin.x()) / ts;
-    const double cy = (height() / 2.0 - origin.y()) / ts;
+    const double cx = (size.width() / 2.0 - origin.x()) / ts;
+    const double cy = (size.height() / 2.0 - origin.y()) / ts;
     std::vector<std::pair<int, int>> order;
     for (int ty = y0; ty <= y1; ++ty) {
         for (int tx = x0; tx <= x1; ++tx) {
@@ -760,17 +1185,39 @@ void MapView::paintTiles(QPainter& p) {
         const int wx = ((tx % n) + n) % n;
         if (const QPixmap* pm = tiles_->tile(layer_, z, wx, ty)) {
             p.drawPixmap(dst, *pm, QRectF(pm->rect()));
+            ++bd_.drawn;
             continue;
         }
-        // fall back to a scaled-up ancestor already in memory
-        for (int dz = 1; dz <= 5 && z - dz >= 0; ++dz) {
+        if (!tiles_->empty(layer_, z, wx, ty)) {
+            ++bd_.missing;  // still coming
+        }
+        bool found = false;
+        // meanwhile (or where there's nothing this deep): the nearest coarser
+        // tile, enlarged. Loaded from disk if need be, e.g. the country
+        // satellite (z14) under a full zoom without a full-detail area.
+        for (int dz = 1; dz <= 8 && z - dz >= 0; ++dz) {
             const int px = wx >> dz;
             const int py = ty >> dz;
-            if (const QPixmap* pm = tiles_->peek(layer_, z - dz, px, py)) {
+            // street tiles render quickly, so only use parents already in memory
+            // rather than queueing renders all the way up
+            const QPixmap* pm = layer_ == TileCache::Streets ? tiles_->peek(layer_, z - dz, px, py)
+                                                             : tiles_->tile(layer_, z - dz, px, py);
+            if (pm) {
+                ++bd_.drawn;
                 const double sub = pm->width() / static_cast<double>(1 << dz);
                 const QRectF src((wx - (px << dz)) * sub, (ty - (py << dz)) * sub, sub, sub);
                 p.drawPixmap(dst, *pm, src);
+                found = true;
                 break;
+            }
+        }
+        if (!found && layer_ == TileCache::Satellite && tiles_->hasStreetSource()) {
+            // no imagery here at all: the street map rather than a black hole
+            if (const QPixmap* pm = tiles_->tile(TileCache::Streets, z, wx, ty)) {
+                p.drawPixmap(dst, *pm, QRectF(pm->rect()));
+                ++bd_.drawn;
+            } else {
+                ++bd_.missing;
             }
         }
     }
@@ -779,36 +1226,53 @@ void MapView::paintTiles(QPainter& p) {
 
 void MapView::paintRoute(QPainter& p, const MissionPlan& plan, const QColor& c, bool editable, int active_index) {
     const auto& pts = plan.wps;
-    auto stroke = [&](const QPolygonF& line, double opacity, bool closed) {
+    auto stroke = [&](const QPolygonF& line, double opacity, bool closed, bool march = true) {
         // glow underlay + marching ants showing the direction of travel
         p.setBrush(Qt::NoBrush);
         p.setPen(QPen(alpha(c, 0.22 * opacity), 6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-        closed ? p.drawPolygon(line) : p.drawPolyline(line);
+        const QRectF view = QRectF(rect()).adjusted(-16, -16, 16, 16);
+        drawClipped(p, line, closed, view);
         QPen ants(alpha(c, opacity), 2.0, Qt::CustomDashLine, Qt::FlatCap, Qt::RoundJoin);
         ants.setDashPattern({5, 4});
-        ants.setDashOffset(reducedMotion() ? 0.0 : -std::fmod(time_ * 14.0, 9.0));
+        ants.setDashOffset(reducedMotion() || !march ? 0.0 : -std::fmod(time_ * 14.0, 9.0));
         p.setPen(ants);
-        closed ? p.drawPolygon(line) : p.drawPolyline(line);
+        drawClipped(p, line, closed, view);
     };
 
     // takeoff leg: home -> WP1, fainter (flown once)
     if (s_.has_home && !pts.empty()) {
         stroke(QPolygonF{toScreen(s_.home_lat, s_.home_lon), toScreen(pts[0].lat, pts[0].lon)}, 0.45, false);
     }
-    // the loop itself, closed back to WP1
+    // the route: a loop closes back to WP1; back-and-forth and one-way are
+    // open (back-and-forth flies both ways, so its dashes stand still)
     if (pts.size() > 1) {
-        QPolygonF loop;
+        QPolygonF route;
         for (const auto& wp : pts) {
-            loop << toScreen(wp.lat, wp.lon);
+            route << toScreen(wp.lat, wp.lon);
         }
-        stroke(loop, 1.0, true);
-    } else if (pts.size() == 1 && !compact_) {
-        // one point: the aircraft circles it
-        const QPointF sp = toScreen(pts[0].lat, pts[0].lon);
-        QPen ring(alpha(c, 0.7), 1.5, Qt::DashLine);
-        p.setPen(ring);
-        p.setBrush(Qt::NoBrush);
-        p.drawEllipse(sp, 30, 30);
+        stroke(route, 1.0, plan.pattern == Pattern::Loop, plan.pattern != Pattern::BackForth || pts.size() == 2);
+    }
+    // the final hold: one point, or the end of a one-way route, is circled
+    const bool ends_in_hold = pts.size() == 1 || (pts.size() > 1 && plan.pattern == Pattern::OneWay);
+    if (ends_in_hold && !compact_) {
+        // the hold circle at its real size, dashes marching in its direction
+        const QPointF sp = toScreen(pts.back().lat, pts.back().lon);
+        const double r_m = plan.hold_radius > 0.0f ? plan.hold_radius : default_loiter_radius_;
+        const double rpx = std::max(18.0, r_m / metersPerPixel());
+        if (circleVisible(sp, rpx, QRectF(rect()).adjusted(-40, -40, 40, 40))) {
+            QPen ring(alpha(c, 0.75), 1.6, Qt::CustomDashLine);
+            ring.setDashPattern({6, 5});
+            const double phase = reducedMotion() ? 0.0 : std::fmod(time_ * 10.0, 11.0);
+            ring.setDashOffset(plan.hold_ccw ? phase : -phase);
+            p.setPen(ring);
+            p.setBrush(Qt::NoBrush);
+            p.drawEllipse(sp, rpx, rpx);
+            // a chevron at the top shows the direction of the turn
+            const QPointF top = sp + QPointF(0, -rpx);
+            const double dx = plan.hold_ccw ? -7.0 : 7.0;
+            p.setPen(QPen(alpha(c, 0.9), 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            p.drawPolyline(QPolygonF{top + QPointF(-dx, -6), top + QPointF(dx * 0.3, 0), top + QPointF(-dx, 6)});
+        }
     }
 
     if (compact_) {
@@ -863,8 +1327,15 @@ void MapView::paintRoute(QPainter& p, const MissionPlan& plan, const QColor& c, 
     };
 
     for (size_t i = 0; i < pts.size(); ++i) {
-        marker(toScreen(pts[i].lat, pts[i].lon), static_cast<int>(i), QString::number(i + 1), c,
-               units::altText(pts[i].alt_rel));
+        QString caption = units::altText(pts[i].alt_rel);
+        if (pts.size() > 1 && i + 1 == pts.size()) {
+            if (plan.pattern == Pattern::OneWay) {
+                caption += QStringLiteral(" · HOLD");
+            } else if (plan.pattern == Pattern::BackForth && pts.size() > 2) {
+                caption += QStringLiteral(" · TURN BACK");
+            }
+        }
+        marker(toScreen(pts[i].lat, pts[i].lon), static_cast<int>(i), QString::number(i + 1), c, caption);
     }
     if (plan.land) {
         const QPointF lp = toScreen(plan.land->lat, plan.land->lon);
@@ -899,10 +1370,10 @@ void MapView::paintOrbit(QPainter& p) {
             QPen dash(alpha(col, 0.5), 1.2, Qt::DashLine);
             dash.setDashOffset(-time_ * 8.0);
             p.setPen(dash);
-            p.drawLine(a, c);
+            drawLineClipped(p, a, c, QRectF(rect()).adjusted(-16, -16, 16, 16));
         }
     }
-    if (rpx > 4.0) {
+    if (rpx > 4.0 && circleVisible(c, rpx, QRectF(rect()).adjusted(-40, -40, 40, 40))) {
         QPen ring(alpha(col, 0.75), compact_ ? 1.2 : 1.8, Qt::CustomDashLine);
         ring.setDashPattern({6, 5});
         // the dashes march in the direction of the turn
@@ -917,7 +1388,9 @@ void MapView::paintOrbit(QPainter& p) {
             QPen flown(alpha(kMuted, 0.6), 1.0, Qt::DotLine);
             p.setPen(flown);
             p.setBrush(Qt::NoBrush);
-            p.drawEllipse(c, fpx, fpx);
+            if (circleVisible(c, fpx, QRectF(rect()).adjusted(-40, -40, 40, 40))) {
+                p.drawEllipse(c, fpx, fpx);
+            }
             drawText(p, QRectF(c.x() - 80, c.y() + fpx + 2, 160, 14), Qt::AlignCenter,
                      QStringLiteral("flown %1 · trimming").arg(formatDistance(orbit_->flown)), labelFont(9),
                      alpha(kMuted, 0.9));
@@ -964,12 +1437,15 @@ void MapView::paintApproach(QPainter& p) {
     QPen ring(alpha(kGreen, 0.6 * op), 1.4, Qt::DashLine);
     p.setPen(ring);
     p.setBrush(Qt::NoBrush);
-    p.drawEllipse(c, rpx, rpx);
+    const QRectF view = QRectF(rect()).adjusted(-16, -16, 16, 16);
+    if (circleVisible(c, rpx, view)) {
+        p.drawEllipse(c, rpx, rpx);
+    }
     QPen leg(alpha(kGreen, 0.9 * op), 2.0, Qt::CustomDashLine, Qt::FlatCap);
     leg.setDashPattern({5, 4});
     leg.setDashOffset(reducedMotion() ? 0.0 : -std::fmod(time_ * 14.0, 9.0));
     p.setPen(leg);
-    p.drawLine(e, l);
+    drawLineClipped(p, e, l, view);
     p.setPen(Qt::NoPen);
     p.setBrush(alpha(kGreen, op));
     p.drawEllipse(e, 3.5, 3.5);
@@ -985,7 +1461,7 @@ void MapView::paintApproach(QPainter& p) {
         p.drawLine(tip, tip - dir * 8.0 + n * 5.0);
         p.drawLine(tip, tip - dir * 8.0 - n * 5.0);
         drawText(p, QRectF(base.x() - 30, base.y() - 22, 60, 14), Qt::AlignCenter,
-                 QStringLiteral("%1 m/s").arg(s_.wind_speed, 0, 'f', 1), monoFont(10), alpha(kText, 0.9));
+                 units::speedText(s_.wind_speed, 1), monoFont(10), alpha(kText, 0.9));
     }
 }
 
@@ -1123,19 +1599,100 @@ void MapView::paintOverlayChrome(QPainter& p) {
     double xr = right;
     xr = chip(layer_chip_, xr, layer_ == TileCache::Satellite ? QStringLiteral("▣ Sat") : QStringLiteral("▣ Map"), true);
     chip(follow_chip_, xr, QStringLiteral("◎ Follow"), follow_);
+    paintNavBox(p, right, y - 52);
+
+    if (!dl_status_.isEmpty()) {
+        const QFont f = labelFont(11);
+        const double w = QFontMetricsF(f).horizontalAdvance(dl_status_) + 30;
+        const QRectF box(width() / 2.0 - w / 2.0, mode_ == Mode::Area ? 210 : 104, w, 26);
+        drawGlass(p, chamferPath(box, 7), kCyan, 0.7, kGlassDeep);
+        drawText(p, box, Qt::AlignCenter, dl_status_, f, kCyan);
+    }
+
+    // nothing to show here: say where the map comes from
+    if (bd_.drawn == 0 && !bd_.pm.isNull()) {
+        const QString text = layer_ == TileCache::Streets && !tiles_->hasStreetSource()
+                                 ? QStringLiteral("NO OFFLINE STREET MAP · Settings ⚙ → OFFLINE → COUNTRY PACK")
+                                 : QStringLiteral("NO OFFLINE MAP HERE · Settings ⚙ → OFFLINE");
+        const QFont f = labelFont(11);
+        const double w = QFontMetricsF(f).horizontalAdvance(text) + 30;
+        const QRectF box(width() / 2.0 - w / 2.0, height() / 2.0 + 60, w, 28);
+        drawGlass(p, chamferPath(box, 7), kAmber, 0.7, kGlassDeep);
+        drawText(p, box, Qt::AlignCenter, text, f, kAmber);
+    }
 
     // mode hint
     if (mode_ == Mode::Guide) {
-        const QString text = QStringLiteral("GUIDE · tap the map to send the aircraft");
+        const QString text = QStringLiteral("FLY TO · tap the map to send the aircraft");
         const QFont f = labelFont(11);
         const double w = QFontMetricsF(f).horizontalAdvance(text) + 30;
         const QRectF box(width() / 2.0 - w / 2.0, 70, w, 26);
         drawGlass(p, chamferPath(box, 7), kCyan, 0.8, kGlassDeep);
         drawText(p, box, Qt::AlignCenter, text, f, kCyan);
     }
-    if (mode_ != Mode::Normal) {
-        drawBrackets(p, QRectF(rect()).adjusted(8, 8, -8, -8), 28, alpha(mode_ == Mode::Plan ? kAmber : kCyan, 0.7), 2.0);
+    if (mode_ == Mode::Area) {
+        paintArea(p);
     }
+    if (mode_ != Mode::Normal) {
+        drawBrackets(p, QRectF(rect()).adjusted(8, 8, -8, -8), 28,
+                     alpha(mode_ == Mode::Plan || mode_ == Mode::Area ? kAmber : kCyan, 0.7), 2.0);
+    }
+}
+
+void MapView::paintArea(QPainter& p) {
+    const QRectF view = QRectF(rect()).adjusted(-20, -20, 20, 20);
+    // what's downloaded already
+    for (const auto& a : areas_) {
+        const QRectF r = QRectF(toScreen(a.max_lat, a.min_lon), toScreen(a.min_lat, a.max_lon)).normalized();
+        if (!r.intersects(view)) continue;
+        p.setPen(QPen(alpha(kCyan, 0.7), 1.2, Qt::DashLine));
+        p.setBrush(alpha(kCyan, 0.07));
+        p.drawRect(r.intersected(view));
+    }
+    // the selection with its corner handles
+    if (area_sel_) {
+        const auto c = areaCorners();
+        const QRectF r = QRectF(c[0], c[2]).normalized();
+        p.setPen(QPen(kAmber, 2.0));
+        p.setBrush(alpha(kAmber, 0.10));
+        p.drawRect(r.intersected(view));
+        for (const QPointF& q : c) {
+            p.setPen(QPen(kAmber, 2.0));
+            p.setBrush(alpha(kBg, 0.85));
+            p.drawRect(QRectF(q.x() - 9, q.y() - 9, 18, 18));
+        }
+    }
+    // top: what to do
+    {
+        const QString text = area_sel_ ? QStringLiteral("AREA · drag a corner to adjust · drag elsewhere for a new one")
+                                       : QStringLiteral("AREA · drag a rectangle over the area you want in full detail");
+        const QFont f = labelFont(11);
+        const double w = QFontMetricsF(f).horizontalAdvance(text) + 30;
+        const QRectF box(width() / 2.0 - w / 2.0, 70, w, 26);
+        drawGlass(p, chamferPath(box, 7), kAmber, 0.8, kGlassDeep);
+        drawText(p, box, Qt::AlignCenter, text, f, kAmber);
+    }
+    // bottom panel: size, new vs shared tiles, DOWNLOAD / CANCEL
+    // at the top, under the hint: the bottom belongs to the dock and the picture-in-picture
+    const double pw = std::min(width() - 32.0, 640.0);
+    const QRectF panel(width() / 2.0 - pw / 2.0, 104, pw, 96);
+    drawGlass(p, chamferPath(panel, 10), kAmber, 0.8, alpha(kGlassDeep, 0.95));
+    drawText(p, QRectF(panel.left() + 16, panel.top() + 10, pw - 300, 22), Qt::AlignLeft | Qt::AlignVCenter,
+             area_sel_ ? area_info1_ : QStringLiteral("no area yet"), monoFont(12, true), area_warn_ ? kRed : kText);
+    drawText(p, QRectF(panel.left() + 16, panel.top() + 34, pw - 300, 52), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
+             area_sel_ ? area_info2_ : QStringLiteral("dashed: areas you already have (their tiles are reused)"),
+             labelFont(10, false), area_warn_ ? kRed : kMuted);
+    area_cancel_rect_ = QRectF(panel.right() - 276, panel.top() + 22, 120, 52);
+    area_dl_rect_ = QRectF(panel.right() - 146, panel.top() + 22, 130, 52);
+    auto button = [&](const QRectF& r, const QString& t, const QColor& c, bool on) {
+        p.save();
+        p.setOpacity(on ? 1.0 : 0.35);
+        drawGlass(p, chamferPath(r, 8), c, 0.9, alpha(c, 0.18));
+        drawText(p, r, Qt::AlignCenter, t, labelFont(12.5), c);
+        p.restore();
+    };
+    button(area_cancel_rect_, QStringLiteral("CANCEL"), kMuted, true);
+    button(area_dl_rect_, QStringLiteral("⬇ DOWNLOAD"), kCyan, area_sel_.has_value() && area_can_dl_);
 }
 
 void MapView::paintFootprint(QPainter& p) {
@@ -1211,14 +1768,6 @@ void MapView::paintFootprint(QPainter& p) {
         p.drawLine(bc + QPointF(s - 2, 0), bc + QPointF(s + 6, 0));
         p.drawLine(bc + QPointF(0, -s - 6), bc + QPointF(0, -s + 2));
         p.drawLine(bc + QPointF(0, s - 2), bc + QPointF(0, s + 6));
-        if (!compact_) {
-            const QString text = QStringLiteral("CAM %1").arg(formatDistance(std::hypot(fp.center.north, fp.center.east)));
-            const QFont f = labelFont(10);
-            const double w = QFontMetricsF(f).horizontalAdvance(text) + 14;
-            const QRectF box(bc.x() + 14, bc.y() - 22, w, 18);
-            drawGlass(p, chamferPath(box, 4), col, 0.6, kGlassDeep);
-            drawText(p, box, Qt::AlignCenter, text, f, col);
-        }
     }
 }
 

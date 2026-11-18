@@ -8,6 +8,7 @@
 #include <atomic>
 #include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -52,6 +53,20 @@ public:
     void uploadMission(std::vector<MissionItem> items);
     void downloadMission();
 
+    // ---- parameters -----------------------------------------------------------
+    // Read these (cached in VehicleState::params; missing ones are retried).
+    void fetchParams(std::vector<std::string> names);
+    // PARAM_SET, then confirmed by the echoed PARAM_VALUE (retried up to 3x).
+    // Reported as LinkEvent::ParamSet.
+    void setParam(const std::string& name, float value);
+
+    // ---- stick input (MANUAL_CONTROL) -------------------------------------------
+    // Streamed at 10 Hz until `hold_ms` after the last call, then stopped (the
+    // vehicle falls back to RC after RC_OVERRIDE_TIME). Ranges: x pitch, y
+    // roll, r yaw -1000..1000; z throttle 0..1000.
+    void manualControl(int x, int y, int z, int r, int hold_ms = 400);
+    void stopManualControl();
+
 
 private:
     using Task = std::function<void()>;
@@ -68,6 +83,8 @@ private:
     void requestParams(Clock::time_point now);
     void handleParamValue(const mavlink_message_t& msg);
     void decodeGimbal(const mavlink_message_t& msg);
+    void sendParamRequests(Clock::time_point now);
+    void sendManual(Clock::time_point now);
     void publish(LinkEvent ev);
     void wake();
 
@@ -99,6 +116,28 @@ private:
     bool initial_download_done_ = false;
     Clock::time_point last_param_request_{};
     int param_rounds_ = 0;
+
+    // parameter service
+    struct ParamWant {
+        std::string name;
+        int tries = 0;
+        Clock::time_point last{};
+    };
+    std::vector<ParamWant> param_wants_;  // reads outstanding
+    struct ParamWrite {
+        std::string name;
+        float value = 0.0f;
+        int tries = 0;
+        Clock::time_point last{};
+    };
+    std::vector<ParamWrite> param_writes_;
+    std::map<std::string, uint8_t> param_types_;
+
+    // MANUAL_CONTROL stream
+    bool manual_active_ = false;
+    int manual_x_ = 0, manual_y_ = 0, manual_z_ = 0, manual_r_ = 0;
+    Clock::time_point manual_until_{};
+    Clock::time_point manual_last_tx_{};
 
     // message rate measurement (1 s window)
     Clock::time_point rate_t0_{};

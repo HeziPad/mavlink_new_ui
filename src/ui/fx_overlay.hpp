@@ -46,6 +46,8 @@ private:
         double t = -1.0;
     };
 
+    bool active() const;  // anything to show
+    void wake();          // show (if hidden) and repaint
     void paintToasts(QPainter& p);
     void paintBanner(QPainter& p);
     void paintAlert(QPainter& p);

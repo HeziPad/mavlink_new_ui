@@ -20,6 +20,7 @@ constexpr uint16_t kCmdNavLoiterToAlt = 31;
 constexpr uint16_t kCmdNavVtolTakeoff = 84;
 constexpr uint16_t kCmdNavVtolLand = 85;
 constexpr uint16_t kCmdDoJump = 177;
+constexpr uint16_t kCmdDoLandStart = 189;     // marks where a landing sequence starts (RTL_AUTOLAND)
 constexpr float kVtolLandFwSpiral = 1.0f;         // NAV_VTOL_LAND_OPTIONS_FW_SPIRAL_APPROACH
 }  // namespace mav
 
@@ -49,10 +50,21 @@ struct UserWaypoint {
     float alt_rel = 80.0f;
 };
 
-// What the operator plans: a loop flown forever, plus an optional landing
-// point that is only flown to on request (Land button).
+// How the waypoints are flown.
+//   Loop       1 -> 2 -> 3 -> 1 -> ... forever
+//   BackForth  1 -> 2 -> 3 -> 2 -> 1 -> 2 -> ... forever
+//   OneWay     1 -> 2 -> 3, then circle 3 on the wing until told otherwise
+enum class Pattern { Loop, BackForth, OneWay };
+
+// What the operator plans: the waypoints and how they are flown, plus an
+// optional landing point that is only flown to on request (Land button).
 struct MissionPlan {
-    std::vector<UserWaypoint> wps;      // loop points, each with its own altitude
+    std::vector<UserWaypoint> wps;      // route points, each with its own altitude
+    Pattern pattern = Pattern::Loop;
+    // The final hold (the end of a one-way route, or a one-point route):
+    // circle radius (0 = the autopilot's WP_LOITER_RAD) and direction.
+    float hold_radius = 0.0f;
+    bool hold_ccw = false;
     // Separate landing point. Its alt_rel is the approach altitude: the
     // aircraft spirals down to it on the wing, then back-transitions and
     // descends vertically from there.
@@ -107,16 +119,24 @@ LandingApproach computeLandingApproach(const UserWaypoint& land, const ApproachI
 // Layout:
 //   0          HOME           (frame GLOBAL, home AMSL altitude)
 //   1          VTOL_TAKEOFF   (takeoff_alt, relative)
-//   2..n+1     WAYPOINT x n   (per-point relative altitude)
-//   n+2        DO_JUMP -> 2, repeat forever   (n >= 2)
-//              LOITER_UNLIM at the point is used instead when n == 1
-//   n+3        LOITER_TO_ALT at the approach circle centre (+-radius = CW/CCW,
+//   then the route, by pattern (n = number of waypoints):
+//     Loop       WAYPOINT x n, DO_JUMP -> 2 repeat forever
+//     BackForth  WAYPOINT w1..wn, wn-1..w2, DO_JUMP -> 2 repeat forever
+//                (n >= 3; with n == 2 it is the same flight as Loop)
+//     OneWay     WAYPOINT w1..wn-1, LOITER_UNLIM at wn (no jump)
+//     n == 1     LOITER_UNLIM at the point, whatever the pattern
+//     (a LOITER_UNLIM carries the hold: param3 = +-hold_radius, - = CCW)
+//   then, when plan.land is set:
+//   +0         DO_LAND_START at plan.land: with RTL_AUTOLAND = 2 every RTL
+//              (failsafes included) jumps here and flies the same landing as
+//              the Land button
+//   +1         LOITER_TO_ALT at the approach circle centre (+-radius = CW/CCW,
 //              z = approach alt, exit on the tangent toward the next item)
-//   n+4        VTOL_LAND at plan.land (no spiral option; z = 0 = ground at home
+//   +2         VTOL_LAND at plan.land (no spiral option; z = 0 = ground at home
 //              level: ArduPlane uses this as the ground for its descent)
 //
-// The approach sits behind an endless jump, so it is never reached by
-// sequence; the GCS jumps to it with DO_SET_MISSION_CURRENT. Being preceded
+// The approach sits behind an endless jump (or the one-way route's endless
+// final loiter), so it is never reached by sequence; the GCS jumps to it with DO_SET_MISSION_CURRENT. Being preceded
 // by a LOITER_TO_ALT (not a NAV_WAYPOINT) the land item also stays clear of
 // ArduPlane's "VTOL land too short" arming check.
 // `approach` is required when plan.land is set (otherwise the land is left out).
@@ -125,29 +145,42 @@ std::vector<MissionItem> buildLoopMission(double home_lat, double home_lon, doub
                                           const MissionPlan& plan, float takeoff_alt = 40.0f,
                                           const LandingApproach* approach = nullptr);
 
-// Inverse of buildLoopMission for display / editing. Also accepts missions
-// from other tools: every located WAYPOINT / LOITER_* becomes a loop point,
-// except a loiter directly before the land (the approach circle), and the
-// first VTOL_LAND / LAND becomes the landing point.
+// Inverse of buildLoopMission for display / editing, pattern included (a
+// mirrored back-and-forth route is folded back to its n points). Also accepts
+// missions from other tools: every located WAYPOINT / LOITER_* becomes a route
+// point, except a loiter directly before the land (the approach circle), and
+// the first VTOL_LAND / LAND becomes the landing point.
 MissionPlan extractPlan(const std::vector<MissionItem>& items);
 
 // The approach as uploaded (circle + land), if the mission has one.
 std::optional<LandingApproach> extractApproach(const std::vector<MissionItem>& items);
 
 // seq where landing starts: the approach circle if there is one, else the
-// first VTOL_LAND / LAND item; -1 if none.
+// first VTOL_LAND / LAND item; -1 if none. (The DO_LAND_START marker before
+// the circle is not returned: jumping to the circle is the same thing.)
 int landSeq(const std::vector<MissionItem>& items);
 
 // Maps a mission seq to an index into extractPlan(items).wps; -1 when the
-// item is not a loop point (home, takeoff, jump, approach, land).
+// item is not a route point (home, takeoff, jump, approach, land). The way
+// back of a back-and-forth maps to the point it revisits.
 int seqToWaypointIndex(const std::vector<MissionItem>& items, int seq);
+
+// The plan has a final hold (one-way end or a single point): its index in wps, else -1.
+int holdIndex(const MissionPlan& plan);
 
 // Horizontal length of one lap (wp1 -> ... -> wpN -> wp1), metres.
 double lapLength(const std::vector<UserWaypoint>& wps);
-// Where Resume Plan rejoins the loop: the seq of the loop waypoint nearest to
+// Horizontal length of one cycle of the plan's pattern: the closed lap
+// (Loop), out and back (BackForth), or the open path once (OneWay), metres.
+double routeLength(const MissionPlan& plan);
+// Where Resume Plan rejoins the route: the seq of the route item nearest to
 // (lat, lon). If the aircraft is already within `skip_within_m` of it, the
-// next one around the loop instead (so it doesn't turn back over it).
-// -1 when the mission has no loop.
-int nearestLoopSeq(const std::vector<MissionItem>& items, double lat, double lon, double skip_within_m);
+// next one in flying order instead (so it doesn't turn back over it); a
+// one-way route doesn't wrap, it stays on its final hold. A back-and-forth
+// visits its middle points twice: `track_deg` (the aircraft's ground track,
+// < 0 unknown) picks the visit that keeps it flying the way it is going.
+// -1 when the mission has no route.
+int nearestLoopSeq(const std::vector<MissionItem>& items, double lat, double lon, double skip_within_m,
+                   double track_deg = -1.0);
 
 }  // namespace gcs
