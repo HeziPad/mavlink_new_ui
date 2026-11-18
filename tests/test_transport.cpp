@@ -137,7 +137,11 @@ void testSerialTransport() {
     CHECK(!pty.slave.empty());
     std::string err;
     SerialTransport s(pty.slave, 57600);
-    CHECK(s.open(err));
+    const bool opened = s.open(err);
+    if (!opened) {
+        std::fprintf(stderr, "open %s: %s\n", pty.slave.c_str(), err.c_str());
+    }
+    CHECK(opened);
     CHECK(s.canSend());
     pty.write({0xFD, 1, 2});
     CHECK(s.waitReadable(500, err) == 1);
@@ -151,9 +155,9 @@ void testSerialTransport() {
     SerialTransport missing("/dev/does-not-exist-gcs", 57600);
     CHECK(!missing.open(err));
     CHECK(err.find("not found") != std::string::npos);
-    SerialTransport odd(pty.slave, 12345);
 #if !defined(__APPLE__)
-    CHECK(!odd.open(err));  // not a standard rate (macOS takes any)
+    SerialTransport odd(pty.slave, 12345);
+    CHECK(!odd.open(err));  // not a standard rate (macOS takes any on a real port)
 #endif
 }
 

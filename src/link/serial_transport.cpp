@@ -42,7 +42,7 @@ std::string sysError(const std::string& what) {
 }
 #endif
 
-#if !defined(__APPLE__) && !defined(_WIN32)
+#if !defined(_WIN32)
 bool speedConstant(int baud, speed_t& out) {
     switch (baud) {
     case 9600: out = B9600; return true;
@@ -155,11 +155,14 @@ bool SerialTransport::open(std::string& error) {
     tio.c_cflag &= ~static_cast<tcflag_t>(CSTOPB | PARENB | CRTSCTS);
     tio.c_cc[VMIN] = 0;
     tio.c_cc[VTIME] = 0;
-#if defined(__APPLE__)
-    ::cfsetspeed(&tio, B9600);  // placeholder; the real rate is set below (any value works)
-#else
+    // a standard rate through termios; on macOS the ones it has no constant
+    // for (460800, 921600) through IOSSIOSPEED, which only real serial drivers take
     speed_t sp{};
-    if (!speedConstant(baud_, sp)) {
+    const bool standard = speedConstant(baud_, sp);
+#if defined(__APPLE__)
+    ::cfsetspeed(&tio, standard ? sp : B9600);  // B9600: a placeholder, replaced below
+#else
+    if (!standard) {
         error = "baud " + std::to_string(baud_) + " not supported";
         ::close(fd);
         return false;
@@ -173,11 +176,13 @@ bool SerialTransport::open(std::string& error) {
         return false;
     }
 #if defined(__APPLE__)
-    speed_t speed = static_cast<speed_t>(baud_);
-    if (::ioctl(fd, IOSSIOSPEED, &speed) < 0) {
-        error = sysError("baud " + std::to_string(baud_));
-        ::close(fd);
-        return false;
+    if (!standard) {
+        speed_t speed = static_cast<speed_t>(baud_);
+        if (::ioctl(fd, IOSSIOSPEED, &speed) < 0) {
+            error = sysError("baud " + std::to_string(baud_));
+            ::close(fd);
+            return false;
+        }
     }
 #endif
     ::tcflush(fd, TCIOFLUSH);
