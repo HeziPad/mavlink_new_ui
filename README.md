@@ -136,7 +136,7 @@ buttons say why when pressed (and on hover with a mouse).
 
 **SYSTEMS** in the telemetry bar counts problems. Tap it (or the red alert
 banner) to open the alerts panel; tap it again, tap anywhere outside the panel
-or press `Esc` to close it. It shows status pills (link, GPS, navigation, sensors,
+to close it. It shows status pills (link, GPS, navigation, sensors,
 power, arming) and one card per problem. Cards show their **title only**; tap a
 title to open it (critical ones arrive open). An open card says what's wrong,
 why it matters and what to try, with the raw data (EKF flags, the autopilot's
@@ -192,8 +192,12 @@ reboot), so turning it off is always a deliberate step.
 
 After an RTL / QLAND landing (a failsafe) the vehicle sits in a mode ArduPlane can't
 arm in, so its pre-arm check fails. SYSTEMS shows that as an info card, not a
-fault: Launch switches mode before arming. `Esc` deselects or leaves
-Plan/Fly To, `Del` deletes the selected point, and `Ctrl+Z` undoes a plan edit.
+fault: Launch switches mode before arming.
+
+**The keyboard has no shortcuts.** Everything is done by tapping; a physical
+keyboard only types into the manual-entry keypad (coordinates, altitudes, hold
+time): digits and `.` into the focused box, Backspace / Delete, ← / → to move
+the cursor, Tab for the next box, Enter = OK.
 
 **The lift rotors are for takeoff and landing only.** Every flight action above
 keeps the aircraft on the wing. The rotor glyph on the **FLIGHT** chip lights
@@ -224,6 +228,39 @@ TURN BACK or HOLD.
 - **Editing a point:** tap a point to select it. A panel then lets you set
   its altitude (−10 / −1 / +1 / +10, hold to repeat), insert a point after
   it, or delete it. Tap empty map to deselect.
+- **Typing a position or an altitude:** **⌖ COORD** on the point's panel (or
+  **⌖ BY COORD** in the plan strip for a new point, and on the Fly To panel)
+  opens a keypad in the coordinate format chosen in Settings → UNITS (no
+  switching there). Every number has its own box: `LAT [32.085300]° [N|S]`,
+  `LAT [32]° [05]′ [07.1]″ [N|S]`, or UTM `ZONE [36] [NORTH|SOUTH]`,
+  `EASTING`, `NORTHING`. Hemispheres are buttons, never typed letters. Each
+  box shows a thick cursor: tap a box (or a spot in it) to move there, and use
+  ◀ / ▶ / **NEXT ▸**. Digits and ⌫ act at the cursor, and a full box moves on
+  to the next one. It shows the point in the other formats and its distance
+  from the aircraft, and refuses anything more than 50 km from home. Tap an **altitude number** (waypoint,
+  landing point, Hold / Fly To / end-hold panel) to type it in **ASL**,
+  **AGL** or **AFL**. It is checked against the ground at that point: at least
+  **30 m above the ground** (20 m for the landing approach), with a **USE
+  MINIMUM** button when lower. The ± steppers stop at the same floor.
+- **Holding at a waypoint:** a waypoint's **HOLD HERE** row sets how long to
+  circle it before going on, the circle's radius and its direction. Tap the
+  time to type it (boxes `[1] min [30] s`, with FLY THROUGH / 0:30 / 1:00 /
+  2:00 / 5:00 / 10:00 chips).
+  - The hold is always set as a **time**; the row shows **Radius: 80 m**
+    (starting at `WP_LOITER_RAD`), stepped ±10 / ±50 m.
+  - **The GCS times the hold.** The timer starts once the aircraft is on the
+    circle. When it runs out, the GCS sends the mission on to the next point
+    (`SET_MISSION_CURRENT`; through a `DO_JUMP` to its target), so the hold
+    is exactly as long as set. The FLIGHT chip counts it down evenly
+    ("HOLD 0:18"), and the ETA chip reads **HOLDING**.
+  - On board, the hold is only a backstop for when the link is lost. At the
+    default radius it is `NAV_LOITER_TIME`. With **its own radius** it is
+    `NAV_LOITER_TURNS` (ArduPlane keeps a radius only for turns: exact up to
+    255 m, 10 m steps up to 2550 m) with enough turns to cover the time plus
+    one. Without the link, the hold ends up at most about a lap longer.
+  - Turns don't store a time, so the GCS remembers the times it uploaded (also
+    across restarts). The map and the plan editor show the time you set, not
+    0. A mission from elsewhere shows turns × lap time.
 - **Landing point:** tap **+ LANDING** in the plan strip, then tap the map.
   The landing point is optional and separate from the loop. Its altitude
   (default 30 m, editable in the panel) is the **approach altitude**: the
@@ -477,6 +514,24 @@ constant). The critical alert doesn't wait for the smoothing.
 - At 0:00: **LAND NOW** and a warning card.
 - If even a return from here would eat into the reserve: a critical card and
   the red banner.
+
+**Airspeed.** Tap the AS · GS chip to see the aircraft's three airspeeds,
+read from its own parameters and never changed by the GCS: **LOITER**
+(`AIRSPEED_MIN`), **CRUISE** (`AIRSPEED_CRUISE`) and **MAX** (`AIRSPEED_MAX`).
+The one choice there is the **SPEED MODE**, which picks the speed per
+situation (sent with `DO_CHANGE_SPEED`):
+
+| Mode | Circling | Between points | Long descents (> 15 m) | Landing |
+|---|---|---|---|---|
+| ECO (default) | LOITER | CRUISE | MAX | CRUISE |
+| NORMAL | CRUISE | CRUISE | CRUISE | CRUISE |
+| FAST | CRUISE | MAX | MAX | CRUISE |
+
+ArduPlane raises its minimum speed in banked turns by itself (TECS load
+factor). LOITER is also kept 2 m/s above `Q_ASSIST_SPEED`, or the lift rotors
+would spin to help the wing (SITL's quadplane ships `Q_ASSIST_SPEED` 18 above
+`AIRSPEED_MIN` 13, so it loiters at 20 there). The active target shows in the
+FLIGHT chip's small print.
 
 It only warns; it never lands by itself. Tap the chip for the card that
 explains the numbers. It needs `BATT_CAPACITY` and a current sensor.

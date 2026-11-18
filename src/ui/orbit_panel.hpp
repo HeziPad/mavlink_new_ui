@@ -28,11 +28,14 @@ public:
                    bool trimmed = false);
     // relabel the altitude steppers after a unit change
     void unitsChanged();
+    void setCoordButton(bool on);  // ⌖ COORD: only for Fly To
 
 signals:
     void altitudeDelta(float delta);
     void radiusDelta(float delta);
     void directionToggled();
+    void altitudeTapped();   // type the altitude
+    void coordRequested();   // type a new centre (Fly To only)
 
 protected:
     void paintEvent(QPaintEvent* e) override;
@@ -62,6 +65,10 @@ private:
     QLabel* radius_flown_ = nullptr;
     int flown_style_ = -1;  // 0 none, 1 approx, 2 trimmed: restyle only on change
     QPushButton* dir_;
+    QPushButton* coord_ = nullptr;
+
+protected:
+    bool eventFilter(QObject* obj, QEvent* e) override;
 };
 
 }  // namespace gcs::ui

@@ -38,6 +38,9 @@ CommandRequest makeVtolTakeoff(float alt_rel);
 CommandRequest makeSetMissionCurrent(uint16_t seq, bool reset = false);
 // Hardware safety switch: safe = outputs cut. ArduPilot: MAV_CMD_DO_SET_SAFETY_SWITCH_STATE.
 CommandRequest makeSetSafety(bool safe);
+// MAV_CMD_DO_CHANGE_SPEED, airspeed (m/s); -2 = back to AIRSPEED_CRUISE.
+// ArduPlane accepts AIRSPEED_MIN..AIRSPEED_MAX.
+CommandRequest makeChangeSpeed(float airspeed);
 // MAV_CMD_DO_REPOSITION (COMMAND_INT): switch to GUIDED and circle (lat, lon)
 // at alt_rel with the given radius and direction. Re-sending with the same
 // centre changes radius / altitude / direction in place.

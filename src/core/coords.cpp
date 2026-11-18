@@ -317,4 +317,43 @@ std::optional<LatLon> parse(const std::string& text, Fmt fmt) {
     return parseAngles(toks);
 }
 
+std::optional<double> angleFromDms(double deg, double min, double sec, bool positive, double max_deg) {
+    if (deg < 0.0 || min < 0.0 || sec < 0.0 || deg != std::floor(deg) || min != std::floor(min) || min >= 60.0 ||
+        sec >= 60.0) {
+        return std::nullopt;
+    }
+    const double v = deg + min / 60.0 + sec / 3600.0;
+    if (v > max_deg) {
+        return std::nullopt;
+    }
+    return positive ? v : -v;
+}
+
+DmsParts toDms(double v) {
+    DmsParts p;
+    p.positive = v >= 0.0;
+    long tenths = std::lround(std::abs(v) * 36000.0);
+    p.deg = tenths / 36000;
+    tenths -= p.deg * 36000;
+    p.min = tenths / 600;
+    tenths -= p.min * 600;
+    p.sec = tenths / 10.0;
+    return p;
+}
+
+std::optional<LatLon> checkedLatLon(double lat, double lon) {
+    if (!std::isfinite(lat) || !std::isfinite(lon) || std::abs(lat) > 90.0 || std::abs(lon) > 180.0) {
+        return std::nullopt;
+    }
+    return LatLon{lat, lon};
+}
+
+std::optional<LatLon> fromUtmChecked(int zone, bool north, double easting, double northing) {
+    if (zone < 1 || zone > 60 || easting < 100000.0 || easting > 900000.0 || northing < 0.0 ||
+        northing > 10000000.0) {
+        return std::nullopt;
+    }
+    return fromUtm(zone, north, easting, northing);
+}
+
 }  // namespace gcs::coords

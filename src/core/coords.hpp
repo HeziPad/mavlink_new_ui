@@ -37,4 +37,23 @@ std::string format(double lat, double lon, Fmt fmt);
 // separators, and UTM "36R 668123 3551234" / "36 N 668123 3551234".
 std::optional<LatLon> parse(const std::string& text, Fmt fmt);
 
+// ---- typed in separate boxes (the entry pad) ----------------------------------------
+
+// Degrees / minutes / seconds as typed: whole degrees and minutes, minutes and
+// seconds below 60, the total within max_deg (90 latitude, 180 longitude).
+std::optional<double> angleFromDms(double deg, double min, double sec, bool positive, double max_deg);
+// Split for pre-filling, rounded to 0.1" like format() (59.95" carries).
+struct DmsParts {
+    long deg = 0;
+    long min = 0;
+    double sec = 0.0;
+    bool positive = true;
+};
+DmsParts toDms(double v);
+// A position from decimal degrees (|lat| <= 90, |lon| <= 180).
+std::optional<LatLon> checkedLatLon(double lat, double lon);
+// UTM with the same range checks as parse(): zone 1..60, easting 100..900 km,
+// northing 0..10 000 km.
+std::optional<LatLon> fromUtmChecked(int zone, bool north, double easting, double northing);
+
 }  // namespace gcs::coords

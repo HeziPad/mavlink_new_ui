@@ -42,10 +42,11 @@ PlanStrip::PlanStrip(QWidget* parent) : QWidget(parent) {
     info_->setObjectName(QStringLiteral("planInfo"));
     wp_tool_ = new QPushButton(QStringLiteral("+ WAYPOINT"));
     land_tool_ = new QPushButton(QStringLiteral("+ LANDING"));
+    coord_ = new QPushButton(QStringLiteral("⌖ BY COORD"));
     undo_ = new QPushButton(QStringLiteral("UNDO"));
     clear_ = new QPushButton(QStringLiteral("CLEAR"));
     cancel_ = new QPushButton(QStringLiteral("CANCEL"));
-    for (auto* b : {wp_tool_, land_tool_, undo_, clear_, cancel_}) {
+    for (auto* b : {wp_tool_, land_tool_, coord_, undo_, clear_, cancel_}) {
         b->setFocusPolicy(Qt::NoFocus);
         b->setCursor(Qt::PointingHandCursor);
         b->setMinimumHeight(48);  // finger-sized
@@ -59,6 +60,7 @@ PlanStrip::PlanStrip(QWidget* parent) : QWidget(parent) {
     row->addWidget(title);
     row->addWidget(wp_tool_);
     row->addWidget(land_tool_);
+    row->addWidget(coord_);
     row->addSpacing(8);
     row->addWidget(info_, 1);
     row->addSpacing(8);
@@ -119,6 +121,7 @@ PlanStrip::PlanStrip(QWidget* parent) : QWidget(parent) {
 
     connect(wp_tool_, &QPushButton::clicked, this, [this] { emit landingToolToggled(false); });
     connect(land_tool_, &QPushButton::clicked, this, [this] { emit landingToolToggled(true); });
+    connect(coord_, &QPushButton::clicked, this, [this] { emit addByCoordRequested(land_tool_->isChecked()); });
     connect(undo_, &QPushButton::clicked, this, &PlanStrip::undoRequested);
     connect(clear_, &QPushButton::clicked, this, &PlanStrip::clearRequested);
     connect(cancel_, &QPushButton::clicked, this, &PlanStrip::cancelRequested);

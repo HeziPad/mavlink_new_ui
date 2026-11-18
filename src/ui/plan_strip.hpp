@@ -27,6 +27,7 @@ signals:
     void landingToolToggled(bool on);
     void patternChanged(gcs::Pattern pattern);
     void undoRequested();
+    void addByCoordRequested(bool landing);  // type a position for a new waypoint (or L)
     void clearRequested();
     void cancelRequested();
 
@@ -38,6 +39,7 @@ private:
     QLabel* warn_;
     QPushButton* wp_tool_;
     QPushButton* land_tool_;
+    QPushButton* coord_;
     QPushButton* undo_;
     QPushButton* clear_;
     QPushButton* cancel_;

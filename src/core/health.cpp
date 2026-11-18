@@ -570,10 +570,24 @@ std::optional<Advisory> AdvisoryBook::onStatusText(const std::string& text, int 
 
 void AdvisoryBook::update(const VehicleState& s, Clock::time_point now) {
     const bool armed = s.armed;
+    // PreArm lines repeat only every 30 s, so don't wait for them to age out
+    // once the vehicle itself says the problem is gone:
+    //  - the safety switch is off (motor outputs enabled)
+    //  - its pre-arm checks pass (SYS_STATUS pre-arm bit healthy)
+    constexpr double kPrearmSettle = 3.0;  // s
+    const bool safety_off = safetyState(s) == SafetyState::Live;
+    const bool prearm_ok = s.has_sys_status && (s.sensors_present & kPrearmBit) && (s.sensors_health & kPrearmBit);
     entries_.erase(std::remove_if(entries_.begin(), entries_.end(),
                                   [&](const Entry& e) {
                                       if (e.prearm && armed && !was_armed_) {
                                           return true;  // it armed: pre-arm reasons are moot
+                                      }
+                                      if (e.prearm && prearm_ok &&
+                                          std::chrono::duration<double>(now - e.last).count() > kPrearmSettle) {
+                                          return true;  // (a line can arrive just before the bit turns)
+                                      }
+                                      if (safety_off && e.adv.id == "prearm.txt.safety") {
+                                          return true;
                                       }
                                       return std::chrono::duration<double>(now - e.last).count() > kStickyLife;
                                   }),

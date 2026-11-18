@@ -929,6 +929,15 @@ void MavlinkClient::requestParams(Clock::time_point now) {
     if (state_.airspeed_cruise < 0) {
         request("AIRSPEED_CRUISE");
     }
+    if (state_.airspeed_min < 0) {
+        request("AIRSPEED_MIN");
+    }
+    if (state_.airspeed_max < 0) {
+        request("AIRSPEED_MAX");
+    }
+    if (state_.q_assist_speed < 0) {
+        request("Q_ASSIST_SPEED");
+    }
     if (state_.trans_decel < 0) {
         request("Q_TRANS_DECEL");
     }
@@ -984,6 +993,18 @@ void MavlinkClient::handleParamValue(const mavlink_message_t& msg) {
     }
     if (name == "AIRSPEED_CRUISE") {
         state_.airspeed_cruise = p.param_value;
+        return;
+    }
+    if (name == "AIRSPEED_MIN") {
+        state_.airspeed_min = p.param_value;
+        return;
+    }
+    if (name == "AIRSPEED_MAX") {
+        state_.airspeed_max = p.param_value;
+        return;
+    }
+    if (name == "Q_ASSIST_SPEED") {
+        state_.q_assist_speed = p.param_value;
         return;
     }
     if (name == "Q_TRANS_DECEL") {
@@ -1062,7 +1083,8 @@ void MavlinkClient::periodic(Clock::time_point now) {
 
     const bool params_missing = state_.q_guided_mode < 0 || state_.servo_functions_known < 16 ||
                                 state_.airspeed_cruise < 0 || state_.trans_decel < 0 ||
-                                state_.loiter_radius < 0 || state_.batt_capacity_mah < 0;
+                                state_.loiter_radius < 0 || state_.batt_capacity_mah < 0 ||
+                                state_.airspeed_min < 0 || state_.airspeed_max < 0 || state_.q_assist_speed < 0;
 
     if (rate_t0_ == Clock::time_point{}) {
         rate_t0_ = now;

@@ -1,6 +1,9 @@
 #pragma once
 
+#include "core/altitude.hpp"
+#include "core/coords.hpp"
 #include "core/endurance.hpp"
+#include "core/speed_mode.hpp"
 #include "core/flight_status.hpp"
 #include "core/health.hpp"
 #include "core/orbit_trim.hpp"
@@ -37,6 +40,8 @@ class PlanStrip;
 class PreflightRunner;
 class PreflightScreen;
 class SettingsScreen;
+class EntryPad;
+class SpeedPanel;
 class TelemetryBar;
 class TileCache;
 class VideoReceiver;
@@ -61,6 +66,7 @@ struct AppSettings {
     int speed_unit = 0;          // units::Speed
     int coord_format = 0;        // coords::Fmt
     int alt_ref = 0;             // altitude chip: 0 ASL, 1 AGL, 2 AFL (above the landing point)
+    int speed_mode = 0;          // speed::Mode: ECO / NORMAL / FAST
     int hud_reference = 0;       // CameraView::HudRef
     bool wind_north_up = false;  // camera HUD wind gauge
     bool ball_collapsed = false; // map attitude ball
@@ -106,6 +112,40 @@ private:
     void applyAltUnit(int unit);
     void applySpeedUnit(int unit);
     void updateHeights(qint64 now_ms);
+    // typed input
+    altitude::Grounds groundsAt(double lat, double lon) const;
+    double lapSeconds(double radius) const;  // one hold turn at the expected loiter speed
+    void syncHoldTurns(UserWaypoint& p) const;  // an own-radius hold's turns from its time
+    void openCoordPad(const QString& title, std::optional<coords::LatLon> initial,
+                      std::function<void(double, double)> done);
+    void openAltPad(const QString& title, double lat, double lon, double rel, double min_agl,
+                    std::function<void(double)> done);
+    EntryPad* pad_ = nullptr;
+    // airspeed by situation (speed mode)
+    void updateSpeedTarget(qint64 now_ms);
+    void refreshSpeedPanel();
+    SpeedPanel* speed_panel_ = nullptr;
+    qint64 speed_eval_ms_ = -1000000;
+    qint64 speed_want_ms_ = 0;
+    std::optional<speed::Target> speed_want_;
+    std::optional<speed::Target> speed_sent_;
+    uint32_t speed_mode_seen_ = 0xffffffff;
+    QString speed_label_;
+    int wp_hold_seq_ = -1;          // the waypoint hold being flown
+    qint64 wp_hold_since_ms_ = -1;  // when its circle was reached
+    bool wp_hold_cut_ = false;      // its end (SET_MISSION_CURRENT) was sent
+    void updateWaypointHold(FlightStatus& fs);
+    // Hold times as uploaded: LOITER_TURNS keeps only turns on board, so the
+    // time the operator set is remembered here (and in QSettings).
+    struct SyncedHold {
+        double lat = 0.0, lon = 0.0;
+        float radius = 0.0f;
+        float hold_s = 0.0f;
+    };
+    std::vector<SyncedHold> synced_holds_;
+    void rememberHolds(const MissionPlan& plan);
+    std::optional<float> syncedHold(double lat, double lon, float radius) const;
+    void fillHoldTimes(MissionPlan& plan) const;  // times for holds that came back as turns
     qint64 heights_ms_ = -1000000;
     qint64 nav_ms_ = -1000000;
     void updateLosTarget(const CameraLos& los);

@@ -179,6 +179,9 @@ QString MapView::pipTag() const {
 void MapView::setState(const VehicleState& s) {
     s_ = s;
     vehicle_plan_ = s.mission_known ? extractPlan(s.mission) : MissionPlan{};
+    if (plan_fixup_) {
+        plan_fixup_(vehicle_plan_);
+    }
     approach_ = s.mission_known ? extractApproach(s.mission) : std::nullopt;
     if (!s.has_attitude && s.has_vfr_hud) {
         heading_.set(s.heading_deg);  // otherwise set per frame from the prediction
@@ -297,6 +300,60 @@ void MapView::select(int id) {
         emit selectionChanged(id);
         update();
     }
+}
+
+void MapView::addPoint(double lat, double lon, bool landing) {
+    editPlan();
+    if (landing) {
+        const float approach = plan_.land ? plan_.land->alt_rel : default_land_alt_;
+        plan_.land = UserWaypoint{lat, lon, approach};
+        ping(lat, lon, kGreen);
+        setAddTool(AddTool::Waypoint);
+        emit planChanged();
+        select(kLandId);
+    } else {
+        const float alt = plan_.wps.empty() ? default_alt_ : plan_.wps.back().alt_rel;
+        plan_.wps.push_back({lat, lon, alt});
+        ping(lat, lon, kAmber);
+        emit planChanged();
+    }
+    update();
+}
+
+UserWaypoint* MapView::pointPtr(int id) {
+    if (id == kLandId && plan_.land) {
+        return &*plan_.land;
+    }
+    if (id >= 0 && id < static_cast<int>(plan_.wps.size())) {
+        return &plan_.wps[id];
+    }
+    return nullptr;
+}
+
+std::optional<UserWaypoint> MapView::point(int id) const {
+    if (id == kLandId && plan_.land) {
+        return *plan_.land;
+    }
+    if (id >= 0 && id < static_cast<int>(plan_.wps.size())) {
+        return plan_.wps[id];
+    }
+    return std::nullopt;
+}
+
+void MapView::editPoint(int id, const std::function<void(UserWaypoint&)>& fn, int coalesce_key) {
+    UserWaypoint* wp = pointPtr(id);
+    if (!wp) {
+        return;
+    }
+    // a run of presses on one control of one point undoes in one step
+    const int key = coalesce_key == kNone ? kNone : id * 16 + coalesce_key + 1000;
+    if (key == kNone || alt_edit_wp_ != key) {
+        pushUndo();
+        alt_edit_wp_ = key;
+    }
+    fn(*wp);
+    emit planChanged();
+    update();
 }
 
 void MapView::adjustAltitude(int id, float delta) {
@@ -684,7 +741,9 @@ void MapView::paintNavBox(QPainter& p, double right, double bottom) {
     if (nav_.target.valid) {
         // distance only: the ETA is on the telemetry bar's ETA chip
         lines.push_back({QStringLiteral("→ %1  %2")
-                             .arg(QString::fromStdString(nav_.target.name), units::distanceText(nav_.target.dist_m)),
+                             .arg(QString::fromStdString(nav_.target.name),
+                                  nav_.target.arrived ? QStringLiteral("holding")
+                                                      : units::distanceText(nav_.target.dist_m)),
                          kCyan, true});
     }
     const bool hover = hover_pos_ && !touch_input_ && !pressing_ && rect().contains(hover_pos_->toPoint());
@@ -920,21 +979,11 @@ void MapView::pointerRelease(const QPointF& pos) {
             if (drag_wp_ != kNone) {
                 select(drag_wp_ == sel_ ? kNone : drag_wp_);  // tap a point: select / deselect
             } else if (tool_ == AddTool::Landing) {
-                editPlan();
-                const float approach = plan_.land ? plan_.land->alt_rel : default_land_alt_;
-                plan_.land = UserWaypoint{lat, lon, approach};
-                ping(lat, lon, kGreen);
-                setAddTool(AddTool::Waypoint);
-                emit planChanged();
-                select(kLandId);
+                addPoint(lat, lon, true);
             } else if (sel_ != kNone) {
                 select(kNone);  // tap empty map: first deselect, next tap adds
             } else {
-                editPlan();
-                const float alt = plan_.wps.empty() ? default_alt_ : plan_.wps.back().alt_rel;
-                plan_.wps.push_back({lat, lon, alt});
-                ping(lat, lon, kAmber);
-                emit planChanged();
+                addPoint(lat, lon, false);
             }
         } else if (mode_ == Mode::Guide) {
             emit guideClicked(lat, lon);
@@ -1254,6 +1303,35 @@ void MapView::paintRoute(QPainter& p, const MissionPlan& plan, const QColor& c, 
     }
     // the final hold: one point, or the end of a one-way route, is circled
     const bool ends_in_hold = pts.size() == 1 || (pts.size() > 1 && plan.pattern == Pattern::OneWay);
+    // hold circles at their real size, dashes marching in their direction:
+    // the final hold, and any waypoint with a timed hold
+    auto holdRing = [&](const UserWaypoint& wp, float radius, bool ccw) {
+        const QPointF sp = toScreen(wp.lat, wp.lon);
+        const double r_m = radius > 0.0f ? radius : default_loiter_radius_;
+        const double rpx = std::max(18.0, r_m / metersPerPixel());
+        if (!circleVisible(sp, rpx, QRectF(rect()).adjusted(-40, -40, 40, 40))) {
+            return;
+        }
+        QPen ring(alpha(c, 0.75), 1.6, Qt::CustomDashLine);
+        ring.setDashPattern({6, 5});
+        const double phase = reducedMotion() ? 0.0 : std::fmod(time_ * 10.0, 11.0);
+        ring.setDashOffset(ccw ? phase : -phase);
+        p.setPen(ring);
+        p.setBrush(Qt::NoBrush);
+        p.drawEllipse(sp, rpx, rpx);
+        const QPointF top = sp + QPointF(0, -rpx);
+        const double dx = ccw ? -7.0 : 7.0;
+        p.setPen(QPen(alpha(c, 0.9), 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        p.drawPolyline(QPolygonF{top + QPointF(-dx, -6), top + QPointF(dx * 0.3, 0), top + QPointF(-dx, 6)});
+    };
+    if (!compact_) {
+        for (size_t i = 0; i < pts.size(); ++i) {
+            const bool final_hold = ends_in_hold && i + 1 == pts.size();
+            if (!final_hold && pts[i].holds()) {
+                holdRing(pts[i], pts[i].loiter_radius, pts[i].loiter_ccw);  // 0: WP_LOITER_RAD
+            }
+        }
+    }
     if (ends_in_hold && !compact_) {
         // the hold circle at its real size, dashes marching in its direction
         const QPointF sp = toScreen(pts.back().lat, pts.back().lon);
@@ -1328,6 +1406,11 @@ void MapView::paintRoute(QPainter& p, const MissionPlan& plan, const QColor& c, 
 
     for (size_t i = 0; i < pts.size(); ++i) {
         QString caption = units::altText(pts[i].alt_rel);
+        if (pts[i].holds() && !(plan.pattern == Pattern::OneWay && i + 1 == pts.size()) && pts.size() > 1) {
+            // always a time (an own radius is uploaded as whole turns of about that long)
+            const int t = static_cast<int>(std::lround(pts[i].hold_s));
+            caption += QStringLiteral(" · HOLD %1:%2").arg(t / 60).arg(t % 60, 2, 10, QLatin1Char('0'));
+        }
         if (pts.size() > 1 && i + 1 == pts.size()) {
             if (plan.pattern == Pattern::OneWay) {
                 caption += QStringLiteral(" · HOLD");

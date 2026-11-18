@@ -40,7 +40,12 @@ struct NavTarget {
     double lon = 0.0;
     double dist_m = 0.0;   // to the point, or to the edge of a circle around it
     double eta_s = -1.0;   // < 0: unknown (too slow to say)
+    bool arrived = false;  // circling it (a hold / orbit): eta 0
 };
+
+// On a hold circle of radius r: close enough to its centre to count as there
+// (ArduPlane flies circles a little wider than asked, and L1 overshoots).
+bool onCircle(double dist_to_centre, double radius_m);
 
 constexpr double kMinEtaSpeed = 3.0;  // m/s ground speed below which no ETA is given
 

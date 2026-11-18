@@ -37,6 +37,7 @@ add_library(gcs_core STATIC
     src/core/geo.cpp
     src/core/gzip.cpp
     src/core/health.cpp
+    src/core/altitude.cpp
     src/core/coords.cpp
     src/core/endurance.cpp
     src/core/flight_status.cpp
@@ -46,6 +47,7 @@ add_library(gcs_core STATIC
     src/core/plane_modes.cpp
     src/core/pmtiles.cpp
     src/core/preflight.cpp
+    src/core/speed_mode.cpp
     src/core/tiles.cpp
     src/core/vehicle_state.cpp
     ${GCS_LINK_SOURCES}
@@ -69,6 +71,7 @@ add_executable(mavlink_gcs_ui
     src/ui/camera_view.cpp
     src/ui/control_dock.cpp
     src/ui/elevation_cache.cpp
+    src/ui/entry_pad.cpp
     src/ui/fx_overlay.cpp
     src/ui/main_window.cpp
     src/ui/orbit_panel.cpp
@@ -83,6 +86,7 @@ add_executable(mavlink_gcs_ui
     src/ui/telemetry_bar.cpp
     src/ui/theme.cpp
     src/ui/settings_screen.cpp
+    src/ui/speed_panel.cpp
     src/ui/tile_cache.cpp
     src/ui/vector_map.cpp
     src/ui/video_receiver.cpp
@@ -103,7 +107,7 @@ endif()
 
 # ---- tests ----------------------------------------------------------------------
 enable_testing()
-foreach(name geo coords endurance flight_status mission_builder mission_transfer command_sender lift_rotors health orbit_trim preflight offline_map)
+foreach(name geo altitude coords endurance flight_status mission_builder mission_transfer command_sender lift_rotors health orbit_trim preflight offline_map)
     add_executable(test_${name} tests/test_${name}.cpp)
     target_link_libraries(test_${name} PRIVATE gcs_core)
     gcs_warnings(test_${name})

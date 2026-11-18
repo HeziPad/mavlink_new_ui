@@ -398,6 +398,68 @@ static void testPatterns() {
         p.wps.resize(1);
         CHECK(holdIndex(p) == 0);
     }
+    // a timed hold at a waypoint: LOITER_TIME with the time and the direction
+    {
+        MissionPlan p;
+        p.pattern = Pattern::BackForth;
+        p.wps = {{47.0, 8.0, 80.0f}, {47.01, 8.0, 90.0f}, {47.02, 8.0, 100.0f}};
+        p.wps[1].hold_s = 30.0f;
+        p.wps[1].loiter_ccw = true;
+        const auto items = buildLoopMission(47.0, 8.0, 400.0, p);
+        CHECK(items[2].command == mav::kCmdNavWaypoint);
+        CHECK(items[3].command == mav::kCmdNavLoiterTime);
+        CHECK_NEAR(items[3].param1, 30.0, 1e-6);
+        CHECK_NEAR(items[3].param3, -1.0, 1e-6);
+        CHECK_NEAR(items[3].param4, 0.0, 1e-6);
+        CHECK(items[5].command == mav::kCmdNavLoiterTime);  // the way back holds there too
+        CHECK(seqToWaypointIndex(items, 5) == 1);
+        const MissionPlan back = extractPlan(items);
+        CHECK(back.pattern == Pattern::BackForth);
+        CHECK(back.wps.size() == 3);
+        CHECK_NEAR(back.wps[1].hold_s, 30.0, 1e-6);
+        CHECK(back.wps[1].loiter_ccw);
+        CHECK(back.wps[0].hold_s == 0.0f);
+        p.wps[1].loiter_ccw = false;
+        CHECK_NEAR(buildLoopMission(47.0, 8.0, 400.0, p)[3].param3, 0.0, 1e-6);
+        CHECK(!extractPlan(buildLoopMission(47.0, 8.0, 400.0, p)).wps[1].loiter_ccw);
+    }
+    // a hold with its own radius: LOITER_TURNS (turns, +-radius)
+    {
+        MissionPlan p;
+        p.wps = {{47.0, 8.0, 80.0f}, {47.01, 8.0, 90.0f}, {47.02, 8.0, 100.0f}};
+        p.wps[1].loiter_radius = 150.0f;
+        p.wps[1].hold_turns = 2;
+        p.wps[1].loiter_ccw = true;
+        p.wps[2].loiter_radius = 404.0f;  // above 255 m: 10 m steps
+        p.wps[2].hold_turns = 300;        // clamped to 255
+        auto items = buildLoopMission(47.0, 8.0, 400.0, p);
+        CHECK(items[3].command == mav::kCmdNavLoiterTurns);
+        CHECK_NEAR(items[3].param1, 2.0, 1e-6);
+        CHECK_NEAR(items[3].param3, -150.0, 1e-6);
+        CHECK(items[4].command == mav::kCmdNavLoiterTurns);
+        CHECK_NEAR(items[4].param3, 400.0, 1e-6);
+        CHECK_NEAR(items[4].param1, 255.0, 1e-6);
+        const MissionPlan back = extractPlan(items);
+        CHECK(back.wps[1].hold_turns == 2 && back.wps[1].loiter_radius == 150.0f && back.wps[1].loiter_ccw);
+        CHECK(back.wps[1].holds());
+        CHECK(back.wps[2].loiter_radius == 400.0f && !back.wps[2].loiter_ccw);
+        // a radius but no time and no turns: flies through
+        p.wps[1].hold_turns = 0;
+        items = buildLoopMission(47.0, 8.0, 400.0, p);
+        CHECK(items[3].command == mav::kCmdNavWaypoint);
+        // the time is what the operator sets: turns derived from it
+        p.wps[1].hold_s = 90.0f;
+        p.wps[1].hold_turns = holdTurns(90.0, 41.0);
+        CHECK(p.wps[1].hold_turns == 4);       // covers 90 s (3 x 41) plus a spare
+        items = buildLoopMission(47.0, 8.0, 400.0, p);
+        CHECK(items[3].command == mav::kCmdNavLoiterTurns && items[3].param1 == 4.0f);
+        CHECK(holdTurns(0.0, 40.0) == 0);
+        CHECK(holdTurns(10.0, 40.0) == 2);
+        CHECK(holdTurns(80.0, 40.0) == 3);
+        CHECK(holdTurns(1e6, 10.0) == kMaxTurns);
+        CHECK(storedTurnsRadius(256.0f) == 260.0f);
+        CHECK(storedTurnsRadius(9000.0f) == 2550.0f);
+    }
     // loop round trip keeps Loop
     CHECK(extractPlan(patternMission(Pattern::Loop, 4, true)).pattern == Pattern::Loop);
 

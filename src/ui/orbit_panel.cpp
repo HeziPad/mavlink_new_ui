@@ -4,6 +4,7 @@
 #include "units.hpp"
 
 #include <QFontMetrics>
+#include <QEvent>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLayout>
@@ -139,6 +140,12 @@ OrbitPanel::OrbitPanel(QWidget* parent) : QWidget(parent) {
     dir_->setMinimumWidth(76);
     connect(dir_, &QPushButton::clicked, this, &OrbitPanel::directionToggled);
     outer->addWidget(dir_);
+    coord_ = makeButton(QStringLiteral("⌖ COORD"));
+    connect(coord_, &QPushButton::clicked, this, &OrbitPanel::coordRequested);
+    outer->addWidget(coord_);
+    coord_->hide();
+    alt_->setCursor(Qt::PointingHandCursor);
+    alt_->installEventFilter(this);  // tap the altitude: type it
 
     setStyleSheet(QStringLiteral(R"(
         QLabel { background: transparent; color: #e6f1f8; }
@@ -160,6 +167,21 @@ OrbitPanel::OrbitPanel(QWidget* parent) : QWidget(parent) {
         w->ensurePolished();
     }
     setValues(QStringLiteral("HOLD"), 80.0f, 80.0f, false, -1.0);
+}
+
+void OrbitPanel::setCoordButton(bool on) {
+    if (coord_->isVisible() != on) {
+        coord_->setVisible(on);
+        adjustSize();
+    }
+}
+
+bool OrbitPanel::eventFilter(QObject* obj, QEvent* e) {
+    if (obj == alt_ && e->type() == QEvent::MouseButtonRelease) {
+        emit altitudeTapped();
+        return true;
+    }
+    return QWidget::eventFilter(obj, e);
 }
 
 void OrbitPanel::setValues(const QString& title, float alt, float radius, bool ccw, double current_alt, double flown,

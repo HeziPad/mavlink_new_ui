@@ -117,6 +117,10 @@ FlightStatus flightStatus(const VehicleState& s, const FlightContext& ctx, Clock
     return f;
 }
 
+bool onCircle(double dist_to_centre, double radius_m) {
+    return dist_to_centre < radius_m * 1.3 + 30.0;
+}
+
 double etaSeconds(double dist_m, double groundspeed) {
     return groundspeed >= kMinEtaSpeed ? dist_m / groundspeed : -1.0;
 }
@@ -130,7 +134,14 @@ NavTarget pointTarget(const VehicleState& s, const std::string& name, double lat
     t.name = name;
     t.lat = lat;
     t.lon = lon;
-    t.dist_m = std::max(0.0, geo::distance(s.lat, s.lon, lat, lon) - std::max(0.0, radius_m));
+    const double d = geo::distance(s.lat, s.lon, lat, lon);
+    if (radius_m > 0.0 && onCircle(d, radius_m)) {
+        t.arrived = true;
+        t.dist_m = 0.0;
+        t.eta_s = 0.0;
+        return t;
+    }
+    t.dist_m = std::max(0.0, d - std::max(0.0, radius_m));
     t.eta_s = etaSeconds(t.dist_m, std::hypot(s.vn, s.ve));
     return t;
 }
@@ -158,6 +169,13 @@ NavTarget missionTarget(const VehicleState& s) {
         radius = std::abs(it.param3) > 1.0f ? std::abs(it.param3) : (s.loiter_radius > 1.0 ? s.loiter_radius : 0.0);
     } else if (const int wp = seqToWaypointIndex(s.mission, seq); wp >= 0) {
         name = "WP" + std::to_string(wp + 1);
+        // a waypoint hold: arrived once on its circle
+        const double rad_default = s.loiter_radius > 1.0 ? s.loiter_radius : 60.0;  // ArduPlane default
+        if (it.command == mav::kCmdNavLoiterTime) {
+            radius = rad_default;  // LOITER_TIME always flies WP_LOITER_RAD
+        } else if (it.command == mav::kCmdNavLoiterTurns || it.command == mav::kCmdNavLoiterUnlim) {
+            radius = std::abs(it.param3) > 1.0f ? std::abs(it.param3) : rad_default;
+        }
     } else {
         name = "ITEM " + std::to_string(seq);
     }

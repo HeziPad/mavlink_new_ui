@@ -48,6 +48,17 @@ struct UserWaypoint {
     double lat = 0.0;
     double lon = 0.0;
     float alt_rel = 80.0f;
+    // optional hold before going on, always set as a time (hold_s). With the
+    // default radius it is LOITER_TIME (ArduPlane flies that at WP_LOITER_RAD
+    // and keeps no radius for it); with a radius of its own it is uploaded as
+    // LOITER_TURNS (which does keep a radius), hold_turns = holdTurns(hold_s,
+    // lap), kept up to date by the UI. Either way the GCS ends the hold when
+    // the time is up.
+    float hold_s = 0.0f;          // 0 = fly through
+    float loiter_radius = 0.0f;   // 0 = WP_LOITER_RAD
+    int hold_turns = 0;           // derived, own radius only
+    bool loiter_ccw = false;
+    bool holds() const { return hold_s > 0.0f || (loiter_radius > 0.0f && hold_turns > 0); }
 };
 
 // How the waypoints are flown.
@@ -126,6 +137,13 @@ LandingApproach computeLandingApproach(const UserWaypoint& land, const ApproachI
 //     OneWay     WAYPOINT w1..wn-1, LOITER_UNLIM at wn (no jump)
 //     n == 1     LOITER_UNLIM at the point, whatever the pattern
 //     (a LOITER_UNLIM carries the hold: param3 = +-hold_radius, - = CCW)
+//   a route point that holds is a LOITER_TIME or LOITER_TURNS instead of a WAYPOINT:
+//     LOITER_TIME (default radius): param1 = seconds, param3 = -1 for CCW
+//       (ArduPlane ignores its radius and flies WP_LOITER_RAD)
+//     LOITER_TURNS (own radius): param1 = turns (1..255), param3 = +-radius
+//       (<= 255 m exact, above in 10 m steps up to 2550 m)
+//     param4 = 0 (leave on the line). After the time / turns it still circles
+//     until it heads for the next item.
 //   then, when plan.land is set:
 //   +0         DO_LAND_START at plan.land: with RTL_AUTOLAND = 2 every RTL
 //              (failsafes included) jumps here and flies the same landing as
@@ -164,6 +182,16 @@ int landSeq(const std::vector<MissionItem>& items);
 // item is not a route point (home, takeoff, jump, approach, land). The way
 // back of a back-and-forth maps to the point it revisits.
 int seqToWaypointIndex(const std::vector<MissionItem>& items, int seq);
+
+constexpr float kMaxTurnsRadius = 2550.0f;  // AP_Mission's LOITER_TURNS radius storage limit
+constexpr int kMaxTurns = 255;
+// The radius ArduPlane will store for LOITER_TURNS (10 m steps above 255 m)
+float storedTurnsRadius(float radius);
+// The on-board turns for a hold of `hold_s` with `lap_s` per turn: enough to
+// cover it plus one (0 = no hold, else 2..kMaxTurns). The GCS cuts the hold
+// when its time is up (SET_MISSION_CURRENT); the turns are the backstop that
+// still moves the aircraft on if the link is lost.
+int holdTurns(double hold_s, double lap_s);
 
 // The plan has a final hold (one-way end or a single point): its index in wps, else -1.
 int holdIndex(const MissionPlan& plan);

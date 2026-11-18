@@ -160,6 +160,26 @@ std::vector<MissionItem> buildLoopMission(double home_lat, double home_lon, doub
         it.param3 = plan.hold_ccw ? -(r > 0.0f ? r : 1.0f) : r;  // -1: CCW at the default radius
         return it;
     };
+    // a route point: fly through, or circle it for hold_s
+    auto point = [&](const UserWaypoint& wp) {
+        if (!wp.holds()) {
+            return located(mav::kCmdNavWaypoint, wp.lat, wp.lon, wp.alt_rel);
+        }
+        if (wp.loiter_radius > 0.0f) {
+            // own radius: counted in turns (LOITER_TURNS keeps the radius)
+            MissionItem it = located(mav::kCmdNavLoiterTurns, wp.lat, wp.lon, wp.alt_rel);
+            it.param1 = static_cast<float>(std::clamp(wp.hold_turns, 1, kMaxTurns));  // the UI derives turns from hold_s
+            const float r = storedTurnsRadius(wp.loiter_radius);
+            it.param3 = wp.loiter_ccw ? -r : r;
+            it.param4 = 0.0f;
+            return it;
+        }
+        MissionItem it = located(mav::kCmdNavLoiterTime, wp.lat, wp.lon, wp.alt_rel);
+        it.param1 = wp.hold_s;
+        it.param3 = wp.loiter_ccw ? -1.0f : 0.0f;  // direction only: the radius is WP_LOITER_RAD
+        it.param4 = 0.0f;  // leave on the line to the next item
+        return it;
+    };
     if (wps.size() == 1) {
         // a one-point "loop" would re-reach the same waypoint every cycle;
         // circle it on the wing instead
@@ -168,18 +188,19 @@ std::vector<MissionItem> buildLoopMission(double home_lat, double home_lon, doub
         // fly the route once, then circle the last point on the wing (the
         // lift rotors are for takeoff and landing only)
         for (size_t i = 0; i + 1 < wps.size(); ++i) {
-            items.push_back(located(mav::kCmdNavWaypoint, wps[i].lat, wps[i].lon, wps[i].alt_rel));
+            items.push_back(point(wps[i]));
         }
         items.push_back(hold(wps.back()));
     } else {
         for (const auto& wp : wps) {
-            items.push_back(located(mav::kCmdNavWaypoint, wp.lat, wp.lon, wp.alt_rel));
+            items.push_back(point(wp));
         }
         if (plan.pattern == Pattern::BackForth && wps.size() >= 3) {
             // the way back, without repeating the end points: the jump to w1
-            // closes it (with 2 points this is the same flight as Loop)
+            // closes it (with 2 points this is the same flight as Loop); a
+            // hold is flown on every visit
             for (size_t i = wps.size() - 1; i-- > 1;) {
-                items.push_back(located(mav::kCmdNavWaypoint, wps[i].lat, wps[i].lon, wps[i].alt_rel));
+                items.push_back(point(wps[i]));
             }
         }
         MissionItem jump;
@@ -222,7 +243,19 @@ MissionPlan extractPlan(const std::vector<MissionItem>& items) {
         }
         if (isLoopPoint(it)) {
             if (plan.wps.size() < shape.points) {  // the way back of a back-and-forth repeats them
-                plan.wps.push_back({it.lat(), it.lon(), it.z});
+                UserWaypoint wp{it.lat(), it.lon(), it.z};
+                if (it.command == mav::kCmdNavLoiterTime) {
+                    wp.hold_s = std::max(0.0f, it.param1);
+                    wp.loiter_ccw = it.param3 < 0.0f;
+                } else if (it.command == mav::kCmdNavLoiterTurns) {
+                    wp.hold_turns = std::clamp(static_cast<int>(std::lround(it.param1)), 1, kMaxTurns);
+                    wp.loiter_radius = std::abs(it.param3) > 1.0f ? std::abs(it.param3) : 0.0f;
+                    wp.loiter_ccw = it.param3 < 0.0f;
+                    if (wp.loiter_radius <= 0.0f) {
+                        wp.hold_turns = 0;  // turns at the default radius: not ours; fly through
+                    }
+                }
+                plan.wps.push_back(wp);
             }
             if (it.command == mav::kCmdNavLoiterUnlim) {
                 plan.hold_ccw = it.param3 < 0.0f;
@@ -348,6 +381,19 @@ double lapLength(const std::vector<UserWaypoint>& wps) {
         total += geo::distance(a.lat, a.lon, b.lat, b.lon);
     }
     return total;
+}
+
+int holdTurns(double hold_s, double lap_s) {
+    if (hold_s <= 0.0) {
+        return 0;
+    }
+    // one spare: the GCS cuts the hold on time, this only ends it without the GCS
+    return std::clamp(static_cast<int>(std::ceil(hold_s / std::max(1.0, lap_s))) + 1, 1, kMaxTurns);
+}
+
+float storedTurnsRadius(float radius) {
+    const float r = std::clamp(radius, 1.0f, kMaxTurnsRadius);
+    return r <= 255.0f ? std::round(r) : std::round(r / 10.0f) * 10.0f;
 }
 
 int holdIndex(const MissionPlan& plan) {

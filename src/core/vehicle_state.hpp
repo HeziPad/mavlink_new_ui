@@ -164,6 +164,9 @@ struct VehicleState {
     // ---- parameters (read once after connect) -----------------------------------
     int q_guided_mode = -1;                 // Q_GUIDED_MODE, -1 unknown
     double airspeed_cruise = -1.0;          // AIRSPEED_CRUISE (m/s), -1 unknown
+    double airspeed_min = -1.0;             // AIRSPEED_MIN (m/s): the GCS's LOITER speed
+    double airspeed_max = -1.0;             // AIRSPEED_MAX (m/s)
+    double q_assist_speed = -1.0;           // Q_ASSIST_SPEED (m/s): below it the lift rotors help
     double trans_decel = -1.0;              // Q_TRANS_DECEL (m/s^2)
     double loiter_radius = -1.0;            // WP_LOITER_RAD (m)
     double batt_capacity_mah = -1.0;        // BATT_CAPACITY (mAh), -1 unknown
