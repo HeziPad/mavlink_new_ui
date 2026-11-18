@@ -157,6 +157,7 @@ void testStatusText() {
 void testBook() {
     AdvisoryBook book;
     VehicleState s = healthy();
+    s.sensors_health &= ~0x10000000u;  // pre-arm failing: the cards age out on their own
     CHECK(book.onStatusText("PreArm: Compass not calibrated", 2, T0).has_value());
     CHECK(!book.onStatusText("PreArm: Compass not calibrated", 2, T0 + std::chrono::seconds(30)).has_value());
     book.update(s, T0 + std::chrono::seconds(40));
@@ -174,6 +175,33 @@ void testBook() {
 
     const auto merged = mergeAdvisories(assess(healthy(), T0, true), cur);
     CHECK(merged.size() == 1);
+}
+
+void testPrearmClearsWithTheVehicle() {
+    // the safety switch card goes as soon as the outputs are live
+    VehicleState s = healthy();
+    s.sensors_health &= ~0x10000000u;
+    s.sensors_present |= kSensorMotorOutputs;  // safety on: present, not enabled
+    AdvisoryBook book;
+    CHECK(book.onStatusText("PreArm: Hardware safety switch", 2, T0).has_value());
+    CHECK(book.onStatusText("PreArm: Compass not calibrated", 2, T0).has_value());
+    book.update(s, T0 + std::chrono::seconds(1));
+    CHECK(book.current().size() == 2);
+    s.sensors_enabled |= kSensorMotorOutputs;  // safety off
+    book.update(s, T0 + std::chrono::seconds(2));
+    CHECK(book.current().size() == 1 && book.current()[0].id == "prearm.txt.compass_cal");
+
+    // every pre-arm card goes once the pre-arm bit is healthy (after a short settle)
+    s.sensors_health |= 0x10000000u;
+    book.update(s, T0 + std::chrono::seconds(2));
+    CHECK(book.current().size() == 1);  // the line is too fresh to trust the bit yet
+    book.update(s, T0 + std::chrono::seconds(4));
+    CHECK(book.current().empty());
+
+    // non-pre-arm cards stay
+    book.onStatusText("Failsafe. Long event on: type=2", 2, T0);
+    book.update(s, T0 + std::chrono::seconds(10));
+    CHECK(book.current().size() == 1);
 }
 
 void testLandedModeIsInfo() {
@@ -221,6 +249,7 @@ void testLandedModeIsInfo() {
 }  // namespace
 
 int main() {
+    testPrearmClearsWithTheVehicle();
     testLandedModeIsInfo();
     testHealthyIsQuiet();
     testLink();

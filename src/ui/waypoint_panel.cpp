@@ -7,10 +7,12 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPainter>
+#include <QEvent>
 #include <QPushButton>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <functional>
 #include <cmath>
 
 namespace gcs::ui {
@@ -54,6 +56,8 @@ WaypointPanel::WaypointPanel(QWidget* parent) : QWidget(parent) {
     title_->setObjectName(QStringLiteral("wpTitle"));
     alt_ = new QLabel;
     alt_->setObjectName(QStringLiteral("wpAlt"));
+    alt_->setCursor(Qt::PointingHandCursor);
+    alt_->installEventFilter(this);  // tap: type the altitude
     note_ = new QLabel(QStringLiteral("spiral down on the wing to this\napproach altitude, then land vertically"));
     note_->setObjectName(QStringLiteral("wpNote"));
     {
@@ -89,6 +93,9 @@ WaypointPanel::WaypointPanel(QWidget* parent) : QWidget(parent) {
     }
     outer->addWidget(steppers_);
 
+    auto* coord = makeButton(QStringLiteral("⌖ COORD"));
+    connect(coord, &QPushButton::clicked, this, &WaypointPanel::coordRequested);
+    outer->addWidget(coord);
     insert_ = makeButton(QStringLiteral("+ INSERT"));
     delete_ = makeButton(QStringLiteral("DELETE"), QStringLiteral("wpDelete"));
     auto* close = makeButton(QStringLiteral("✕"));
@@ -96,29 +103,60 @@ WaypointPanel::WaypointPanel(QWidget* parent) : QWidget(parent) {
     outer->addWidget(delete_);
     outer->addWidget(close);
 
-    // the final hold: circle radius and direction (like the Fly To panel)
+    // the hold: how long (always a time), the circle's
+    // radius and its direction (like the Fly To panel)
     hold_row_ = new QWidget;
     auto* hr = new QHBoxLayout(hold_row_);
     hr->setContentsMargins(0, 0, 0, 0);
     hr->setSpacing(6);
-    auto* hold_title = new QLabel(QStringLiteral("HOLD\nCIRCLE"));
-    hold_title->setObjectName(QStringLiteral("wpTitle"));
+    hold_title_ = new QLabel(QStringLiteral("HOLD\nCIRCLE"));
+    hold_title_->setObjectName(QStringLiteral("wpTitle"));
+    hr->addWidget(hold_title_);
+    hold_time_label_ = new QLabel;  // tap: type it
+    hold_time_label_->setObjectName(QStringLiteral("wpHoldValue"));
+    hold_time_label_->setMinimumWidth(170);
+    hold_time_label_->setCursor(Qt::PointingHandCursor);
+    hold_time_label_->installEventFilter(this);
+    hr->addWidget(hold_time_label_);
+    auto steppers = [&](QWidget*& box, const std::initializer_list<int>& steps, const QString& unit,
+                        std::function<void(int)> emitter) {
+        box = new QWidget;
+        auto* h = new QHBoxLayout(box);
+        h->setContentsMargins(0, 0, 0, 0);
+        h->setSpacing(6);
+        for (int d : steps) {
+            auto* b = makeButton(QStringLiteral("%1%2%3").arg(d > 0 ? QStringLiteral("+") : QString()).arg(d).arg(unit));
+            b->setAutoRepeat(true);
+            b->setAutoRepeatDelay(400);
+            b->setAutoRepeatInterval(120);
+            connect(b, &QPushButton::clicked, this, [emitter, d] { emitter(d); });
+            h->addWidget(b);
+        }
+        h->addSpacing(10);
+        hr->addWidget(box);
+    };
+    steppers(hold_time_, {-60, -10, 10, 60}, QStringLiteral("s"),
+             [this](int d) { emit holdTimeDelta(static_cast<float>(d)); });
+    hold_circle_ = new QWidget;
+    auto* ch = new QHBoxLayout(hold_circle_);
+    ch->setContentsMargins(0, 0, 0, 0);
+    ch->setSpacing(6);
     hold_radius_ = new QLabel;
     hold_radius_->setObjectName(QStringLiteral("wpHold"));
     hold_radius_->setMinimumWidth(170);
-    hr->addWidget(hold_title);
-    hr->addWidget(hold_radius_);
+    ch->addWidget(hold_radius_);
     for (int d : {-50, -10, 10, 50}) {
         auto* b = makeButton(QStringLiteral("%1%2").arg(d > 0 ? QStringLiteral("+") : QString()).arg(d));
         b->setAutoRepeat(true);
         b->setAutoRepeatDelay(400);
         b->setAutoRepeatInterval(90);
         connect(b, &QPushButton::clicked, this, [this, d] { emit holdRadiusDelta(static_cast<float>(d)); });
-        hr->addWidget(b);
+        ch->addWidget(b);
     }
     hold_dir_ = makeButton(QStringLiteral("⟲ COUNTER-CW"));
     connect(hold_dir_, &QPushButton::clicked, this, &WaypointPanel::holdDirectionToggled);
-    hr->addWidget(hold_dir_);
+    ch->addWidget(hold_dir_);
+    hr->addWidget(hold_circle_);
     hr->addStretch(1);
     rows->addWidget(hold_row_);
     hold_row_->hide();
@@ -126,9 +164,12 @@ WaypointPanel::WaypointPanel(QWidget* parent) : QWidget(parent) {
     setStyleSheet(QStringLiteral(R"(
         QLabel { background: transparent; color: #e6f1f8; }
         QLabel#wpTitle { color: #ffb547; font: bold 12px "DejaVu Sans"; }
-        QLabel#wpAlt { font: bold 24px "DejaVu Sans Mono"; min-width: 110px; }
+        QLabel#wpAlt { font: bold 24px "DejaVu Sans Mono"; min-width: 110px;
+                       border-bottom: 1px dashed rgba(63, 224, 255, 0.6); }
         QLabel#wpNote { color: #7d93a6; font: 11px "DejaVu Sans"; }
         QLabel#wpHold { font: bold 16px "DejaVu Sans Mono"; }
+        QLabel#wpHoldValue { font: bold 18px "DejaVu Sans Mono";
+                             border-bottom: 1px dashed rgba(63, 224, 255, 0.6); }
         QPushButton {
             background: rgba(63, 224, 255, 0.06); color: #e6f1f8;
             border: 1px solid rgba(63, 224, 255, 0.45); padding: 0 12px;
@@ -177,16 +218,42 @@ void WaypointPanel::showLanding(float approach_alt) {
     relayout();
 }
 
-void WaypointPanel::setHold(bool show, float radius, bool ccw, double default_radius) {
+void WaypointPanel::setHold(const HoldView& v) {
+    const bool show = v.mode != HoldMode::None;
+    const bool timed = v.mode == HoldMode::Timed;
     if (show) {
-        hold_radius_->setText(radius > 0.0f ? QStringLiteral("r %1 m").arg(std::lround(radius))
-                                            : QStringLiteral("r %1 m (default)").arg(std::lround(default_radius)));
-        hold_dir_->setText(ccw ? QStringLiteral("⟲ COUNTER-CW") : QStringLiteral("⟳ CLOCKWISE"));
+        hold_title_->setText(v.mode == HoldMode::Final ? QStringLiteral("HOLD\nCIRCLE") : QStringLiteral("HOLD\nHERE"));
+        auto clock = [](double sec) {
+            const long t = std::lround(sec);
+            return QStringLiteral("%1:%2").arg(t / 60).arg(t % 60, 2, 10, QLatin1Char('0'));
+        };
+        hold_time_label_->setText(v.hold_s <= 0.0f ? QStringLiteral("fly through") : clock(v.hold_s));
+        const double r = v.radius > 0.0f ? v.radius : v.default_radius;
+        hold_radius_->setText(QStringLiteral("Radius: %1 m").arg(std::lround(r)));
+        hold_dir_->setText(v.ccw ? QStringLiteral("⟲ COUNTER-CW") : QStringLiteral("⟳ CLOCKWISE"));
     }
-    if (hold_row_->isVisible() != show) {
-        hold_row_->setVisible(show);
+    const bool relay = hold_row_->isVisible() != show || hold_time_label_->isVisible() != timed ||
+                       hold_time_->isVisible() != timed || !hold_circle_->isVisible();
+    hold_mode_ = v.mode;
+    hold_time_label_->setVisible(timed);
+    hold_time_->setVisible(timed);
+    hold_circle_->setVisible(true);
+    hold_row_->setVisible(show);
+    if (relay) {
         relayout();
     }
+}
+
+bool WaypointPanel::eventFilter(QObject* obj, QEvent* e) {
+    if (obj == alt_ && e->type() == QEvent::MouseButtonRelease) {
+        emit altitudeTapped();  // type it
+        return true;
+    }
+    if (obj == hold_time_label_ && e->type() == QEvent::MouseButtonRelease) {
+        emit holdValueTapped();  // type the time
+        return true;
+    }
+    return QWidget::eventFilter(obj, e);
 }
 
 void WaypointPanel::relayout() {

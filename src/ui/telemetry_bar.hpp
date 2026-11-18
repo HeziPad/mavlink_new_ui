@@ -28,6 +28,7 @@ public:
     void setSystemsOpen(bool open);
     void setFlightStatus(const FlightStatus& f);
     void setNavTarget(const NavTarget& t) { nav_ = t; }  // the ETA chip
+    void setSpeedTarget(const QString& t) { speed_target_ = t; }  // "LOITER 16 m/s", "" = default
     // the altitude chip's other references (ASL comes from the state):
     // AGL (from the rangefinder when `agl_rangefinder`, else terrain) and
     // AFL (above the landing point's ground); nullopt = unknown
@@ -43,6 +44,7 @@ public:
 signals:
     void settingsRequested();
     void altRefChanged(int ref);  // tapped: 0 ASL, 1 AGL, 2 AFL
+    void speedTapped();           // the AS · GS chip: the airspeed panel
     void systemsTapped();
     // SAFETY held for kSafetyHold: toggle it (`make_safe` = engage)
     void safetyToggleRequested(bool make_safe);
@@ -70,6 +72,8 @@ private:
     std::optional<double> agl_, afl_;
     bool agl_rangefinder_ = false;
     QRectF alt_rect_;
+    QRectF spd_rect_;
+    QString speed_target_;
     double time_ = 0.0;
 
     QRectF sys_rect_;

@@ -201,6 +201,10 @@ void TelemetryBar::mousePressEvent(QMouseEvent* e) {
         safety_hold_ = 0.0;
         return;
     }
+    if (spd_rect_.contains(e->position())) {
+        emit speedTapped();
+        return;
+    }
     if (alt_rect_.contains(e->position())) {
         alt_ref_ = (alt_ref_ + 1) % 3;
         emit altRefChanged(alt_ref_);
@@ -316,9 +320,12 @@ void TelemetryBar::paintEvent(QPaintEvent*) {
         }
         // small print: the autopilot's own mode name, for whoever needs it
         const QString mode = s_.has_heartbeat ? QString::fromStdString(s_.mode_name) : QString();
-        drawText(p, QRectF(rr.left() + 12, rr.top() + 6, rr.width() - 44, 13), Qt::AlignLeft | Qt::AlignVCenter,
-                 mode.isEmpty() ? QStringLiteral("Flight") : QStringLiteral("Flight · %1").arg(mode), labelFont(9.5),
-                 kMuted);
+        QString small = mode.isEmpty() ? QStringLiteral("Flight") : QStringLiteral("Flight · %1").arg(mode);
+        if (!speed_target_.isEmpty()) {
+            small += QStringLiteral(" · ") + speed_target_;
+        }
+        drawText(p, QRectF(rr.left() + 12, rr.top() + 6, rr.width() - 44, 13), Qt::AlignLeft | Qt::AlignVCenter, small,
+                 labelFont(9.5), kMuted);
         // the state, shrunk to fit
         const QString label = QString::fromStdString(flight_.label);
         QFont vf = monoFont(15, true);
@@ -351,7 +358,10 @@ void TelemetryBar::paintEvent(QPaintEvent*) {
         const QRectF r = next(kEta);
         const QString name = nav_.valid ? QString::fromStdString(nav_.name) : QString();
         chip(p, r, name.isEmpty() ? QStringLiteral("ETA") : QStringLiteral("ETA → %1").arg(name),
-             nav_.valid ? units::durationText(nav_.eta_s) : QStringLiteral("—"), nav_.valid ? kCyan : kMuted);
+             !nav_.valid     ? QStringLiteral("—")
+             : nav_.arrived  ? QStringLiteral("HOLDING")  // circling it: no time to go
+                             : units::durationText(nav_.eta_s),
+             nav_.valid ? (nav_.arrived ? kGreen : kCyan) : kMuted);
     }
 
     // ---- armed -------------------------------------------------------------
@@ -449,6 +459,7 @@ void TelemetryBar::paintEvent(QPaintEvent*) {
     // ---- speeds: whole numbers ----------------------------------------------------------
     {
         const QRectF r = next(kSpd);
+        spd_rect_ = p.transform().mapRect(r);
         const QString v = s_.has_vfr_hud ? QStringLiteral("%1·%2").arg(units::speedText(as_.value, 0, false),
                                                                         units::speedText(gs_.value, 0, false))
                                          : QStringLiteral("—");

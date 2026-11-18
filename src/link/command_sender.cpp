@@ -32,6 +32,16 @@ CommandRequest makeSetSafety(bool safe) {
     return r;
 }
 
+CommandRequest makeChangeSpeed(float airspeed) {
+    CommandRequest r;
+    r.command = MAV_CMD_DO_CHANGE_SPEED;
+    r.params[0] = 0.0f;  // SPEED_TYPE_AIRSPEED
+    r.params[1] = airspeed;
+    r.params[2] = -1.0f;  // throttle: no change
+    r.label = airspeed < 0.0f ? "AIRSPEED DEFAULT" : "AIRSPEED";
+    return r;
+}
+
 CommandRequest makeMotorTest(int seq, float pct, float seconds, int count) {
     CommandRequest r;
     r.command = MAV_CMD_DO_MOTOR_TEST;

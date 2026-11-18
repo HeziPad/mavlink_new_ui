@@ -10,6 +10,9 @@
 #include "map_view.hpp"
 #include "orbit_panel.hpp"
 #include "elevation_cache.hpp"
+#include "entry_pad.hpp"
+#include "speed_panel.hpp"
+#include "core/altitude.hpp"
 #include "offline_downloader.hpp"
 #include "offline_store.hpp"
 #include "plan_strip.hpp"
@@ -63,6 +66,7 @@ AppSettings AppSettings::load() {
     s.speed_unit = std::clamp(q.value(QStringLiteral("ui/speed_unit"), s.speed_unit).toInt(), 0, 1);
     s.coord_format = std::clamp(q.value(QStringLiteral("ui/coord_format"), s.coord_format).toInt(), 0, 2);
     s.alt_ref = std::clamp(q.value(QStringLiteral("ui/alt_ref"), s.alt_ref).toInt(), 0, 2);
+    s.speed_mode = std::clamp(q.value(QStringLiteral("flight/speed_mode"), s.speed_mode).toInt(), 0, 2);
     s.hud_reference = q.value(QStringLiteral("camera/hud_reference"), s.hud_reference).toInt();
     s.wind_north_up = q.value(QStringLiteral("camera/wind_north_up"), s.wind_north_up).toBool();
     s.ball_collapsed = q.value(QStringLiteral("map/ball_collapsed"), s.ball_collapsed).toBool();
@@ -98,6 +102,7 @@ void AppSettings::save() const {
     q.setValue(QStringLiteral("ui/speed_unit"), speed_unit);
     q.setValue(QStringLiteral("ui/coord_format"), coord_format);
     q.setValue(QStringLiteral("ui/alt_ref"), alt_ref);
+    q.setValue(QStringLiteral("flight/speed_mode"), speed_mode);
     q.setValue(QStringLiteral("camera/hud_reference"), hud_reference);
     q.setValue(QStringLiteral("camera/wind_north_up"), wind_north_up);
     q.setValue(QStringLiteral("map/ball_collapsed"), ball_collapsed);
@@ -134,6 +139,13 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
     offline_ = new OfflineDownloader(this);
 
     map_ = new MapView(tiles_);
+    for (const auto& line : QSettings().value(QStringLiteral("plan/hold_times")).toStringList()) {
+        const auto f = line.split(QLatin1Char(','));
+        if (f.size() == 4) {
+            synced_holds_.push_back({f[0].toDouble(), f[1].toDouble(), f[2].toFloat(), f[3].toFloat()});
+        }
+    }
+    map_->setPlanFixup([this](MissionPlan& p) { fillHoldTimes(p); });
     map_->setElevation(elev_);
     map_->setLayer(settings_.map_layer);
     map_->setFollow(settings_.follow);
@@ -172,6 +184,28 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
         fx_->toast(QStringLiteral("Launch allowed without a complete preflight (logged)"), kAmber, QStringLiteral("Preflight"));
     });
     settings_screen_ = new SettingsScreen(this);
+    speed_panel_ = new SpeedPanel(this);
+    pad_ = new EntryPad(this);  // on top of everything
+    pad_->setGroundLookup([this](double lat, double lon) {
+        return elev_ ? elev_->elevation(lat, lon) : std::optional<double>{};
+    });
+    connect(speed_panel_, &SpeedPanel::closeRequested, speed_panel_, &QWidget::hide);
+    connect(speed_panel_, &SpeedPanel::modeChanged, this, [this](int m) {
+        settings_.speed_mode = m;
+        settings_.save();
+        speed_sent_.reset();  // re-evaluate now
+        refreshSpeedPanel();
+    });
+    connect(bar_, &TelemetryBar::speedTapped, this, [this] {
+        if (speed_panel_->isVisible()) {
+            speed_panel_->hide();
+            return;
+        }
+        refreshSpeedPanel();
+        speed_panel_->move(std::max(8, width() / 2 + 120), 64);
+        speed_panel_->show();
+        speed_panel_->raise();
+    });
 
     connect(bar_, &TelemetryBar::systemsTapped, this, [this] { showAlerts(!alerts_->isVisible()); });
     connect(bar_, &TelemetryBar::safetyBlocked, this,
@@ -371,19 +405,142 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
             fx_->toast(QStringLiteral("Tap the map to place the landing point"), kGreen, QStringLiteral("Plan"));
         }
     });
-    connect(panel_, &WaypointPanel::altitudeDelta, this,
-            [this](float d) { map_->adjustAltitude(map_->selected(), d); });
+    connect(panel_, &WaypointPanel::altitudeDelta, this, [this](float d) {
+        // the steppers stop at the minimum height above the ground at the point
+        const int id = map_->selected();
+        const auto wp = map_->point(id);
+        if (!wp || !s_.has_home) {
+            map_->adjustAltitude(id, d);
+            return;
+        }
+        const double floor = altitude::minRelHome(groundsAt(wp->lat, wp->lon),
+                                                  id == MapView::kLandId ? altitude::kMinApproachAgl : altitude::kMinAgl);
+        map_->editPoint(id, [&](UserWaypoint& p) {
+            p.alt_rel = static_cast<float>(std::clamp<double>(p.alt_rel + d, std::max(floor, 0.0), altitude::kMaxRelHome));
+        }, 0);
+    });
+    connect(panel_, &WaypointPanel::coordRequested, this, [this] {
+        const int id = map_->selected();
+        const auto wp = map_->point(id);
+        if (!wp) {
+            return;
+        }
+        openCoordPad(id == MapView::kLandId ? QStringLiteral("LANDING POINT · POSITION")
+                                            : QStringLiteral("WAYPOINT %1 · POSITION").arg(id + 1),
+                     coords::LatLon{wp->lat, wp->lon}, [this, id](double lat, double lon) {
+                         map_->editPoint(id, [&](UserWaypoint& p) {
+                             p.lat = lat;
+                             p.lon = lon;
+                         });
+                         map_->ping(lat, lon, kAmber);
+                     });
+    });
+    connect(panel_, &WaypointPanel::altitudeTapped, this, [this] {
+        const int id = map_->selected();
+        const auto wp = map_->point(id);
+        if (!wp) {
+            return;
+        }
+        const bool land = id == MapView::kLandId;
+        openAltPad(land ? QStringLiteral("LANDING POINT · APPROACH ALTITUDE") : QStringLiteral("WAYPOINT %1 · ALTITUDE").arg(id + 1),
+                   wp->lat, wp->lon, wp->alt_rel, land ? altitude::kMinApproachAgl : altitude::kMinAgl,
+                   [this, id](double rel) {
+                       map_->editPoint(id, [&](UserWaypoint& p) { p.alt_rel = static_cast<float>(rel); });
+                   });
+    });
+    connect(panel_, &WaypointPanel::holdTimeDelta, this, [this](float d) {
+        map_->editPoint(map_->selected(), [&](UserWaypoint& p) {
+            p.hold_s = std::clamp(p.hold_s + d, 0.0f, 3600.0f);
+            syncHoldTurns(p);
+        }, 1);
+    });
+    connect(panel_, &WaypointPanel::holdValueTapped, this, [this] {
+        const int id = map_->selected();
+        const auto wp = map_->point(id);
+        if (!wp) {
+            return;
+        }
+        pad_->openDuration(QStringLiteral("WAYPOINT %1 · HOLD TIME").arg(id + 1), wp->hold_s, 3600.0,
+                           [this, id](double sec) {
+                               map_->editPoint(id, [&](UserWaypoint& p) {
+                                   p.hold_s = static_cast<float>(sec);
+                                   syncHoldTurns(p);
+                               });
+                           });
+    });
     connect(panel_, &WaypointPanel::insertRequested, this, [this] { map_->insertAfter(map_->selected()); });
     connect(panel_, &WaypointPanel::deleteRequested, this, [this] { map_->deletePoint(map_->selected()); });
     connect(panel_, &WaypointPanel::closeRequested, this, [this] { map_->select(MapView::kNone); });
     connect(panel_, &WaypointPanel::holdRadiusDelta, this, [this](float d) {
         const auto& plan = map_->plan();
-        const float now = plan.hold_radius > 0.0f ? plan.hold_radius : static_cast<float>(defaultRadius());
-        map_->setHold(std::clamp(now + d, kMinOrbitRadius, kMaxOrbitRadius), plan.hold_ccw);
+        const int id = map_->selected();
+        // stepping onto WP_LOITER_RAD's value means "the default" again (stored as 0)
+        const float def = static_cast<float>(defaultRadius());
+        auto stepped = [&](float now, float max) {
+            const float r = std::clamp((now > 0.0f ? now : def) + d, kMinOrbitRadius, max);
+            return std::abs(r - def) < 0.5f ? 0.0f : r;
+        };
+        if (id == holdIndex(plan)) {  // the final hold
+            map_->setHold(stepped(plan.hold_radius, kMaxOrbitRadius), plan.hold_ccw);
+            return;
+        }
+        // an own radius is uploaded as whole turns of about the hold time
+        // (LOITER_TURNS keeps a radius, LOITER_TIME doesn't)
+        map_->editPoint(id, [&](UserWaypoint& p) {
+            p.loiter_radius = stepped(p.loiter_radius, kMaxTurnsRadius);
+            syncHoldTurns(p);
+        }, 2);
     });
     connect(panel_, &WaypointPanel::holdDirectionToggled, this, [this] {
         const auto& plan = map_->plan();
-        map_->setHold(plan.hold_radius, !plan.hold_ccw);
+        const int id = map_->selected();
+        if (id == holdIndex(plan)) {
+            map_->setHold(plan.hold_radius, !plan.hold_ccw);
+            return;
+        }
+        map_->editPoint(id, [&](UserWaypoint& p) { p.loiter_ccw = !p.loiter_ccw; });
+    });
+    connect(orbit_panel_, &OrbitPanel::coordRequested, this, [this] {
+        std::optional<coords::LatLon> init;
+        if (orbit_) {
+            init = coords::LatLon{orbit_->lat, orbit_->lon};
+        }
+        openCoordPad(QStringLiteral("FLY TO · POSITION"), init, [this](double lat, double lon) { sendGuided(lat, lon); });
+    });
+    connect(orbit_panel_, &OrbitPanel::altitudeTapped, this, [this] {
+        if (orbit_) {
+            openAltPad(orbit_->hold ? QStringLiteral("HOLD · ALTITUDE") : QStringLiteral("FLY TO · ALTITUDE"), orbit_->lat,
+                       orbit_->lon, orbit_->alt, altitude::kMinAgl, [this](double rel) {
+                           if (orbit_) {
+                               orbit_->alt = static_cast<float>(rel);
+                               orbit_trim_only_ = false;
+                               orbit_dirty_ = true;
+                               refreshOrbitPanel();
+                           }
+                       });
+        } else if (onEndHold()) {
+            const MissionPlan plan = end_hold_plan_ ? *end_hold_plan_ : extractPlan(s_.mission);
+            const int h = holdIndex(plan);
+            if (h < 0) {
+                return;
+            }
+            openAltPad(QStringLiteral("END HOLD · ALTITUDE"), plan.wps[h].lat, plan.wps[h].lon, plan.wps[h].alt_rel,
+                       altitude::kMinAgl, [this](double rel) {
+                           if (!end_hold_plan_) {
+                               end_hold_plan_ = extractPlan(s_.mission);
+                           }
+                           const int hh = holdIndex(*end_hold_plan_);
+                           if (hh >= 0) {
+                               end_hold_plan_->wps[hh].alt_rel = static_cast<float>(rel);
+                               end_hold_dirty_ = true;
+                               refreshOrbitPanel();
+                           }
+                       });
+        }
+    });
+    connect(strip_, &PlanStrip::addByCoordRequested, this, [this](bool landing) {
+        openCoordPad(landing ? QStringLiteral("NEW LANDING POINT · POSITION") : QStringLiteral("NEW WAYPOINT · POSITION"),
+                     std::nullopt, [this, landing](double lat, double lon) { map_->addPoint(lat, lon, landing); });
     });
     connect(orbit_panel_, &OrbitPanel::altitudeDelta, this, [this](float d) { adjustOrbit(d, 0.0f, false); });
     connect(orbit_panel_, &OrbitPanel::radiusDelta, this, [this](float d) { adjustOrbit(0.0f, d, false); });
@@ -686,6 +843,245 @@ void MainWindow::updateHeights(qint64 now_ms) {
     map_->setNav(std::move(nav));
 }
 
+void MainWindow::updateWaypointHold(FlightStatus& fs) {
+    // A waypoint hold is a timer kept here: it starts when the aircraft is on
+    // the circle, and when it runs out the GCS moves the mission on
+    // (SET_MISSION_CURRENT). ArduPlane would otherwise finish its circle (or its
+    // spare turn). The on-board item is only the backstop without the link.
+    const int cur = s_.mission_current;
+    const bool on_item = s_.custom_mode == plane::AUTO && s_.mission_known && s_.has_position && cur >= 1 &&
+                         cur < static_cast<int>(s_.mission.size()) &&
+                         (s_.mission[cur].command == mav::kCmdNavLoiterTime ||
+                          s_.mission[cur].command == mav::kCmdNavLoiterTurns) &&
+                         seqToWaypointIndex(s_.mission, cur) >= 0;
+    if (!on_item) {
+        wp_hold_seq_ = -1;
+        return;
+    }
+    const MissionItem& it = s_.mission[cur];
+    if (wp_hold_seq_ != cur) {
+        wp_hold_seq_ = cur;
+        wp_hold_since_ms_ = -1;
+        wp_hold_cut_ = false;
+    }
+    const bool turns = it.command == mav::kCmdNavLoiterTurns;
+    const float radius = turns && std::abs(it.param3) > 1.0f ? std::abs(it.param3) : 0.0f;
+    std::optional<float> hold_s;
+    if (turns) {
+        hold_s = syncedHold(it.lat(), it.lon(), radius);  // unknown for another GCS's mission: its turns rule
+    } else {
+        hold_s = it.param1;
+    }
+    const double r = radius > 0.0f ? radius : defaultRadius();
+    if (wp_hold_since_ms_ < 0 && onCircle(geo::distance(s_.lat, s_.lon, it.lat(), it.lon()), r)) {
+        wp_hold_since_ms_ = clock_.elapsed();
+    }
+    if (wp_hold_since_ms_ < 0 || !hold_s) {
+        return;
+    }
+    const double left = *hold_s - (clock_.elapsed() - wp_hold_since_ms_) / 1000.0;
+    fs.label += " · HOLD " + units::durationText(std::max(0.0, std::ceil(left))).toStdString();
+    if (left > 0.0 || wp_hold_cut_ || uploading_ || s_.mission_transfer_active) {
+        return;
+    }
+    // time is up: on to the next point (through a DO_JUMP to its target)
+    int next = cur + 1;
+    for (int guard = 0; guard < 8 && next < static_cast<int>(s_.mission.size()); ++guard) {
+        const MissionItem& n = s_.mission[next];
+        if (n.command == mav::kCmdDoJump) {
+            next = static_cast<int>(std::lround(n.param1));
+        } else {
+            break;
+        }
+    }
+    wp_hold_cut_ = true;
+    const int land = landSeq(s_.mission);
+    if (next < 1 || next >= static_cast<int>(s_.mission.size()) || (land >= 0 && next >= land) ||
+        s_.mission[next].command >= 100) {
+        return;  // nothing to go on to (landing, or not a point): leave it to the aircraft
+    }
+    client_->runSequence("hold_done", {link::makeSetMissionCurrent(static_cast<uint16_t>(next))});
+    const int wp_from = seqToWaypointIndex(s_.mission, cur);
+    const int wp_to = seqToWaypointIndex(s_.mission, next);
+    fx_->toast(wp_to >= 0 ? QStringLiteral("WP%1 hold done → WP%2").arg(wp_from + 1).arg(wp_to + 1)
+                          : QStringLiteral("WP%1 hold done").arg(wp_from + 1),
+               kCyan, QStringLiteral("Plan"));
+}
+
+void MainWindow::rememberHolds(const MissionPlan& plan) {
+    synced_holds_.clear();
+    QStringList saved;
+    for (const auto& wp : plan.wps) {
+        if (wp.hold_s > 0.0f) {
+            synced_holds_.push_back({wp.lat, wp.lon, wp.loiter_radius, wp.hold_s});
+            saved << QStringLiteral("%1,%2,%3,%4")
+                         .arg(wp.lat, 0, 'f', 8)
+                         .arg(wp.lon, 0, 'f', 8)
+                         .arg(wp.loiter_radius)
+                         .arg(wp.hold_s);
+        }
+    }
+    QSettings().setValue(QStringLiteral("plan/hold_times"), saved);
+}
+
+std::optional<float> MainWindow::syncedHold(double lat, double lon, float radius) const {
+    for (const auto& h : synced_holds_) {
+        // AP_Mission keeps radii above 255 m in 10 m steps
+        if (geo::distance(lat, lon, h.lat, h.lon) < 1.0 &&
+            std::abs(storedTurnsRadius(h.radius) - radius) < 0.5f) {
+            return h.hold_s;
+        }
+    }
+    return std::nullopt;
+}
+
+void MainWindow::fillHoldTimes(MissionPlan& plan) const {
+    for (auto& wp : plan.wps) {
+        if (wp.loiter_radius > 0.0f && wp.hold_turns > 0 && wp.hold_s <= 0.0f) {
+            if (const auto t = syncedHold(wp.lat, wp.lon, wp.loiter_radius)) {
+                wp.hold_s = *t;
+            } else {  // not ours: about as long as its turns
+                wp.hold_s = static_cast<float>(std::round(wp.hold_turns * lapSeconds(wp.loiter_radius) / 5.0) * 5.0);
+            }
+        }
+    }
+}
+
+void MainWindow::syncHoldTurns(UserWaypoint& p) const {
+    p.hold_turns = p.loiter_radius > 0.0f ? holdTurns(p.hold_s, lapSeconds(p.loiter_radius)) : 0;
+}
+
+double MainWindow::lapSeconds(double radius) const {
+    // one turn of a hold circle at the speed the speed mode will ask for
+    const double cruise = s_.airspeed_cruise > 0 ? s_.airspeed_cruise : settings_.cruise_speed;
+    double v = cruise;
+    if (settings_.speed_mode == static_cast<int>(speed::Mode::Eco) && s_.airspeed_min > 0) {
+        v = speed::loiterSpeed(s_.airspeed_min, cruise, s_.q_assist_speed);
+    }
+    return 2.0 * geo::kPi * std::max(20.0, radius) / std::max(5.0, v);
+}
+
+altitude::Grounds MainWindow::groundsAt(double lat, double lon) const {
+    altitude::Grounds g;
+    g.home_amsl = s_.home_alt_amsl;
+    g.point = elev_ ? elev_->elevation(lat, lon) : std::nullopt;
+    g.land = land_ground_;
+    return g;
+}
+
+void MainWindow::openCoordPad(const QString& title, std::optional<coords::LatLon> initial,
+                              std::function<void(double, double)> done) {
+    pad_->setAircraft(s_.has_position ? std::optional<coords::LatLon>(coords::LatLon{s_.lat, s_.lon}) : std::nullopt);
+    pad_->setHome(s_.has_home ? std::optional<coords::LatLon>(coords::LatLon{s_.home_lat, s_.home_lon}) : std::nullopt);
+    pad_->openCoordinate(title, initial, std::move(done));
+}
+
+void MainWindow::openAltPad(const QString& title, double lat, double lon, double rel, double min_agl,
+                            std::function<void(double)> done) {
+    if (!s_.has_home) {
+        fx_->toast(QStringLiteral("No home position yet: altitudes are relative to it"), kMuted, QStringLiteral("Altitude"));
+        return;
+    }
+    const MissionPlan plan = withLanding(s_.mission_known ? extractPlan(s_.mission) : MissionPlan{});
+    std::optional<coords::LatLon> land;
+    if (planning_ && map_->plan().land) {
+        land = coords::LatLon{map_->plan().land->lat, map_->plan().land->lon};
+    } else if (plan.land) {
+        land = coords::LatLon{plan.land->lat, plan.land->lon};
+    }
+    pad_->setHome(coords::LatLon{s_.home_lat, s_.home_lon});
+    pad_->openAltitude(title, lat, lon, rel, s_.home_alt_amsl, land, settings_.alt_ref, min_agl,
+                       [done = std::move(done)](double r, int) { done(r); });
+}
+
+void MainWindow::refreshSpeedPanel() {
+    speed_panel_->setValues(s_.airspeed_min, s_.airspeed_cruise, s_.airspeed_max, settings_.speed_mode,
+                            speed_label_, s_.q_assist_speed > 0 ? speed::loiterSpeed(s_.airspeed_min, s_.airspeed_cruise,
+                                                                              s_.q_assist_speed)
+                                                                : s_.airspeed_min,
+                            s_.q_assist_speed);
+}
+
+void MainWindow::updateSpeedTarget(qint64 now_ms) {
+    // which airspeed to ask for, from what the aircraft is doing (2 Hz)
+    if (now_ms - speed_eval_ms_ < 500) {
+        return;
+    }
+    speed_eval_ms_ = now_ms;
+    using namespace speed;
+    if (s_.airspeed_min <= 0 || s_.airspeed_cruise <= 0 || s_.airspeed_max <= 0) {
+        return;  // parameters not read yet: leave the autopilot alone
+    }
+    Situation sit = Situation::None;
+    if (s_.armed && isAirborne(s_) && !climb_out_ && !takeoff_handoff_) {
+        const bool landing = isLandingInMission(s_);
+        if (landing) {
+            sit = Situation::Landing;
+        } else if (s_.custom_mode == plane::GUIDED && orbit_) {
+            const double d = geo::distance(s_.lat, s_.lon, orbit_->lat, orbit_->lon);
+            sit = d < orbit_->radius * 1.5 + 30.0 ? Situation::Circling : Situation::EnRoute;
+        } else if (s_.custom_mode == plane::AUTO && s_.mission_known && s_.mission_current >= 1 &&
+                   s_.mission_current < static_cast<int>(s_.mission.size())) {
+            const MissionItem& it = s_.mission[s_.mission_current];
+            const bool loiter = it.command == mav::kCmdNavLoiterUnlim || it.command == mav::kCmdNavLoiterTime ||
+                                it.command == mav::kCmdNavLoiterTurns;
+            const double r = std::abs(it.param3) > 1.0f ? std::abs(it.param3) : defaultRadius();
+            sit = loiter && geo::distance(s_.lat, s_.lon, it.lat(), it.lon()) < r * 1.5 + 30.0 ? Situation::Circling
+                                                                                                 : Situation::EnRoute;
+        }
+        // descending: well above where it is going (ArduPlane slews its own
+        // altitude target, so NAV_CONTROLLER_OUTPUT's error stays small)
+        if (sit == Situation::EnRoute && s_.has_position) {
+            std::optional<double> goal;
+            if (s_.custom_mode == plane::GUIDED && orbit_) {
+                goal = orbit_->alt;
+            } else if (s_.custom_mode == plane::AUTO && s_.mission_current >= 1 &&
+                       s_.mission_current < static_cast<int>(s_.mission.size())) {
+                goal = s_.mission[s_.mission_current].z;
+            }
+            if (goal && s_.alt_rel - *goal > kDescentForMax) {
+                sit = Situation::Descending;
+            }
+        }
+    }
+    const Target want = target(static_cast<Mode>(settings_.speed_mode), sit);
+    if (s_.custom_mode != speed_mode_seen_) {
+        speed_mode_seen_ = s_.custom_mode;
+        speed_sent_.reset();  // a mode change may reset ArduPlane's target: send again
+    }
+    if (!speed_want_ || *speed_want_ != want) {
+        speed_want_ = want;
+        speed_want_ms_ = now_ms;
+    }
+    // hold a new target for 3 s before sending (no flapping); landing at once
+    const bool settled = now_ms - speed_want_ms_ >= 3000 || sit == Situation::Landing;
+    if (!settled || (speed_sent_ && *speed_sent_ == want)) {
+        return;
+    }
+    float v = -2.0f;  // AIRSPEED_CRUISE (ArduPilot's default)
+    const double loiter = loiterSpeed(s_.airspeed_min, s_.airspeed_cruise, s_.q_assist_speed);
+    if (want == Target::Loiter) {
+        v = static_cast<float>(loiter);
+    } else if (want == Target::Max) {
+        v = static_cast<float>(s_.airspeed_max);
+    }
+    if (want == Target::Default && (!speed_sent_ || *speed_sent_ == Target::Default || *speed_sent_ == Target::Cruise)) {
+        speed_sent_ = want;  // nothing of ours to undo
+        speed_label_.clear();
+        bar_->setSpeedTarget(speed_label_);
+        return;
+    }
+    client_->runSequence("speed", {link::makeChangeSpeed(v)});
+    speed_sent_ = want;
+    const double shown = want == Target::Loiter ? loiter : want == Target::Max ? s_.airspeed_max : s_.airspeed_cruise;
+    speed_label_ = want == Target::Default ? QString()
+                                           : QStringLiteral("%1 %2").arg(QLatin1String(targetName(want)), units::speedText(shown));
+    bar_->setSpeedTarget(speed_label_);
+    if (speed_panel_->isVisible()) {
+        refreshSpeedPanel();
+    }
+}
+
 void MainWindow::applySpeedUnit(int unit) {
     settings_.speed_unit = unit;
     units::setSpeedUnit(static_cast<units::Speed>(unit));
@@ -751,11 +1147,13 @@ void MainWindow::pullState() {
         ctx.orbit = orbit_.has_value() && s_.custom_mode == plane::GUIDED;
         ctx.orbit_hold = orbit_ && orbit_->hold;
         ctx.transition_leg = climb_out_ || takeoff_handoff_;
-        const FlightStatus fs = flightStatus(s_, ctx, now);
+        FlightStatus fs = flightStatus(s_, ctx, now);
+        updateWaypointHold(fs);
         bar_->setFlightStatus(fs);
         camera_->setFlightLabel(QString::fromStdString(fs.label));
     }
     updateHeights(clock_.elapsed());
+    updateSpeedTarget(clock_.elapsed());
     bar_->setState(s_, now);
     map_->setState(s_);
     map_->setDefaultLoiterRadius(defaultRadius());
@@ -1447,7 +1845,9 @@ void MainWindow::onLongPressed(int slot) {
 void MainWindow::enterPlan() {
     setGuide(false);
     planning_ = true;
-    map_->setPlan(s_.mission_known ? extractPlan(s_.mission) : MissionPlan{});
+    MissionPlan plan = s_.mission_known ? extractPlan(s_.mission) : MissionPlan{};
+    fillHoldTimes(plan);  // an own-radius hold comes back as turns: the time as set
+    map_->setPlan(plan);
     map_->setMode(MapView::Mode::Plan);
     if (host_->mainView() != map_) {
         host_->swap();
@@ -1491,11 +1891,26 @@ void MainWindow::refreshPanel() {
     } else if (sel >= 0 && sel < static_cast<int>(plan.wps.size())) {
         panel_->showWaypoint(sel, plan.wps[sel].alt_rel);
     } else {
-        panel_->setHold(false, 0.0f, false, defaultRadius());
+        panel_->setHold(WaypointPanel::HoldView{});
         panel_->hide();
         return;
     }
-    panel_->setHold(sel >= 0 && sel == holdIndex(plan), plan.hold_radius, plan.hold_ccw, defaultRadius());
+    {
+        WaypointPanel::HoldView hv;
+        hv.default_radius = defaultRadius();
+        if (sel >= 0 && sel == holdIndex(plan)) {
+            hv.mode = WaypointPanel::HoldMode::Final;
+            hv.radius = plan.hold_radius;
+            hv.ccw = plan.hold_ccw;
+        } else if (sel >= 0) {
+            const auto& wp = plan.wps[sel];
+            hv.mode = WaypointPanel::HoldMode::Timed;
+            hv.hold_s = wp.hold_s;
+            hv.radius = wp.loiter_radius;
+            hv.ccw = wp.loiter_ccw;
+        }
+        panel_->setHold(hv);
+    }
     const QSize ds = dock_->sizeHint();
     panel_->move((width() - panel_->width()) / 2, height() - ds.height() - 18 - panel_->height());
     panel_->show();
@@ -1508,6 +1923,14 @@ MissionPlan MainWindow::withLanding(MissionPlan plan) const {
     // it (RTL_AUTOLAND = 2). Without an L the aircraft lands back at home.
     if (!plan.land && s_.has_home) {
         plan.land = UserWaypoint{s_.home_lat, s_.home_lon, settings_.land_approach_alt};
+    }
+    // own-radius holds go up as turns: re-derive them at today's loiter speed
+    // (a rebuild from the vehicle's mission gets its times back first)
+    fillHoldTimes(plan);
+    for (auto& wp : plan.wps) {
+        if (wp.hold_s > 0.0f) {
+            syncHoldTurns(wp);
+        }
     }
     return plan;
 }
@@ -1540,6 +1963,7 @@ void MainWindow::syncPlan() {
     }
     const LandingApproach appr = approachFor(plan, from_lat, from_lon);
     auto items = buildLoopMission(s_.home_lat, s_.home_lon, s_.home_alt_amsl, plan, settings_.takeoff_alt, &appr);
+    rememberHolds(plan);
     uploading_ = true;
     // flying the plan: switch to the new one as soon as it is on board
     // (ArduPlane would otherwise finish the leg it has in memory)
@@ -1673,7 +2097,12 @@ void MainWindow::adjustOrbit(float d_alt, float d_radius, bool flip) {
         }
         return;
     }
-    orbit_->alt = std::clamp(orbit_->alt + d_alt, kMinOrbitAlt, kMaxOrbitAlt);
+    {
+        // never below the minimum height above the ground at the centre
+        const double floor = s_.has_home ? altitude::minRelHome(groundsAt(orbit_->lat, orbit_->lon)) : kMinOrbitAlt;
+        orbit_->alt = static_cast<float>(std::clamp<double>(orbit_->alt + d_alt, std::max<double>(kMinOrbitAlt, floor),
+                                                            kMaxOrbitAlt));
+    }
     orbit_->radius = std::clamp(orbit_->radius + d_radius, kMinOrbitRadius, kMaxOrbitRadius);
     if (flip) {
         orbit_->ccw = !orbit_->ccw;
@@ -1690,6 +2119,7 @@ void MainWindow::refreshOrbitPanel() {
     // keeps flying when it's off)
     const bool show = orbit_ && (guiding_ || (orbit_->hold && !hold_panel_hidden_)) && !planning_ &&
                       s_.custom_mode == plane::GUIDED && isAirborne(s_);
+    orbit_panel_->setCoordButton(show && !orbit_->hold);
     if (show) {
         orbit_panel_->setValues(orbit_->hold ? QStringLiteral("HOLD") : QStringLiteral("FLY TO"), orbit_->alt,
                                 orbit_->radius, orbit_->ccw, s_.alt_rel, orbitDraw().flown, orbitDraw().trimmed);
@@ -1734,7 +2164,8 @@ void MainWindow::adjustEndHold(float d_alt, float d_radius, bool flip) {
         return;
     }
     auto& alt = plan.wps[h].alt_rel;
-    alt = std::clamp(alt + d_alt, kMinOrbitAlt, kMaxOrbitAlt);
+    const double floor = altitude::minRelHome(groundsAt(plan.wps[h].lat, plan.wps[h].lon));
+    alt = static_cast<float>(std::clamp<double>(alt + d_alt, std::max<double>(kMinOrbitAlt, floor), kMaxOrbitAlt));
     if (d_radius != 0.0f) {
         const float now = plan.hold_radius > 0.0f ? plan.hold_radius : static_cast<float>(defaultRadius());
         plan.hold_radius = std::clamp(now + d_radius, kMinOrbitRadius, kMaxOrbitRadius);
@@ -1998,11 +2429,11 @@ int MainWindow::firstRouteSeq(const std::vector<MissionItem>& items) {
     return -1;
 }
 
-// ---- keyboard -------------------------------------------------------------------
+// ---- input filter ---------------------------------------------------------------
 
 bool MainWindow::eventFilter(QObject* obj, QEvent* e) {
     if ((e->type() == QEvent::MouseButtonPress || e->type() == QEvent::TouchBegin) && isActiveWindow() &&
-        !settings_screen_->isOpen()) {
+        !settings_screen_->isOpen() && !(pad_ && pad_->isOpen())) {
         // the alert banner lives on the mouse-transparent fx layer: open the help from here
         QPointF global;
         if (e->type() == QEvent::MouseButtonPress) {
@@ -2013,6 +2444,15 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* e) {
         if (!fx_->alertRect().isEmpty() && fx_->alertRect().contains(mapFromGlobal(global))) {
             showAlerts(true);
             return true;
+        }
+        // the airspeed panel has no close button either: a tap outside closes it
+        // (taps on the top bar are left to it: its AS · GS chip toggles the panel)
+        if (speed_panel_ && speed_panel_->isVisible()) {
+            const QPoint local = mapFromGlobal(global).toPoint();
+            if (!speed_panel_->geometry().contains(local) && !bar_->geometry().contains(local)) {
+                speed_panel_->hide();
+                return !dock_->geometry().contains(local);  // the dock still does what it says
+            }
         }
         // the SYSTEMS panel has no close button: a tap outside it closes it (the
         // top bar is left alone, its SYSTEMS chip toggles the panel itself)
@@ -2025,59 +2465,10 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* e) {
             }
         }
     }
-    if ((e->type() == QEvent::KeyPress || e->type() == QEvent::KeyRelease) && isActiveWindow()) {
-        auto* ke = static_cast<QKeyEvent*>(e);
-        const int key = ke->key();
-        if (preflight_->isOpen()) {
-            if (key == Qt::Key_Escape && e->type() == QEvent::KeyPress) {
-                preflight_->close();
-            }
-            return true;
-        }
-        if (settings_screen_->isOpen()) {
-            // the menu is modal: Esc closes it, nothing reaches the dock
-            if (key == Qt::Key_Escape && e->type() == QEvent::KeyPress) {
-                settings_screen_->close();
-            }
-            return true;
-        }
-        if (key >= Qt::Key_1 && key <= Qt::Key_5) {
-            if (!ke->isAutoRepeat()) {
-                const int slot = key - Qt::Key_1;
-                if (e->type() == QEvent::KeyPress) {
-                    dock_->pressSlot(slot);
-                } else {
-                    dock_->releaseSlot(slot);
-                }
-            }
-            return true;
-        }
-        if (key == Qt::Key_Escape && e->type() == QEvent::KeyPress) {
-            if (alerts_->isVisible()) {
-                showAlerts(false);
-            } else if (map_->mode() == MapView::Mode::Area) {
-                map_->setMode(MapView::Mode::Normal);
-            } else if (planning_ && map_->selected() != MapView::kNone) {
-                map_->select(MapView::kNone);
-            } else if (planning_) {
-                exitPlan();
-                fx_->toast(QStringLiteral("Plan discarded"), kMuted);
-            } else if (guiding_) {
-                setGuide(false);
-            }
-            refreshDock();
-            return true;
-        }
-        if (planning_ && e->type() == QEvent::KeyPress && (key == Qt::Key_Delete || key == Qt::Key_Backspace) &&
-            map_->selected() != MapView::kNone) {
-            map_->deletePoint(map_->selected());
-            return true;
-        }
-        if (planning_ && e->type() == QEvent::KeyPress && key == Qt::Key_Z &&
-            (ke->modifiers() & Qt::ControlModifier)) {
-            map_->undo();
-            return true;
-        }
+    if (e->type() == QEvent::KeyPress || e->type() == QEvent::KeyRelease || e->type() == QEvent::ShortcutOverride) {
+        // The keyboard only types into the manual-entry pad; no key triggers a
+        // button or action anywhere else (operator decision).
+        return !(pad_ && pad_->isOpen());
     }
     return QWidget::eventFilter(obj, e);
 }

@@ -9,6 +9,7 @@
 #include <QColor>
 
 #include <array>
+#include <functional>
 #include <optional>
 #include <vector>
 
@@ -35,6 +36,8 @@ public:
 
     QString pipTag() const override;
 
+    // applied to the plan read from the vehicle (hold times it can't store)
+    void setPlanFixup(std::function<void(MissionPlan&)> fn) { plan_fixup_ = std::move(fn); }
     void setState(const VehicleState& s);
     void setMode(Mode m);
     Mode mode() const { return mode_; }
@@ -65,6 +68,11 @@ public:
     int selected() const { return sel_; }
     void select(int id);
     void adjustAltitude(int id, float delta);  // waypoint or kLandId; one undo step per point
+    void addPoint(double lat, double lon, bool landing);  // as a tap would (landing: sets L)
+    std::optional<UserWaypoint> point(int id) const;      // waypoint or kLandId
+    // Edit one point with undo. coalesce_key >= 0: consecutive edits with the
+    // same key on the same point undo in one step (steppers); kNone: own step.
+    void editPoint(int id, const std::function<void(UserWaypoint&)>& fn, int coalesce_key = kNone);
     void deletePoint(int id);
     void insertAfter(int index);                  // midpoint to the next point (past the end of an open route)
     void setPattern(Pattern pattern);             // how the route is flown (undoable)
@@ -152,6 +160,7 @@ private:
     int planPointAt(const QPointF& pos) const;  // waypoint index, kLandId or kNone
     void pushUndo();
     void editPlan();  // pushUndo + ends alt-edit coalescing
+    UserWaypoint* pointPtr(int id);
     void pointerPress(const QPointF& pos);
     void pointerMove(const QPointF& pos);
     void pointerRelease(const QPointF& pos);
@@ -189,6 +198,7 @@ private:
     } hover_elev_;
     quint64 elev_gen_ = 0;
     VehicleState s_;
+    std::function<void(MissionPlan&)> plan_fixup_;
     MissionPlan vehicle_plan_;
     bool centred_ = false;
 

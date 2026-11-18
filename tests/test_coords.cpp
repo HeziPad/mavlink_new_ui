@@ -79,7 +79,32 @@ static void testParse() {
     CHECK(!parse("36S 5000 3551234", Fmt::Utm));
 }
 
+static void testBoxes() {
+    // DMS boxes
+    CHECK_NEAR(*angleFromDms(32, 5, 7.1, true, 90), 32.0 + 5 / 60.0 + 7.1 / 3600.0, 1e-12);
+    CHECK_NEAR(*angleFromDms(34, 46, 54.5, false, 180), -(34.0 + 46 / 60.0 + 54.5 / 3600.0), 1e-12);
+    CHECK(!angleFromDms(32, 60, 0, true, 90));    // minutes < 60
+    CHECK(!angleFromDms(32, 5, 60, true, 90));    // seconds < 60
+    CHECK(!angleFromDms(91, 0, 0, true, 90));     // beyond the pole
+    CHECK(!angleFromDms(32.5, 0, 0, true, 90));   // whole degrees
+    CHECK(angleFromDms(180, 0, 0, true, 180).has_value());
+    const DmsParts d = toDms(-(34.0 + 46 / 60.0 + 59.96 / 3600.0));
+    CHECK(!d.positive && d.deg == 34 && d.min == 47 && d.sec == 0.0);  // 59.96" carries
+    // round trip through the boxes
+    const DmsParts r = toDms(32.08531);
+    CHECK_NEAR(*angleFromDms(r.deg, r.min, r.sec, r.positive, 90), 32.08531, 1.0 / 36000.0);
+    // decimal and UTM boxes
+    CHECK(checkedLatLon(32.1, -34.7).has_value());
+    CHECK(!checkedLatLon(90.5, 0.0));
+    CHECK(!checkedLatLon(0.0, 181.0));
+    const auto u = fromUtmChecked(36, true, 668123, 3551234);
+    CHECK(u && std::abs(u->lat - 32.08) < 0.01);
+    CHECK(!fromUtmChecked(61, true, 668123, 3551234));
+    CHECK(!fromUtmChecked(36, true, 66812, 3551234));
+}
+
 int main() {
+    testBoxes();
     testUtm();
     testFormat();
     testParse();

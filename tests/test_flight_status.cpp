@@ -96,6 +96,27 @@ static void testTargets() {
     CHECK(t.valid && t.name == "WP1");
     CHECK_NEAR(t.dist_m, 1112.0, 5.0);
     CHECK_NEAR(t.eta_s, t.dist_m / 20.0, 1e-6);
+    {
+        // a waypoint hold: on its circle it has arrived (no ETA counting on)
+        VehicleState h = s;
+        auto& it = h.mission[2];
+        it.command = mav::kCmdNavLoiterTime;
+        it.param1 = 60.0f;
+        it.param3 = 0.0f;
+        h.loiter_radius = 100.0;
+        CHECK(!missionTarget(h).arrived);  // still 1.1 km away
+        h.lat = it.lat() + 0.001;          // ~110 m from the centre: on the circle
+        h.lon = it.lon();
+        NavTarget ht = missionTarget(h);
+        CHECK(ht.valid && ht.name == "WP1" && ht.arrived && ht.eta_s == 0.0);
+        it.command = mav::kCmdNavLoiterTurns;  // own radius in param3
+        it.param3 = -400.0f;
+        h.lat = it.lat() + 0.0036;          // ~400 m out
+        CHECK(missionTarget(h).arrived);
+        it.param3 = -150.0f;
+        CHECK(!missionTarget(h).arrived);   // 400 m from a 150 m circle
+        CHECK(onCircle(120.0, 100.0) && !onCircle(170.0, 100.0));
+    }
     s.mission_current = landSeq(s.mission);
     CHECK(missionTarget(s).name == "APPROACH");
     s.mission_current = landSeq(s.mission) + 1;
