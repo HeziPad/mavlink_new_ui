@@ -50,7 +50,7 @@ ctest --test-dir build                    # all suites (geo, mission builder, mi
      add its `bin` folder to `PATH`.
 2. **Build and package.** In the **x64 Native Tools Command Prompt for VS 2022**:
    ```bat
-   cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=C:\Qt\6.8.3\msvc2022_64
+   cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=C:\Qt\6.9.3\msvc2022_64
    cmake --build build
    ctest --test-dir build
    cmake --install build --prefix dist

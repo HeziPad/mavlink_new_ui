@@ -82,12 +82,10 @@ void testLiveEstimate() {
     t.setRequested(300.0);
     const double r = 321.0;  // flown, before any correction
     double a = 0.0;
-    int samples = 0;
     // nothing to show before a quarter lap
     while (a < OrbitTrim::kLiveMinTurn - 0.1) {
         a += 0.05;
         t.addSample(r * std::cos(a), r * std::sin(a));
-        ++samples;
         CHECK(t.liveRadius() < 0.0 || a >= OrbitTrim::kLiveMinTurn);
     }
     for (int i = 0; i < 6; ++i) {
