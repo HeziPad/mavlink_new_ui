@@ -1,5 +1,7 @@
 #include "theme.hpp"
+#include "core/geo.hpp"
 
+#include <QFontDatabase>
 #include <QPainter>
 #include <QPixmap>
 
@@ -33,10 +35,18 @@ QColor mix(const QColor& a, const QColor& b, double t) {
                             static_cast<float>(a.alphaF() + (b.alphaF() - a.alphaF()) * t));
 }
 
+bool loadFonts() {
+    bool ok = true;
+    for (const char* f : {":/fonts/DejaVuSans.ttf", ":/fonts/DejaVuSans-Bold.ttf", ":/fonts/DejaVuSansMono.ttf",
+                          ":/fonts/DejaVuSansMono-Bold.ttf"}) {
+        ok = QFontDatabase::addApplicationFont(QString::fromLatin1(f)) >= 0 && ok;
+    }
+    return ok;
+}
+
 QFont monoFont(double px, bool bold) {
     QFont f;
-    f.setFamilies({QStringLiteral("JetBrains Mono"), QStringLiteral("DejaVu Sans Mono"),
-                   QStringLiteral("monospace")});
+    f.setFamily(QString::fromLatin1(kMonoFamily));  // bundled: the same look on every OS
     f.setStyleHint(QFont::Monospace);
     f.setPixelSize(std::max(1, static_cast<int>(std::lround(px))));
     f.setWeight(bold ? QFont::DemiBold : QFont::Normal);
@@ -45,8 +55,7 @@ QFont monoFont(double px, bool bold) {
 
 QFont labelFont(double px, bool bold) {
     QFont f;
-    f.setFamilies({QStringLiteral("Rajdhani"), QStringLiteral("Exo 2"), QStringLiteral("DejaVu Sans"),
-                   QStringLiteral("sans-serif")});
+    f.setFamily(QString::fromLatin1(kSansFamily));
     f.setPixelSize(std::max(1, static_cast<int>(std::lround(px))));
     f.setWeight(bold ? QFont::Bold : QFont::Normal);
     f.setCapitalization(QFont::AllUppercase);
@@ -76,7 +85,7 @@ QPainterPath chamferPath(const QRectF& r, double cut) {
 QPainterPath hexPath(const QPointF& c, double radius) {
     QPainterPath path;
     for (int i = 0; i < 6; ++i) {
-        const double a = (60.0 * i - 90.0) * M_PI / 180.0;
+        const double a = (60.0 * i - 90.0) * geo::kPi / 180.0;
         const QPointF pt(c.x() + radius * std::cos(a), c.y() + radius * std::sin(a));
         if (i == 0) {
             path.moveTo(pt);

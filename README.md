@@ -8,25 +8,92 @@ buttons. It is touch-first, with the mouse as an alternative.
 
 C++17 · Qt 6 Widgets · MAVLink `c_library_v2` · GStreamer (optional, for video).
 
-## Prerequisites (Ubuntu / Debian)
+## Install, build and run
+
+The app runs on **Linux, Windows 10/11 and macOS 12+**, and connects to a real Pixhawk over USB, a
+telemetry radio, or the network (see [Connecting to the aircraft](#connecting-to-the-aircraft)).
+Video needs GStreamer; without it the app still builds and runs, and the camera view shows the
+synthetic HUD only. Every push is built and tested on all three systems by GitHub Actions
+(`.github/workflows/build.yml`). The packaged app of each run (ZIP / DMG / tar.gz) can be
+downloaded from the run's page.
+
+### Linux (Ubuntu / Debian)
 
 ```sh
-sudo apt install cmake ninja-build qt6-base-dev \
+sudo apt install cmake ninja-build g++ qt6-base-dev zlib1g-dev \
     libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
     gstreamer1.0-libav gstreamer1.0-plugins-good gstreamer1.0-plugins-ugly
-```
-
-`gstreamer1.0-libav` provides the H.264 decoder. `-ugly` is only needed for the
-`x264enc` test stream below. Without the GStreamer dev packages the app still
-builds, and the camera view shows the synthetic HUD only.
-
-## Build & test
-
-```sh
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build
-ctest --test-dir build        # all suites (geo, mission builder, mission transfer, transport, ...)
+ctest --test-dir build                    # all suites (geo, mission builder, mission transfer, transport, ...)
+./build/mavlink_gcs_ui
 ```
+
+- **GStreamer packages:** `gstreamer1.0-libav` provides the H.264 decoder. `-ugly` is only needed
+  for the `x264enc` test stream below.
+- **Serial port access:** opening the Pixhawk's port (`/dev/ttyACM0`) or a radio's
+  (`/dev/ttyUSB0`) needs the `dialout` group: `sudo usermod -aG dialout $USER`, then log out and
+  back in.
+- **ModemManager:** if it grabs the port, run `sudo systemctl disable --now ModemManager`.
+- **Installing:** `cmake --install build` installs the binary, the desktop entry and the icon.
+  `cd build && cpack` makes a `.tar.gz`.
+
+### Windows 10 / 11
+
+1. **Install the tools:**
+   - [Visual Studio 2022 Build Tools](https://visualstudio.microsoft.com/downloads/), with the
+     "Desktop development with C++" workload. It includes CMake and Ninja.
+   - Qt 6.5 or newer from the [Qt online installer](https://www.qt.io/download-qt-installer), with
+     the component **MSVC 2022 64-bit**.
+   - Optional, for video: the GStreamer **MSVC 64-bit runtime and development** installers from
+     [gstreamer.freedesktop.org](https://gstreamer.freedesktop.org/download/). Choose "Complete" and
+     add its `bin` folder to `PATH`.
+2. **Build and package.** In the **x64 Native Tools Command Prompt for VS 2022**:
+   ```bat
+   cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=C:\Qt\6.8.3\msvc2022_64
+   cmake --build build
+   ctest --test-dir build
+   cmake --install build --prefix dist
+   ```
+   - **No video:** add `-DGCS_WITH_GSTREAMER=OFF`.
+   - **zlib:** CMake downloads and builds zlib itself.
+   - **Result:** `dist\bin` holds `mavlink_gcs_ui.exe` with the Qt DLLs next to it, so you can copy
+     the folder to another PC. `cd build && cpack -C Release` makes a ZIP of it.
+3. **Run** `dist\bin\mavlink_gcs_ui.exe`.
+   - **Firewall:** the first time it listens on the network, Windows Firewall asks. Allow it for
+     UDP links; serial links don't need it.
+   - **Pixhawk on USB:** it appears as a COM port with no driver needed. Device Manager → Ports
+     shows which.
+   - **SiK radios:** these need the FTDI or Silicon Labs CP210x driver.
+   - Then use Settings → CONNECTION → SERIAL, or `mavlink_gcs_ui.exe --serial COM4:57600`.
+   - Log messages (`GCS_FPS=1` and the like) go to the debugger, not a console.
+
+### macOS 12+ (Apple Silicon or Intel)
+
+```sh
+xcode-select --install
+brew install cmake ninja qt            # + gstreamer for video
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$(brew --prefix qt)
+cmake --build build
+ctest --test-dir build
+cmake --install build --prefix dist    # dist/mavlink_gcs_ui.app, with the Qt frameworks inside
+open dist/mavlink_gcs_ui.app
+```
+
+- **No video:** add `-DGCS_WITH_GSTREAMER=OFF`.
+- **Disk image:** `cd build && cpack` makes a `.dmg`.
+- **First start:** the app is not signed, so right-click it → **Open** once to get past Gatekeeper.
+  When macOS asks about **Local Network**, allow it; UDP telemetry and video from a radio or the LAN
+  need it.
+- **Serial ports** are `/dev/cu.usbmodem…` for a Pixhawk on USB and `/dev/cu.usbserial-…` for a SiK
+  radio. FTDI and CP210x drivers are built in. The CONNECTION page lists them.
+  - From the command line: `dist/mavlink_gcs_ui.app/Contents/MacOS/mavlink_gcs_ui --serial /dev/cu.usbmodem1101`.
+- **Zooming the map:** pinch on the trackpad, or scroll with two fingers.
+
+### Fonts
+
+The app bundles DejaVu Sans and DejaVu Sans Mono (`resources/fonts`, Bitstream Vera licence), so
+text looks and measures the same on every system.
 
 ## Run
 
@@ -66,7 +133,7 @@ redrew, its longest stall, and the attitude/position telemetry rates. That
 tells a slow UI apart from slow telemetry. Through MAVProxy, use
 `--streamrate=-1`; otherwise MAVProxy forces every stream to 4 Hz.
 
-### With SITL
+### With SITL (Linux)
 
 ```sh
 tools/sitl.sh                 # ArduPlane quadplane SITL at your location, output to 127.0.0.1:14551
@@ -576,4 +643,4 @@ tools/      sitl.sh (SITL at your location), fetch_offline.py (offline map data 
 resources/  app icon PNGs (from `mavlink_gcs_ui --export-icon DIR`) and the .desktop entry
 ```
 
-`cmake --install build` installs the binary, the desktop entry and the icon.
+`cmake --install build` installs the binary, the desktop entry and the icon on Linux; on Windows and macOS it makes a self-contained folder / `.app` (see [Install, build and run](#install-build-and-run)).

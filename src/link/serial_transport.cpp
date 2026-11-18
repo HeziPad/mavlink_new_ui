@@ -1,5 +1,12 @@
 #include "serial_transport.hpp"
 
+#if defined(_WIN32)
+#include <windows.h>
+#include <initguid.h>  // before devpkey.h: defines the DEVPKEY_* constants here
+#include <devguid.h>
+#include <devpkey.h>
+#include <setupapi.h>
+#else
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/ioctl.h>
@@ -7,6 +14,7 @@
 #include <unistd.h>
 #if defined(__APPLE__)
 #include <IOKit/serial/ioss.h>
+#endif
 #endif
 
 #include <algorithm>
@@ -28,11 +36,13 @@ const std::vector<int>& serialBauds() {
 
 namespace {
 
+#if !defined(_WIN32)
 std::string sysError(const std::string& what) {
     return what + ": " + std::strerror(errno);
 }
+#endif
 
-#if !defined(__APPLE__)
+#if !defined(__APPLE__) && !defined(_WIN32)
 bool speedConstant(int baud, speed_t& out) {
     switch (baud) {
     case 9600: out = B9600; return true;
@@ -91,6 +101,9 @@ std::string labelFromById(std::string id) {
 #endif
 
 }  // namespace
+
+// ---- POSIX (Linux, macOS) ---------------------------------------------------------------------
+#if !defined(_WIN32)
 
 SerialTransport::SerialTransport(std::string port, int baud) : port_(std::move(port)), baud_(baud) {}
 
@@ -245,7 +258,8 @@ std::string SerialTransport::describe() const {
     return port_ + " · " + std::to_string(baud_);
 }
 
-std::vector<SerialPortInfo> listSerialPorts() {
+namespace {
+std::vector<SerialPortInfo> platformPorts() {
     std::vector<SerialPortInfo> out;
     std::error_code ec;
 #if defined(__linux__)
@@ -289,6 +303,239 @@ std::vector<SerialPortInfo> listSerialPorts() {
         out.push_back(std::move(p));
     }
 #endif
+    return out;
+}
+}  // namespace
+
+#else
+// ---- Windows ------------------------------------------------------------------------------------
+
+namespace {
+HANDLE handle(intptr_t h) { return reinterpret_cast<HANDLE>(h); }
+constexpr intptr_t kNoPort = -1;  // INVALID_HANDLE_VALUE
+
+std::string winError(DWORD err) {
+    char buf[256] = {};
+    const DWORD n = FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, err, 0, buf,
+                                   sizeof(buf), nullptr);
+    std::string s(buf, n);
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ' || s.back() == '.')) {
+        s.pop_back();
+    }
+    return s.empty() ? "error " + std::to_string(err) : s;
+}
+}  // namespace
+
+SerialTransport::SerialTransport(std::string port, int baud) : port_(std::move(port)), baud_(baud) {}
+
+SerialTransport::~SerialTransport() {
+    close();
+}
+
+bool SerialTransport::isOpen() const {
+    return fd_ != kNoPort;
+}
+
+bool SerialTransport::open(std::string& error) {
+    close();
+    if (port_.empty()) {
+        error = "no serial port chosen";
+        return false;
+    }
+    // COM10 and above only open through the device namespace
+    const std::string dev = port_.rfind("\\\\.\\", 0) == 0 ? port_ : "\\\\.\\" + port_;
+    HANDLE h = ::CreateFileA(dev.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        const DWORD err = ::GetLastError();
+        if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+            error = port_ + " not found (unplugged?)";
+        } else if (err == ERROR_ACCESS_DENIED || err == ERROR_SHARING_VIOLATION) {
+            error = port_ + " is in use by another program";
+        } else {
+            error = "open " + port_ + ": " + winError(err);
+        }
+        return false;
+    }
+    DCB dcb{};
+    dcb.DCBlength = sizeof(dcb);
+    if (!::GetCommState(h, &dcb)) {
+        error = "GetCommState " + port_ + ": " + winError(::GetLastError());
+        ::CloseHandle(h);
+        return false;
+    }
+    dcb.BaudRate = static_cast<DWORD>(baud_);
+    dcb.ByteSize = 8;
+    dcb.Parity = NOPARITY;
+    dcb.StopBits = ONESTOPBIT;
+    dcb.fBinary = TRUE;
+    dcb.fParity = FALSE;
+    dcb.fOutxCtsFlow = FALSE;
+    dcb.fOutxDsrFlow = FALSE;
+    dcb.fDsrSensitivity = FALSE;
+    dcb.fOutX = FALSE;
+    dcb.fInX = FALSE;
+    dcb.fNull = FALSE;
+    dcb.fAbortOnError = FALSE;
+    dcb.fDtrControl = DTR_CONTROL_ENABLE;  // USB CDC devices expect DTR before they talk
+    dcb.fRtsControl = RTS_CONTROL_ENABLE;
+    if (!::SetCommState(h, &dcb)) {
+        error = "baud " + std::to_string(baud_) + " on " + port_ + ": " + winError(::GetLastError());
+        ::CloseHandle(h);
+        return false;
+    }
+    // reads return at once with whatever has arrived; writes give up after 50 ms
+    COMMTIMEOUTS t{};
+    t.ReadIntervalTimeout = MAXDWORD;
+    t.ReadTotalTimeoutMultiplier = 0;
+    t.ReadTotalTimeoutConstant = 0;
+    t.WriteTotalTimeoutMultiplier = 0;
+    t.WriteTotalTimeoutConstant = 50;
+    ::SetCommTimeouts(h, &t);
+    ::PurgeComm(h, PURGE_RXCLEAR | PURGE_TXCLEAR);
+    fd_ = reinterpret_cast<intptr_t>(h);
+    return true;
+}
+
+void SerialTransport::close() {
+    if (fd_ != kNoPort) {
+        ::CloseHandle(handle(fd_));
+        fd_ = kNoPort;
+    }
+}
+
+int SerialTransport::waitReadable(int timeout_ms, std::string& error) {
+    if (fd_ == kNoPort) {
+        error = "port closed";
+        return -1;
+    }
+    // COM ports have no poll(): look at the input queue every millisecond
+    const DWORD start = ::GetTickCount();
+    for (;;) {
+        DWORD errors = 0;
+        COMSTAT st{};
+        if (!::ClearCommError(handle(fd_), &errors, &st)) {
+            error = port_ + " disconnected";
+            return -1;
+        }
+        if (st.cbInQue > 0) {
+            return 1;
+        }
+        if (static_cast<int>(::GetTickCount() - start) >= timeout_ms) {
+            return 0;
+        }
+        ::Sleep(1);
+    }
+}
+
+long SerialTransport::read(uint8_t* buf, size_t max, std::string& error) {
+    if (fd_ == kNoPort) {
+        error = "port closed";
+        return -1;
+    }
+    DWORD n = 0;
+    if (!::ReadFile(handle(fd_), buf, static_cast<DWORD>(max), &n, nullptr)) {
+        const DWORD err = ::GetLastError();
+        error = err == ERROR_ACCESS_DENIED || err == ERROR_BAD_COMMAND || err == ERROR_DEVICE_NOT_CONNECTED ||
+                        err == ERROR_OPERATION_ABORTED
+                    ? port_ + " disconnected"
+                    : "read " + port_ + ": " + winError(err);
+        return -1;
+    }
+    return static_cast<long>(n);
+}
+
+void SerialTransport::write(const uint8_t* data, size_t len) {
+    if (fd_ == kNoPort) {
+        return;
+    }
+    DWORD n = 0;
+    ::WriteFile(handle(fd_), data, static_cast<DWORD>(len), &n, nullptr);  // a failure shows up on the read side
+}
+
+std::string SerialTransport::describe() const {
+    return port_ + " · " + std::to_string(baud_);
+}
+
+namespace {
+
+std::string narrow(const std::wstring& w) {
+    if (w.empty()) {
+        return {};
+    }
+    const int n = ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+    std::string s(static_cast<size_t>(n), '\0');
+    ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), s.data(), n, nullptr, nullptr);
+    return s;
+}
+
+// USB vendor IDs of autopilot makers: ArduPilot (pid.codes), 3DR/PX4, CubePilot, Holybro, mRo, CUAV
+bool autopilotVid(const std::string& hwid) {
+    const std::string h = lower(hwid);
+    for (const char* v : {"vid_1209", "vid_26ac", "vid_2dae", "vid_3162", "vid_35a7", "vid_3163"}) {
+        if (h.find(v) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<SerialPortInfo> platformPorts() {
+    std::vector<SerialPortInfo> out;
+    HDEVINFO set = ::SetupDiGetClassDevsW(&GUID_DEVCLASS_PORTS, nullptr, nullptr, DIGCF_PRESENT);
+    if (set == INVALID_HANDLE_VALUE) {
+        return out;
+    }
+    SP_DEVINFO_DATA dev{};
+    dev.cbSize = sizeof(dev);
+    for (DWORD i = 0; ::SetupDiEnumDeviceInfo(set, i, &dev); ++i) {
+        // "COM4" lives in the device's registry key
+        HKEY key = ::SetupDiOpenDevRegKey(set, &dev, DICS_FLAG_GLOBAL, 0, DIREG_DEV, KEY_READ);
+        if (key == INVALID_HANDLE_VALUE) {
+            continue;
+        }
+        wchar_t name[64] = {};
+        DWORD size = sizeof(name);
+        DWORD type = 0;
+        const LONG rc = ::RegQueryValueExW(key, L"PortName", nullptr, &type, reinterpret_cast<BYTE*>(name), &size);
+        ::RegCloseKey(key);
+        if (rc != ERROR_SUCCESS || type != REG_SZ || std::wstring(name).rfind(L"COM", 0) != 0) {
+            continue;  // LPT and the like
+        }
+        SerialPortInfo p;
+        p.path = narrow(name);
+        // what the USB device calls itself ("Pixhawk6C"), else Windows' name ("USB Serial Device (COM4)")
+        wchar_t text[256] = {};
+        DEVPROPTYPE ptype = 0;
+        std::string product;
+        if (::SetupDiGetDevicePropertyW(set, &dev, &DEVPKEY_Device_BusReportedDeviceDesc, &ptype,
+                                        reinterpret_cast<BYTE*>(text), sizeof(text), nullptr, 0) &&
+            ptype == DEVPROP_TYPE_STRING) {
+            product = narrow(text);
+        }
+        std::string friendly;
+        if (::SetupDiGetDeviceRegistryPropertyW(set, &dev, SPDRP_FRIENDLYNAME, nullptr, reinterpret_cast<BYTE*>(text),
+                                                sizeof(text), nullptr)) {
+            friendly = narrow(text);
+        }
+        std::string hwid;
+        if (::SetupDiGetDeviceRegistryPropertyW(set, &dev, SPDRP_HARDWAREID, nullptr, reinterpret_cast<BYTE*>(text),
+                                                sizeof(text), nullptr)) {
+            hwid = narrow(text);
+        }
+        p.label = !product.empty() ? product + " (" + p.path + ")" : (!friendly.empty() ? friendly : p.path);
+        p.likely_autopilot = autopilotVid(hwid) || looksLikeAutopilot(p.label);
+        out.push_back(std::move(p));
+    }
+    ::SetupDiDestroyDeviceInfoList(set);
+    return out;
+}
+
+}  // namespace
+
+#endif
+
+std::vector<SerialPortInfo> listSerialPorts() {
+    std::vector<SerialPortInfo> out = platformPorts();
     std::stable_sort(out.begin(), out.end(), [](const SerialPortInfo& a, const SerialPortInfo& b) {
         if (a.likely_autopilot != b.likely_autopilot) {
             return a.likely_autopilot;
