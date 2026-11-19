@@ -10,6 +10,7 @@
 #include "link/mavlink_client.hpp"
 #include "map_view.hpp"
 #include "orbit_panel.hpp"
+#include "payload_panel.hpp"
 #include "elevation_cache.hpp"
 #include "entry_pad.hpp"
 #include "speed_panel.hpp"
@@ -30,6 +31,7 @@
 #include "waypoint_panel.hpp"
 
 #include <QApplication>
+#include <QDir>
 #include <QCloseEvent>
 #include <QKeyEvent>
 #include <QMouseEvent>
@@ -44,6 +46,28 @@
 namespace gcs::ui {
 
 using namespace theme;
+
+// Payload ICDs (icds/*.json): GCS_ICD_DIR, then next to the binary (an install
+// or a package), then the source tree (a build directory).
+static QString payloadIcdDir() {
+    const QString env = qEnvironmentVariable("GCS_ICD_DIR");
+    if (!env.isEmpty()) {
+        return env;
+    }
+    const QString app = QCoreApplication::applicationDirPath();
+    for (const QString& d : {app + QStringLiteral("/icds"), app + QStringLiteral("/../share/mavlink_gcs_ui/icds"),
+                             app + QStringLiteral("/../Resources/icds")}) {
+        if (QDir(d).exists()) {
+            return QDir(d).absolutePath();
+        }
+    }
+#ifdef GCS_SOURCE_DIR
+    if (QDir(QStringLiteral(GCS_SOURCE_DIR "/icds")).exists()) {
+        return QStringLiteral(GCS_SOURCE_DIR "/icds");
+    }
+#endif
+    return {};
+}
 
 // ---- settings -------------------------------------------------------------------
 
@@ -192,6 +216,14 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
     fx_->setTopInset(barBottom());
     alerts_ = new AlertsPanel(this);
     hud_panel_ = new HudPanel(this);
+    payload_panel_ = new PayloadPanel(this);
+    for (const auto& dev : client_->payloadSnapshot().devices) {
+        if (dev.icd) {
+            if (auto a = payload::makeAdapter(dev.icd->id)) {
+                adapters_[dev.icd->id] = std::move(a);
+            }
+        }
+    }
     pf_ = std::make_unique<PreflightRunner>(client_.get());
     preflight_ = new PreflightScreen(this, pf_.get());
     pf_->onToast = [this](const QString& t, bool good) { fx_->toast(t, good ? kGreen : kRed, QStringLiteral("Preflight")); };
@@ -416,6 +448,18 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
         saveHudConfig();
     });
     connect(hud_panel_, &HudPanel::closeRequested, this, [this] { showHudPanel(false); });
+    // payloads: the generic panel sends any ICD command; numbers come from the pad
+    connect(camera_, &CameraView::payloadPanelRequested, this,
+            [this] { showPayloadPanel(!payload_panel_->isVisible()); });
+    connect(payload_panel_, &PayloadPanel::closeRequested, this, [this] { showPayloadPanel(false); });
+    connect(payload_panel_, &PayloadPanel::commandRequested, this,
+            [this](const QString& icd, const QString& name, const std::vector<double>& args) {
+                client_->sendPayloadCommand(icd.toStdString(), name.toStdString(), args);
+            });
+    connect(payload_panel_, &PayloadPanel::numberRequested, this, [this](const QString& title, int v, int lo, int hi) {
+        pad_->openNumber(title, QStringLiteral("VALUE"), v, lo, hi, {},
+                         [this](int x) { payload_panel_->setEditedNumber(x); });
+    });
     connect(host_, &ViewHost::swapped, this, [this] {
         if (host_->mainView() != camera_) {
             showHudPanel(false);  // it edits the video: only while the video is the main view
@@ -659,6 +703,10 @@ void MainWindow::layoutOverlays() {
         hud_panel_->place(alertsArea());
         fx_->setRightInset(hud_panel_->width() + 8.0);
     }
+    if (payload_panel_->isVisible()) {
+        payload_panel_->place(alertsArea());
+        fx_->setRightInset(payload_panel_->width() + 8.0);
+    }
     strip_->raise();
     panel_->raise();
     orbit_panel_->raise();
@@ -666,6 +714,7 @@ void MainWindow::layoutOverlays() {
     dock_->raise();
     alerts_->raise();
     hud_panel_->raise();
+    payload_panel_->raise();
     fx_->raise();
     if (settings_screen_->isVisible()) {
         settings_screen_->raise();
@@ -713,6 +762,7 @@ void MainWindow::frame() {
         hud_panel_->setLiveVideo(camera_->live());
     }
     hud_panel_->tick(dt);
+    payload_panel_->tick(dt);
     pf_->update(s_, Clock::now(), video_->frameAge());
     preflight_->tick(dt);
     if (preflight_->isOpen() && isAirborne(s_)) {
@@ -845,6 +895,7 @@ link::MavlinkClient::Config MainWindow::linkConfig() const {
     cfg.remote_port = static_cast<uint16_t>(settings_.remote_port);
     cfg.serial_port = settings_.serial_port.toStdString();
     cfg.serial_baud = settings_.serial_baud;
+    cfg.payload_icd_dir = payloadIcdDir().toStdString();
     return cfg;
 }
 
@@ -947,6 +998,7 @@ void MainWindow::showAlerts(bool on) {
         hud_panel_->hide();  // one panel on the right at a time
         camera_->setHudPanelOpen(false);
     }
+    payload_panel_->hide();
     alerts_->setAdvisories(advisories_, linkAlive(s_, Clock::now()));
     alerts_->place(alertsArea());
     alerts_->show();
@@ -954,9 +1006,84 @@ void MainWindow::showAlerts(bool on) {
     fx_->setRightInset(alerts_->width() + 8.0);
 }
 
+void MainWindow::showPayloadPanel(bool on) {
+    if (on) {
+        showAlerts(false);
+        showHudPanel(false);
+        speed_panel_->hide();
+        updatePayload();
+        payload_panel_->place(alertsArea());
+        payload_panel_->show();
+        payload_panel_->raise();
+        fx_->setRightInset(payload_panel_->width() + 8.0);
+    } else if (payload_panel_->isVisible()) {
+        payload_panel_->hide();
+        fx_->setRightInset(0.0);
+    }
+}
+
+void MainWindow::updatePayload() {
+    payload_snap_ = client_->payloadSnapshot();
+    payload_view_.reset();
+    payload_cam_.clear();
+    bool any_alive = false;
+    payload_panel_->setSnapshot(payload_snap_);
+    std::optional<payload::PayloadView> panel_view;
+    std::vector<std::pair<std::string, payload::CommandCall>> actions;
+    for (const auto& dev : payload_snap_.devices) {
+        if (!dev.icd) {
+            continue;
+        }
+        any_alive = any_alive || dev.alive;
+        const auto it = adapters_.find(dev.icd->id);
+        if (it == adapters_.end()) {
+            continue;
+        }
+        const bool selected = dev.icd->id == payload_panel_->selectedIcd();
+        if (selected) {
+            actions = it->second->quickActions(dev);
+        }
+        payload::PayloadView v;
+        if (dev.alive && it->second->view(dev, v)) {
+            if (v.camera && !payload_view_) {
+                payload_view_ = v;
+                payload_cam_ = dev.icd->id;
+            }
+            if (selected) {
+                panel_view = v;
+            }
+        }
+    }
+    payload_panel_->setAdapterInfo(panel_view, actions);
+    camera_->setPayloadChip(!payload_snap_.devices.empty(), payload_panel_->isVisible(), any_alive);
+    const double h = cameraHfov();
+    if (std::abs(h - payload_hfov_sent_) > 0.01) {
+        payload_hfov_sent_ = h;
+        camera_->setCamera(h, settings_.camera_tilt);
+    }
+}
+
+std::optional<CameraLos> MainWindow::payloadLos(const geo::Attitude& aircraft) const {
+    if (!payload_view_ || !payload_view_->camera) {
+        return std::nullopt;
+    }
+    CameraLos los;
+    los.gimbal = true;
+    los.earth = payload_view_->earth;
+    const geo::Attitude rel = geo::relativeTo(aircraft, los.earth);
+    los.pan_rel = rel.yaw_deg;
+    los.tilt_rel = rel.pitch_deg;
+    return los;
+}
+
+double MainWindow::cameraHfov() const {
+    return payload_view_ && payload_view_->hfov_deg > 0.1 ? payload_view_->hfov_deg : settings_.camera_hfov;
+}
+
 void MainWindow::showHudPanel(bool on) {
     if (on) {
         showAlerts(false);
+        payload_panel_->hide();
         speed_panel_->hide();
         hud_panel_->setConfig(camera_->hudConfig());
         hud_panel_->setRulerRef(settings_.hud_reference);
@@ -1317,6 +1444,7 @@ void MainWindow::pullState() {
     for (const auto& ev : client_->pollEvents()) {
         handleEvent(ev);
     }
+    updatePayload();
 
     // mode / VTOL change banners
     if (s_.has_heartbeat && s_.mode_name != last_mode_) {
@@ -1382,7 +1510,9 @@ void MainWindow::updateMotion() {
     const auto now = Clock::now();
     if (s_.has_attitude) {
         const geo::Attitude att = predictAttitude(s_, now);
-        const CameraLos los = cameraLos(s_, att, settings_.camera_tilt, now, settings_.gimbal_body_frame);
+        // a payload reporting its own line of sight (payload adapter) wins over the gimbal
+        const CameraLos los =
+            payloadLos(att).value_or(cameraLos(s_, att, settings_.camera_tilt, now, settings_.gimbal_body_frame));
         camera_->setMotion(att, los);
         map_->setHeading(att.yaw_deg);
         map_->setAttitude(att.roll_deg, att.pitch_deg);
@@ -1435,7 +1565,7 @@ void MainWindow::updateFootprint(const CameraLos& los) {
         return;
     }
     geo::CameraModel cam;
-    cam.hfov_deg = settings_.camera_hfov;
+    cam.hfov_deg = cameraHfov();
     cam.mount_pitch_deg = 0.0;  // los.earth already includes the mount / gimbal
     cam.width = 1600.0;
     cam.height = 1600.0 / camera_->aspect();
@@ -1781,6 +1911,12 @@ void MainWindow::handleEvent(const link::LinkEvent& ev) {
         break;
     case T::Error:
         fx_->toast(text, kRed, QStringLiteral("Error"));
+        break;
+    case T::PayloadResult:
+        payload_panel_->addResult(text, ev.ok);
+        if (!ev.ok) {
+            fx_->toast(text, kRed, QStringLiteral("Payload"));
+        }
         break;
     case T::ParamSet:
         pf_->onEvent(ev);
@@ -2468,15 +2604,28 @@ void MainWindow::sendEndHold(qint64 now_ms) {
 }
 
 void MainWindow::onCameraClick(double px, double py, double w, double h) {
+    if (!guiding_ && payload_view_ && w > 0 && h > 0) {
+        // not guiding: a tap on the video asks the camera payload to track there
+        const auto it = adapters_.find(payload_cam_);
+        if (it != adapters_.end()) {
+            const double nw = 0.08, nh = 0.08 * w / h;
+            if (const auto call = it->second->trackAt(px / w, py / h, nw, nh)) {
+                client_->sendPayloadCommand(payload_cam_, call->name, call->args);
+                fx_->toast(QStringLiteral("Track requested"), kCyan, QStringLiteral("Payload"));
+            }
+        }
+        return;
+    }
     if (!guiding_ || !s_.has_position) {
         return;
     }
-    // cast through the camera's actual line of sight (gimbal, or the fixed mount)
+    // cast through the camera's actual line of sight (payload, gimbal, or the fixed mount)
     const auto now = Clock::now();
     const geo::Attitude att = predictAttitude(s_, now);
-    const CameraLos los = cameraLos(s_, att, settings_.camera_tilt, now, settings_.gimbal_body_frame);
+    const CameraLos los =
+        payloadLos(att).value_or(cameraLos(s_, att, settings_.camera_tilt, now, settings_.gimbal_body_frame));
     geo::CameraModel cam;
-    cam.hfov_deg = settings_.camera_hfov;
+    cam.hfov_deg = cameraHfov();
     cam.mount_pitch_deg = 0.0;  // los.earth already includes the mount / gimbal
     cam.width = w;
     cam.height = h;

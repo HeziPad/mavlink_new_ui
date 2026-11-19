@@ -153,6 +153,27 @@ battery monitor, and the failsafe settings below. The start location comes from:
 
 Any other arguments go to `sim_vehicle.py` (e.g. `tools/sitl.sh --speedup 2`).
 
+### With a NextVision TRIP camera (simulated)
+
+`../nextvision_mavlink_sim` simulates a NextVision TRIP gimbal camera. It is wired like the real one, between the
+autopilot (SITL SERIAL2) and this GCS:
+
+```sh
+../nextvision_mavlink_sim/scripts/sitl_trip.sh --video   # SITL + TRIP; the TRIP talks to 127.0.0.1:14551
+./build/mavlink_gcs_ui
+```
+
+What you get:
+- **Flying:** the vehicle is reached through the TRIP's bridge.
+- **PAYLOAD chip** (next to HUD on the video): opens the camera panel.
+  - Live decoded reports.
+  - Every ICD command, with editable parameters.
+  - Quick modes and sensors.
+- **LOS on the map and HUD:** the camera's line of sight and footprint come from the TRIP's own reports.
+- **Tap-to-track:** tapping the video (when not guiding) starts the TRIP's tracker on that spot.
+
+Other payload ICDs work the same way. Drop a JSON file in `icds/` (see `icds/README.md`).
+
 ### Test video
 
 ```sh

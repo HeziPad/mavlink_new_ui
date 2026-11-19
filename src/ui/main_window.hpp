@@ -10,6 +10,7 @@
 #include "core/vehicle_state.hpp"
 #include "link/link_events.hpp"
 #include "link/mavlink_client.hpp"
+#include "payload/adapter.hpp"
 #include "map_view.hpp"
 #include "settings_screen.hpp"
 
@@ -17,6 +18,7 @@
 #include <QString>
 #include <QWidget>
 
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -39,6 +41,7 @@ class CameraView;
 class ControlDock;
 class FxOverlay;
 class OrbitPanel;
+class PayloadPanel;
 class PlanStrip;
 class PreflightRunner;
 class PreflightScreen;
@@ -237,6 +240,18 @@ private:
     AlertsPanel* alerts_ = nullptr;
     HudPanel* hud_panel_ = nullptr;  // HUD LOADOUT over the video
     void showHudPanel(bool on);
+    // ---- payloads (icds/*.json): the generic panel + adapters (payload/adapter.hpp)
+    PayloadPanel* payload_panel_ = nullptr;
+    void showPayloadPanel(bool on);
+    void updatePayload();
+    // the camera LOS from a payload adapter, when one reports it (else the gimbal / fixed mount)
+    std::optional<CameraLos> payloadLos(const geo::Attitude& aircraft) const;
+    double cameraHfov() const;  // the payload's FOV when it reports one, else the setting
+    std::map<std::string, std::unique_ptr<payload::PayloadAdapter>> adapters_;
+    payload::PayloadSnapshot payload_snap_;
+    std::optional<payload::PayloadView> payload_view_;  // the camera payload's view
+    std::string payload_cam_;                            // its ICD id
+    double payload_hfov_sent_ = 0.0;
     void saveHudConfig();
     std::unique_ptr<PreflightRunner> pf_;
     PreflightScreen* preflight_ = nullptr;

@@ -20,6 +20,7 @@ struct LinkEvent {
         VehicleConnected,  // first heartbeat from a vehicle (sysid in done)
         Error,             // text
         ParamSet,          // tag = name, ok, text = value read back (or the reason)
+        PayloadResult,     // tag = ICD id, text = "Command: RESULT", ok
     };
 
     Type type = Type::StatusText;

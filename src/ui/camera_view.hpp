@@ -50,6 +50,13 @@ public:
     QRectF hudChipRect() const { return QRectF(hud_chip_.topLeft() * hit_k_, hud_chip_.size() * hit_k_); }
     // the chip lights while the HUD panel is open
     void setHudPanelOpen(bool open) { hud_panel_open_ = open; update(); }
+    // the PAYLOAD chip (next to HUD): shown while a payload ICD is loaded
+    QRectF payloadChipRect() const { return QRectF(payload_chip_.topLeft() * hit_k_, payload_chip_.size() * hit_k_); }
+    void setPayloadChip(bool shown, bool open, bool alive) {
+        payload_chip_shown_ = shown;
+        payload_panel_open_ = open;
+        payload_alive_ = alive;
+    }
 
     QString pipTag() const override;
     QColor pipTagColor() const override;
@@ -84,6 +91,7 @@ signals:
     void windNorthUpChanged(bool on);
     void hudConfigChanged();      // a box folded / unfolded, the brackets resized
     void hudPanelRequested();     // the HUD chip
+    void payloadPanelRequested(); // the PAYLOAD chip
 
 protected:
     void paintEvent(QPaintEvent* e) override;
@@ -116,6 +124,8 @@ private:
     void paintVideoTag(QPainter& p);
     QRectF hud_chip_;
     bool hud_panel_open_ = false;
+    QRectF payload_chip_;
+    bool payload_chip_shown_ = false, payload_panel_open_ = false, payload_alive_ = false;
     // side boxes fold to one line: 0 folded .. 1 open, animated
     std::array<double, hud::kBoxes> box_open_{};
     std::array<QRectF, hud::kBoxes> box_hit_{};

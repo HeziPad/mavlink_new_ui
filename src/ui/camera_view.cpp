@@ -386,6 +386,17 @@ void CameraView::paintHudChip(QPainter& p) {
               hud_panel_open_ ? alpha(hud, 0.18) : kGlassDeep);
     drawText(p, hud_chip_, Qt::AlignCenter, hud_panel_open_ ? QStringLiteral("HUD ▴") : QStringLiteral("HUD ▾"),
              labelFont(12), hud);
+    // next to it: the payload panel (payload ICDs)
+    if (!payload_chip_shown_) {
+        payload_chip_ = QRectF();
+        return;
+    }
+    payload_chip_ = QRectF(hud_chip_.right() + 8, kChipY, 120, 32);
+    const QColor c = payload_alive_ ? kGreen : kMuted;
+    drawGlass(p, chamferPath(payload_chip_, 7), payload_panel_open_ ? c : alpha(c, 0.6),
+              payload_panel_open_ ? 0.95 : 0.55, payload_panel_open_ ? alpha(c, 0.18) : kGlassDeep);
+    drawText(p, payload_chip_, Qt::AlignCenter,
+             payload_panel_open_ ? QStringLiteral("PAYLOAD ▴") : QStringLiteral("PAYLOAD ▾"), labelFont(12), c);
 }
 
 void CameraView::paintVideoTag(QPainter& p) {
@@ -397,7 +408,7 @@ void CameraView::paintVideoTag(QPainter& p) {
                              : QStringLiteral("NO VIDEO · built without GStreamer");
     const QFont fnt = labelFont(11);
     const double w = QFontMetricsF(fnt).horizontalAdvance(text) + 26;
-    const QRectF box(hud_chip_.right() + 8, kChipY + 4, w, 24);
+    const QRectF box((payload_chip_.isNull() ? hud_chip_ : payload_chip_).right() + 8, kChipY + 4, w, 24);
     const double blink = reducedMotion() ? 1.0 : 0.6 + 0.4 * std::abs(std::sin(time_ * 2.0));
     drawGlass(p, chamferPath(box, 6), kAmber, 0.7 * blink, kGlassDeep);
     drawText(p, box, Qt::AlignCenter, text, fnt, alpha(kAmber, blink));
@@ -411,6 +422,7 @@ void CameraView::paintHudScaled(QPainter& p) {
     hud_k_ = compact_ ? 1.0 : uiScale();  // the PiP stays compact
     if (compact_) {
         hud_chip_ = QRectF();
+        payload_chip_ = QRectF();
         box_hit_.fill(QRectF());
     }
     hit_k_ = hud_k_;
@@ -816,6 +828,10 @@ void CameraView::pointerPress(const QPointF& physical) {
     const QPointF pos = physical / hit_k_;  // HUD targets are in scaled-HUD coordinates
     if (hud_chip_.contains(pos)) {
         emit hudPanelRequested();
+        return;
+    }
+    if (payload_chip_.contains(pos)) {
+        emit payloadPanelRequested();
         return;
     }
     for (int i = 0; i < hud::kBoxes; ++i) {
