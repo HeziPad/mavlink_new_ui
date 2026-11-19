@@ -173,7 +173,7 @@ and shows `NO VIDEO`.
 | 4 | **Hold** | Instant. Circle where the aircraft is, on the wing (GUIDED). During a landing this is a go-around |
 | 5 | **Land** | **Hold 1 s**. Circle down beside the landing point **L** on the wing, leave into the wind, back-transition and land vertically. Without an L it lands at home the same way |
 
-**Hold and Fly To circles:** while holding (press **Hold** again to hide or show it), or after a Fly To target (press **Fly To** on and off to hide it), a panel above the dock sets the
+**Hold and Fly To circles:** while holding (press **Hold** again to hide or show it), or while the **Fly To** button is on (press it again to adjust the circle it is flying), a panel above the dock sets the
 **altitude** (−10 / −1 / +1 / +10 m, or −50 … +50 ft; 20–5000 m), the
 **radius** (−50 … +50 m, 40–5000 m) and the **direction** (CW / CCW). Holding a
 button repeats and speeds up (×5 after 1 s, ×10 after 2.5 s). Changes apply

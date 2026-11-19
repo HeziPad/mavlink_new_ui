@@ -544,7 +544,15 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
         openCoordPad(QStringLiteral("FLY TO · POSITION"), init, [this](double lat, double lon) { sendGuided(lat, lon); });
     });
     connect(orbit_panel_, &OrbitPanel::altitudeTapped, this, [this] {
-        if (orbit_) {
+        if (guiding_ && guide_draft_) {
+            openAltPad(QStringLiteral("FLY TO · ALTITUDE"), s_.lat, s_.lon, guide_draft_->alt, altitude::kMinAgl,
+                       [this](double rel) {
+                           if (guide_draft_) {
+                               guide_draft_->alt = static_cast<float>(rel);
+                               refreshOrbitPanel();
+                           }
+                       });
+        } else if (orbit_) {
             openAltPad(orbit_->hold ? QStringLiteral("HOLD · ALTITUDE") : QStringLiteral("FLY TO · ALTITUDE"), orbit_->lat,
                        orbit_->lon, orbit_->alt, altitude::kMinAgl, [this](double rel) {
                            if (orbit_) {
@@ -2253,6 +2261,16 @@ void MainWindow::setGuide(bool on) {
     if (on && planning_) {
         exitPlan();
     }
+    // no circle of ours to adjust yet (AUTO, climb-out): the panel edits the
+    // altitude / radius / direction the first target will be flown at
+    guide_draft_.reset();
+    if (on && !(orbit_ && s_.custom_mode == plane::GUIDED)) {
+        Orbit d;
+        d.alt = static_cast<float>(std::max(30.0, std::round(s_.alt_rel)));
+        d.radius = static_cast<float>(defaultRadius());
+        d.hold = false;
+        guide_draft_ = d;
+    }
     if (!planning_) {
         map_->setMode(on ? MapView::Mode::Guide : MapView::Mode::Normal);
     }
@@ -2264,7 +2282,9 @@ void MainWindow::sendGuided(double lat, double lon) {
     takeoff_handoff_ = false;  // a guided target from the hover flies off on the wing
     climb_out_ = false;
     Orbit o;
-    if (orbit_) {
+    if (guide_draft_) {
+        o = *guide_draft_;  // what the panel was set to before the first target
+    } else if (orbit_) {
         o = *orbit_;  // keep the altitude / radius / direction being flown
     } else {
         o.alt = static_cast<float>(std::max(30.0, std::round(s_.alt_rel)));
@@ -2278,8 +2298,9 @@ void MainWindow::sendGuided(double lat, double lon) {
     sendOrbit();
     map_->ping(lat, lon, kCyan);
     dock_->setPending(kGuide, true);
-    // one target per tap on Fly To: the button goes off, the panel stays to adjust the circle
-    hold_panel_hidden_ = false;
+    // one target per press of Fly To: the button and its panel go off (press Fly To
+    // again to adjust this circle or pick a new target); the circle goes on
+    hold_panel_hidden_ = true;
     setGuide(false);
     refreshDock();
 }
@@ -2326,6 +2347,16 @@ void MainWindow::updateOrbitTrim() {
 }
 
 void MainWindow::adjustOrbit(float d_alt, float d_radius, bool flip) {
+    if (guiding_ && guide_draft_) {
+        // nothing flown yet: only the values the first target will use
+        guide_draft_->alt = std::clamp(guide_draft_->alt + d_alt, kMinOrbitAlt, kMaxOrbitAlt);
+        guide_draft_->radius = std::clamp(guide_draft_->radius + d_radius, kMinOrbitRadius, kMaxOrbitRadius);
+        if (flip) {
+            guide_draft_->ccw = !guide_draft_->ccw;
+        }
+        refreshOrbitPanel();
+        return;
+    }
     if (!orbit_) {
         if (onEndHold()) {
             adjustEndHold(d_alt, d_radius, flip);
@@ -2350,12 +2381,15 @@ void MainWindow::adjustOrbit(float d_alt, float d_radius, bool flip) {
 }
 
 void MainWindow::refreshOrbitPanel() {
-    // Hold and a Fly To target: shown until hidden (Hold / Fly To pressed again);
-    // also while Fly To is waiting for a target
+    // Hold: shown until hidden (Hold pressed again); Fly To: while its button is on
     const bool show = orbit_ && (guiding_ || !hold_panel_hidden_) && !planning_ &&
                       s_.custom_mode == plane::GUIDED && isAirborne(s_);
-    orbit_panel_->setCoordButton(show && !orbit_->hold);
-    if (show) {
+    const bool draft = guiding_ && guide_draft_ && !planning_ && isAirborne(s_);
+    orbit_panel_->setCoordButton(draft || (show && !orbit_->hold));
+    if (draft) {
+        orbit_panel_->setValues(QStringLiteral("FLY TO"), guide_draft_->alt, guide_draft_->radius, guide_draft_->ccw,
+                                s_.alt_rel);
+    } else if (show) {
         orbit_panel_->setValues(orbit_->hold ? QStringLiteral("HOLD") : QStringLiteral("FLY TO"), orbit_->alt,
                                 orbit_->radius, orbit_->ccw, s_.alt_rel, orbitDraw().flown, orbitDraw().trimmed);
     } else if (!planning_ && onEndHold()) {
@@ -2536,6 +2570,7 @@ void MainWindow::hold() {
     takeoff_handoff_ = false;
     climb_out_ = false;
     land_pending_ = false;
+    hold_panel_hidden_ = false;  // a new hold always shows its panel
     setGuide(false);
     if (!s_.has_position) {
         return;

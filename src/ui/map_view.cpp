@@ -1493,7 +1493,7 @@ void MapView::paintOrbit(QPainter& p) {
     }
     const QPointF c = toScreen(orbit_->lat, orbit_->lon);
     const double rpx = orbit_->radius / metersPerPixel();
-    const QColor col = orbit_->hold ? kCyan : kAmber;
+    const QColor col = kCyan;  // Hold and Fly To alike (amber is for caution)
     // line from the aircraft while it's still on its way to the circle
     if (has_ac_) {
         const QPointF a = toScreen(ac_lat_, ac_lon_);
