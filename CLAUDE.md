@@ -23,7 +23,22 @@ tools/sitl.sh            # sim_vehicle.py quadplane at your (IP) location, else 
 #          --out=udp:127.0.0.1:14551 --add-param-file=tools/sitl_extra.parm
 ```
 
-There is no linter; the build uses `-Wall -Wextra -Wpedantic` and should stay warning-free. New tests go in `tests/test_<name>.cpp` using the `CHECK` / `CHECK_NEAR` / `TEST_MAIN_RESULT()` macros from `tests/check.hpp` (no framework), and the name must be added to the `foreach` list in `CMakeLists.txt`.
+There is no linter; the build uses `-Wall -Wextra -Wpedantic` (MSVC: `/W4 /permissive- /utf-8`) and should stay warning-free. New tests go in `tests/test_<name>.cpp` using the `CHECK` / `CHECK_NEAR` / `TEST_MAIN_RESULT()` macros from `tests/check.hpp` (no framework), and the name must be added to the `foreach` list in `CMakeLists.txt`.
+
+## Portability (Linux, Windows, macOS)
+
+The app ships on all three; `.github/workflows/build.yml` builds, tests and packages each push on ubuntu / windows (MSVC) / macos. Day-to-day work and SITL stay on Linux, so these rules are what keep the other two working. CI must pass on all three before a merge.
+
+- **OS calls only in shims.** Outside `src/link/*_transport.cpp` (and any future `platform/` file), nothing includes `<sys/*>`, `<unistd.h>`, `<arpa/*>`, `<netinet/*>`, `<poll.h>`, `<fcntl.h>`, `<termios.h>`, `<windows.h>` or `<winsock2.h>`. `ui` uses Qt APIs; `core` is pure standard C++ with no I/O.
+- **No Linux-only APIs**, even in POSIX branches (`eventfd`, `epoll`, `inotify`, `/proc`, `prctl`, `udev`): macOS is POSIX, not Linux. `__linux__`-only extras (like `/dev/serial/by-id` names) need a fallback on the other branches.
+- **Platform `#if`:** only `_WIN32` / `__APPLE__` / `__linux__` (or `Q_OS_*` in ui), only in shims, and every branch must compile. Code you can't compile here gets compiled by CI; push and watch it (`gh run watch`).
+- **Paths:** only `QStandardPaths` / `QDir::filePath` / `QFile`. No hard-coded `/home`, `/tmp`, `~` or `/`-joined absolute paths, and no `fopen(std::string)`, which breaks on non-ASCII paths on Windows.
+- **Fonts:** only the bundled `theme::kSansFamily` / `kMonoFamily` (DejaVu, `resources/fonts`, registered by `theme::loadFonts()`). Never name a font the OS may not have.
+- **Standard C++ only.** It has to build on GCC, Apple Clang and MSVC. So: no `M_PI` (use `geo::kPi`), VLAs, `__attribute__`, `__builtin_*`, `ssize_t` or designated initializers. Get byte order from explicit shifts (as `pmtiles` / `mvt` do), never by casting buffers. Sources are UTF-8.
+- **Links** go through `Transport`. A serial link must survive the port vanishing and coming back (USB unplugged, autopilot reboot).
+- **Input:** every gesture has a touch path *and* a mouse/trackpad path (wheel, `QNativeGestureEvent` pinch on macOS). All typed input goes through `EntryPad`.
+- **DPR:** cached pixmaps are created at `devicePixelRatioF()`. Paint-budget numbers below were measured at DPR 1; a Retina screen paints 4× the pixels, so state the DPR with any new measurement.
+- **Packaging:** Windows is `WIN32_EXECUTABLE` + `resources/windows/*.rc` (icon); macOS is a bundle with `resources/macos/Info.plist.in` (`NSLocalNetworkUsageDescription` is required for UDP from the LAN on macOS 15+). `cmake --install` runs windeployqt / macdeployqt (`qt_generate_deploy_app_script`, Qt ≥ 6.5), and `cpack` makes the ZIP / DMG. zlib is built from source when the system has none (Windows).
 
 ## Architecture
 

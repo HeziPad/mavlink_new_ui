@@ -491,7 +491,7 @@ void MavlinkClient::handleMessage(const mavlink_message_t& msg) {
             }
             had_vehicle_ = true;
             vehicle_locked_ = true;
-            ids_.target_sys = msg.sysid;
+            ids_.target_sys = static_cast<uint8_t>(msg.sysid);
             ids_.target_comp = msg.compid;
             mission_->setIds(ids_);
             commands_->setIds(ids_);
@@ -572,7 +572,7 @@ void MavlinkClient::decodeTelemetry(const mavlink_message_t& msg) {
         mavlink_msg_heartbeat_decode(&msg, &hb);
         s.has_heartbeat = true;
         s.last_heartbeat = now;
-        s.sysid = msg.sysid;
+        s.sysid = static_cast<uint8_t>(msg.sysid);
         s.compid = msg.compid;
         s.mav_type = hb.type;
         s.autopilot = hb.autopilot;

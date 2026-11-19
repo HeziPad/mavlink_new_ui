@@ -1,0 +1,80 @@
+# Builds and tests the GCS on Linux, Windows and macOS for every push and pull
+# request, and keeps the packaged app (ZIP / DMG / tar.gz) as a download.
+name: build
+
+on:
+  push:
+    branches: [main, "**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-24.04
+          - name: Windows
+            os: windows-latest
+            qt_arch: win64_msvc2022_64
+          - name: macOS
+            os: macos-latest
+            qt_arch: clang_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build qt6-base-dev zlib1g-dev libgl1-mesa-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+
+      - name: Qt (Windows, macOS)
+        if: runner.os != 'Linux'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.9.*"
+          arch: ${{ matrix.qt_arch }}
+          cache: true
+
+      - name: Configure
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          else
+            # video needs the GStreamer SDK; the app builds and runs without it
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGCS_WITH_GSTREAMER=OFF
+          fi
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Package
+        shell: bash
+        run: |
+          cd build
+          cpack -C Release
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: mavlink_gcs_ui-${{ runner.os }}
+          path: |
+            build/*.zip
+            build/*.dmg
+            build/*.tar.gz
+          if-no-files-found: warn

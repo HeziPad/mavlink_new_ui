@@ -108,8 +108,8 @@ void SpeedPanel::setValues(double loiter, double cruise, double max, int mode, c
         modes_[i]->setChecked(i == mode);
     }
     static const char* explain[] = {
-        "Circling: LOITER (longest endurance). Between points: CRUISE. Long descents: MAX (gravity pays). "
-        "Landing: CRUISE.",
+        ("Circling: LOITER (longest endurance). Between points: CRUISE. Long descents: MAX (gravity pays). "
+         "Landing: CRUISE."),
         "CRUISE everywhere (ArduPilot's own behaviour).",
         "Between points and on descents: MAX. Circling and landing: CRUISE. Shortens the battery time left."};
     explain_->setText(QString::fromLatin1(explain[std::clamp(mode, 0, 2)]));

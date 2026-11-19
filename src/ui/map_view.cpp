@@ -14,6 +14,7 @@
 #include <QPainter>
 #include <QPointingDevice>
 #include <QRadialGradient>
+#include <QNativeGestureEvent>
 #include <QTouchEvent>
 #include <QWheelEvent>
 
@@ -596,6 +597,25 @@ bool MapView::event(QEvent* e) {
         }
         handleTouch(static_cast<QTouchEvent*>(e));
         return true;
+    case QEvent::NativeGesture: {
+        // a trackpad pinch (macOS, and Linux touchpads): zoom about the fingers
+        auto* g = static_cast<QNativeGestureEvent*>(e);
+        if (compact_ || g->gestureType() != Qt::ZoomNativeGesture) {
+            return HudView::event(e);
+        }
+        touch_input_ = false;
+        const QPointF pos = g->position();
+        double lat = 0.0, lon = 0.0;
+        toLatLon(pos, lat, lon);
+        zoom_ = zoom_target_ = std::clamp(zoom_ + std::log2(std::max(0.1, 1.0 + g->value())), kMinZoom, kMaxZoom);
+        if (!follow_) {
+            const QPointF w = worldPx(lat, lon, zoom_) - (pos - QPointF(width() / 2.0, height() / 2.0));
+            worldToLatLon(w, zoom_, clat_, clon_);
+        }
+        anchor_valid_ = false;
+        update();
+        return true;
+    }
     default:
         return HudView::event(e);
     }
@@ -1161,9 +1181,9 @@ void MapView::buildBackdrop(const QPointF& world_tl, const QSize& size) {
     bd_.trail_n = s_.trail.size();
     bd_.trail_first = 0;
     if (trail_on_ && s_.trail.size() > 1) {
-        const size_t first = trailFirst();
-        bd_.trail_first = first;
-        paintTrail(p, world_tl, first, s_.trail.size(), first, s_.trail.size() - first);
+        const size_t first_pt = trailFirst();
+        bd_.trail_first = first_pt;
+        paintTrail(p, world_tl, first_pt, s_.trail.size(), first_pt, s_.trail.size() - first_pt);
     }
     bd_.world_tl = world_tl;
     bd_.zoom = zoom_;

@@ -1,4 +1,5 @@
 #include "vector_map.hpp"
+#include "core/geo.hpp"
 
 #include "core/gzip.hpp"
 #include "core/mvt.hpp"
@@ -359,7 +360,7 @@ void drawLabels(Ctx& c, const mvt::Tile& t) {
                     }
                 }
                 if (best.length() < w + 16) continue;
-                double ang = std::atan2(best.dy(), best.dx()) * 180.0 / M_PI;
+                double ang = std::atan2(best.dy(), best.dx()) * 180.0 / geo::kPi;
                 if (ang > 90) ang -= 180;
                 if (ang < -90) ang += 180;  // never upside down
                 const QPointF mid = best.center();

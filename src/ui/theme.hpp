@@ -27,6 +27,15 @@ inline const QColor kMuted{0x7d, 0x93, 0xa6};
 QColor alpha(QColor c, double a);
 QColor mix(const QColor& a, const QColor& b, double t);
 
+// The two font families, bundled in resources/fonts and registered by
+// loadFonts() at startup, so text looks and measures the same on Linux,
+// Windows and macOS. Stylesheets name them literally ("DejaVu Sans",
+// "DejaVu Sans Mono"); never name a font the OS may not have.
+inline constexpr const char* kSansFamily = "DejaVu Sans";
+inline constexpr const char* kMonoFamily = "DejaVu Sans Mono";
+// Registers the bundled fonts; false if one is missing from the resources.
+bool loadFonts();
+
 QFont monoFont(double px, bool bold = false);     // numerics, tabular digits
 QFont labelFont(double px, bool bold = true);     // small letter-spaced uppercase
 QFont titleFont(double px);                       // banners

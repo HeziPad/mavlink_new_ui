@@ -1,4 +1,5 @@
 #include "app_icon.hpp"
+#include "core/geo.hpp"
 
 #include "theme.hpp"
 
@@ -37,7 +38,7 @@ QImage appIconImage(int size) {
         p.drawEllipse(QPointF(256, 262), 176, 176);
         p.setPen(QPen(alpha(kCyan, 0.35), 8, Qt::SolidLine, Qt::FlatCap));
         for (int k = 0; k < 4; ++k) {
-            const double a = k * M_PI / 2;
+            const double a = k * geo::kPi / 2;
             p.drawLine(QPointF(256 + std::cos(a) * 176, 262 + std::sin(a) * 176),
                        QPointF(256 + std::cos(a) * 204, 262 + std::sin(a) * 204));
         }

@@ -1,5 +1,6 @@
 #include "link/serial_transport.hpp"
 #include "ui/app_icon.hpp"
+#include "ui/theme.hpp"
 #include "ui/main_window.hpp"
 
 #include <QApplication>
@@ -25,7 +26,10 @@ int main(int argc, char* argv[]) {
     QApplication::setDesktopFileName(QStringLiteral("mavlink_gcs_ui"));
     qSetMessagePattern(QStringLiteral("%{message}"));
 
-    QFont base(QStringLiteral("DejaVu Sans"));
+    if (!gcs::ui::theme::loadFonts()) {
+        qWarning("bundled fonts missing from the resources: text will use a system font");
+    }
+    QFont base(QString::fromLatin1(gcs::ui::theme::kSansFamily));
     base.setPixelSize(13);
     QApplication::setFont(base);
     app.setStyleSheet(QStringLiteral(

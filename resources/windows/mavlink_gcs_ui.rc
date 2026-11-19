@@ -1,0 +1,2 @@
+// Windows: the .exe icon (Explorer, taskbar before Qt sets the window icon)
+IDI_ICON1 ICON "../icons/mavlink_gcs_ui.ico"
