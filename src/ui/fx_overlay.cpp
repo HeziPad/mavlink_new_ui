@@ -131,18 +131,28 @@ void FxOverlay::tick(double dt) {
     }
 }
 
+double FxOverlay::lw() const {
+    return width() / uiScale();
+}
+
+double FxOverlay::lh() const {
+    return height() / uiScale();
+}
+
 void FxOverlay::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
+    // text size: toasts, banner and alert grow; laid out in logical pixels
+    p.scale(uiScale(), uiScale());
     paintAlert(p);
     paintBanner(p);
     paintToasts(p);
 }
 
 void FxOverlay::paintToasts(QPainter& p) {
-    const double w = std::min(400.0, width() * 0.36);
+    const double w = std::min(400.0, lw() * 0.36);
     const double h = 42.0;
-    double y = top_inset_ + 14;
+    double y = top_inset_ / uiScale() + 14;
     size_t shown = 0;
     for (const auto& t : toasts_) {
         if (shown >= kToastVisible) {
@@ -153,7 +163,7 @@ void FxOverlay::paintToasts(QPainter& p) {
         // older entries shrink into a compact feed line
         const double compact = shown >= 1 ? 0.84 : 1.0;
         const double rh = h * compact;
-        const QRectF r(width() - 16 - right_inset_ - w + (1.0 - in) * (w + 30), y, w, rh);
+        const QRectF r(lw() - 16 - right_inset_ / uiScale() - w + (1.0 - in) * (w + 30), y, w, rh);
         p.save();
         p.setOpacity(out * (shown >= 2 ? 0.75 : 1.0));
         drawGlass(p, chamferPath(r, 9), t.color, 0.45, kGlassDeep);
@@ -195,10 +205,10 @@ void FxOverlay::paintBanner(QPainter& p) {
     const double t = banner_.t;
     const double sweep = easeOutCubic(t / 0.25);
     const double fade = std::clamp((kBannerLife - t) / 0.45, 0.0, 1.0);
-    const double cy = height() * 0.27;
-    const double fullw = std::min(width() * 0.7, 720.0);
+    const double cy = lh() * 0.27;
+    const double fullw = std::min(lw() * 0.7, 720.0);
     const double w = fullw * sweep;
-    const QRectF band(width() / 2.0 - w / 2.0, cy - 30, w, 60);
+    const QRectF band(lw() / 2.0 - w / 2.0, cy - 30, w, 60);
 
     p.save();
     p.setOpacity(fade);
@@ -231,7 +241,7 @@ void FxOverlay::paintAlert(QPainter& p) {
     const double pulse = reducedMotion() ? 0.7 : 0.55 + 0.45 * std::abs(std::sin(alert_t_ * 3.0));
 
     // edge vignette
-    const QRectF r = rect();
+    const QRectF r = QRectF(0, 0, lw(), lh());
     QRadialGradient g(r.center(), std::hypot(r.width(), r.height()) / 2.0);
     g.setColorAt(0.0, QColor(0, 0, 0, 0));
     g.setColorAt(0.62, QColor(0, 0, 0, 0));
@@ -247,7 +257,7 @@ void FxOverlay::paintAlert(QPainter& p) {
     const QFont hf = labelFont(9.5);
     const double hw = QFontMetricsF(hf).horizontalAdvance(hint) + 20;
     const double w = QFontMetricsF(f).horizontalAdvance(text) + 56 + hw;
-    const QRectF box(width() / 2.0 - w / 2.0, top_inset_ + 10, w, 44);  // finger-sized: it opens the help
+    const QRectF box(lw() / 2.0 - w / 2.0, top_inset_ / uiScale() + 10, w, 44);  // finger-sized: it opens the help
     p.save();
     p.setOpacity(alert_fade_);
     drawGlass(p, chamferPath(box, 10), kRed, 0.9, QColor(40, 6, 12, 220));
@@ -260,7 +270,7 @@ void FxOverlay::paintAlert(QPainter& p) {
     drawText(p, hr, Qt::AlignCenter, hint, hf, alpha(kRed, 0.95));
     p.restore();
     if (alert_fade_ > 0.5) {
-        alert_rect_ = box;
+        alert_rect_ = QRectF(box.topLeft() * uiScale(), box.size() * uiScale());  // physical: MainWindow hit-tests it
     }
 }
 

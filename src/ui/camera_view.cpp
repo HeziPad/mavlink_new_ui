@@ -138,7 +138,7 @@ void CameraView::tick(double dt) {
 }
 
 double CameraView::focal() const {
-    return (width() / 2.0) / tanDeg(hfov_ / 2.0);
+    return (width() / hud_k_ / 2.0) / tanDeg(hfov_ / 2.0);
 }
 
 // A point at `elevation` above the horizon, in the frame rotated by the image
@@ -181,13 +181,14 @@ void CameraView::mousePressEvent(QMouseEvent* e) {
     if (compact_ || e->button() != Qt::LeftButton) {
         return;
     }
-    if (wind_rect_.contains(e->position())) {
+    const QPointF pos = e->position() / hit_k_;  // HUD targets are in scaled-HUD coordinates
+    if (wind_rect_.contains(pos)) {
         wind_north_up_ = !wind_north_up_;
         emit windNorthUpChanged(wind_north_up_);
         update();
         return;
     }
-    if (ref_chip_.contains(e->position())) {
+    if (ref_chip_.contains(pos)) {
         setHudReference(ref_ == HudRef::Los ? HudRef::Body : HudRef::Los, true);
         emit hudReferenceChanged(static_cast<int>(ref_));
         return;
@@ -252,7 +253,7 @@ void CameraView::paintEvent(QPaintEvent*) {
         {
             QPainter hp(&hud_img_);
             hp.setRenderHint(QPainter::Antialiasing);
-            paintHud(hp);
+            paintHudScaled(hp);
         }
         {
             // the same shapes in near-black: copy, then recolour keeping alpha
@@ -268,7 +269,7 @@ void CameraView::paintEvent(QPaintEvent*) {
         }
         p.drawImage(QPointF(0, 0), hud_img_);
     } else {
-        paintHud(p);
+        paintHudScaled(p);
     }
     finishView(p);
 }
@@ -340,9 +341,23 @@ void CameraView::paintSynthetic(QPainter& p) {
     }
 }
 
+QRectF CameraView::hudRect() const {
+    return {0.0, 0.0, width() / hud_k_, height() / hud_k_};
+}
+
+void CameraView::paintHudScaled(QPainter& p) {
+    hud_k_ = compact_ ? 1.0 : uiScale();  // the PiP stays compact
+    hit_k_ = hud_k_;
+    p.save();
+    p.scale(hud_k_, hud_k_);
+    paintHud(p);
+    p.restore();
+    hud_k_ = 1.0;
+}
+
 CameraView::Layout CameraView::layout() const {
     Layout l;
-    const QRectF r = rect();
+    const QRectF r = hudRect();
     const QPointF c = r.center();
     constexpr double kColX = 16, kColW = 200;
     l.target = QRectF(kColX, 120, kColW, 112);
@@ -360,7 +375,7 @@ CameraView::Layout CameraView::layout() const {
 }
 
 void CameraView::paintHud(QPainter& p) {
-    const QRectF r = rect();
+    const QRectF r = hudRect();
     const QPointF c = r.center();
     const QColor hud = kGreen;
     const double f = focal();
@@ -506,7 +521,8 @@ void CameraView::paintHud(QPainter& p) {
         const double e = easeOutCubic(std::min(1.0, click_t_ / 0.25));
         const double a = 1.0 - std::clamp((click_t_ - 0.6) / 0.6, 0.0, 1.0);
         const double s = 34 - 16 * e;
-        drawBrackets(p, QRectF(click_.x() - s, click_.y() - s, 2 * s, 2 * s), 8, alpha(kCyan, a), 2.0);
+        const QPointF at = click_ / hud_k_;  // the tap was in widget pixels
+        drawBrackets(p, QRectF(at.x() - s, at.y() - s, 2 * s, 2 * s), 8, alpha(kCyan, a), 2.0);
     }
 }
 
@@ -594,10 +610,19 @@ void CameraView::paintWind(QPainter& p) {
     wind_rect_ = layout().wind;
     // the PiP sits bottom-left (ViewHost::pipRect: 30 % of the width, 16:10);
     // in a small window there's no room for the gauge above it
-    const double pip_top = height() - 16.0 - std::clamp(width() * 0.30, 240.0, 420.0) * 10.0 / 16.0;
+    const double pip_top = (height() - 16.0 - std::clamp(width() * 0.30, 240.0, 420.0) * 10.0 / 16.0) / hud_k_;
     if (wind_rect_.bottom() > pip_top - 8.0) {
-        wind_rect_ = QRectF();
-        return;
+        // no room above it (a short window, or a large text size): bottom right,
+        // clear of the dock in the middle and the altitude tape above
+        const QRectF r = hudRect();
+        const QRectF br(r.width() - 16.0 - wind_rect_.width(), r.height() - 16.0 - wind_rect_.height(),
+                        wind_rect_.width(), wind_rect_.height());
+        const double dock_right = (width() + sc(528.0)) / 2.0 / hud_k_;  // ControlDock, centred
+        if (br.left() < dock_right + 8.0 || br.top() < layout().alt_tape.bottom() + 8.0) {
+            wind_rect_ = QRectF();
+            return;
+        }
+        wind_rect_ = br;
     }
     const QRectF& wb = wind_rect_;
     p.setPen(QPen(alpha(hud, 0.5), 1));

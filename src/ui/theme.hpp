@@ -8,8 +8,11 @@
 #include <QFont>
 #include <QPainterPath>
 #include <QRectF>
+#include <QSizeF>
+#include <QString>
 
 class QPainter;
+class QWidget;
 
 namespace gcs::ui::theme {
 
@@ -59,5 +62,33 @@ void drawText(QPainter& p, const QRectF& r, int flags, const QString& text, cons
 
 bool reducedMotion();
 void setReducedMotion(bool on);
+
+// ---- text size (Settings > DISPLAY) -------------------------------------------------
+// Every size in the UI code is a logical pixel at Small. The chosen text size
+// scales text *and* the boxes around it, applied in one of two ways (never
+// both, or a font grows twice):
+//  - widgets that are all HUD chrome (bar, dock, settings, alerts, preflight,
+//    toasts) scale their painter by uiScale() and lay out in size()/uiScale()
+//    (logicalSize(), toLogical());
+//  - views (map, camera) keep their picture and scale only the HUD on top,
+//    through sc(); stylesheets go through cssPx().
+enum class TextSize { Small = 0, Medium = 1, Large = 2 };
+double scaleFor(TextSize t);  // 1.0 / 1.25 / 1.5
+double uiScale();
+void setUiScale(double k);
+inline double sc(double px) { return px * uiScale(); }
+int sci(double px);                             // sc(), rounded, for widget/layout sizes
+QString cssPx(double px);                       // "16px", scaled and rounded
+// A stylesheet written at Small with every "NNpx" scaled (fonts, padding,
+// min sizes, letter spacing); 1px hairlines stay 1px.
+QString scaleCss(const QString& css);
+// For QWidget panels built with layouts at Small: scales every layout's
+// margins, spacing and fixed spacers, and every child's min / max size. The
+// Small values are remembered on the first call, so it can run again on each
+// text-size change (and after adding children). Sizes a panel recomputes from
+// its scaled fonts later on (setInfo-style) simply get recomputed.
+void scaleWidgetTree(QWidget* root);
+QSizeF logicalSize(const QSizeF& physical);     // physical / uiScale()
+QPointF toLogical(const QPointF& physical);     // a tap, in the scaled painter's coordinates
 
 }  // namespace gcs::ui::theme

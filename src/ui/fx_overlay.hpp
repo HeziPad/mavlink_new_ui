@@ -57,7 +57,9 @@ private:
     QString alert_;
     double alert_t_ = 0.0;
     double alert_fade_ = 0.0;
-    double top_inset_ = 64.0;
+    double top_inset_ = 64.0;   // physical px
+    double lw() const;          // the widget in logical (text-size scaled) pixels
+    double lh() const;
     QRectF alert_rect_;
     double right_inset_ = 0.0;
     double right_inset_target_ = 0.0;

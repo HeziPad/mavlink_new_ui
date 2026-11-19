@@ -30,6 +30,34 @@ namespace {
 
 constexpr int kKey = 58;  // px: comfortably finger-sized
 
+// written at text size Small; applyScale() scales every px
+const char* const kSheet = R"(
+        QLabel { background: transparent; color: #e6f1f8; }
+        QLabel#padTitle { color: #3fe0ff; font: bold 16px "DejaVu Sans"; letter-spacing: 2px; }
+        QLabel#padRowName { color: #7d93a6; font: bold 13px "DejaVu Sans"; min-width: 84px; }
+        QLabel#padUnit { color: #9fb4c6; font: bold 24px "DejaVu Sans Mono"; }
+        QLabel#padPreview { font: 13px "DejaVu Sans Mono"; color: #9fb4c6; }
+        QLineEdit {
+            font: bold 28px "DejaVu Sans Mono"; color: #e6f1f8;
+            background: rgba(0, 0, 0, 0.35); border: 1px solid rgba(63, 224, 255, 0.35);
+            padding: 4px 8px; selection-background-color: rgba(63, 224, 255, 0.45);
+        }
+        QLineEdit[active="true"] { border: 2px solid #3fe0ff; background: rgba(63, 224, 255, 0.10); }
+        QPushButton {
+            background: rgba(63, 224, 255, 0.06); color: #e6f1f8;
+            border: 1px solid rgba(63, 224, 255, 0.45); padding: 0 10px;
+            font: bold 17px "DejaVu Sans Mono";
+        }
+        QPushButton:hover { background: rgba(63, 224, 255, 0.18); border-color: #3fe0ff; }
+        QPushButton:pressed { background: rgba(63, 224, 255, 0.30); }
+        QPushButton:disabled { color: #4a5a68; border-color: rgba(125, 147, 166, 0.25); }
+        QPushButton#padSel { font: bold 13px "DejaVu Sans"; }
+        QPushButton#padSel:checked { background: rgba(63, 224, 255, 0.22); border-color: #3fe0ff; color: #3fe0ff; }
+        QPushButton#padOk { border-color: rgba(92, 255, 157, 0.7); color: #5cff9d; }
+        QPushButton#padMin { border-color: rgba(255, 181, 71, 0.7); color: #ffb547; font: bold 14px "DejaVu Sans"; }
+        QPushButton#padCancel { border-color: rgba(255, 77, 94, 0.6); }
+    )";
+
 QPushButton* key(const QString& text, const QString& name = {}) {
     auto* b = new QPushButton(text);
     b->setFocusPolicy(Qt::NoFocus);  // the box being typed into keeps the focus (and its cursor)
@@ -47,7 +75,7 @@ const char* kRefNames[] = {"ASL", "AGL", "AFL"};
 class ThickCursorStyle : public QProxyStyle {
 public:
     int pixelMetric(PixelMetric m, const QStyleOption* o = nullptr, const QWidget* w = nullptr) const override {
-        return m == PM_TextCursorWidth ? 3 : QProxyStyle::pixelMetric(m, o, w);
+        return m == PM_TextCursorWidth ? std::max(3, sci(3)) : QProxyStyle::pixelMetric(m, o, w);
     }
 };
 
@@ -260,32 +288,15 @@ void EntryPad::build() {
         }
     });
 
-    card_->setStyleSheet(QStringLiteral(R"(
-        QLabel { background: transparent; color: #e6f1f8; }
-        QLabel#padTitle { color: #3fe0ff; font: bold 16px "DejaVu Sans"; letter-spacing: 2px; }
-        QLabel#padRowName { color: #7d93a6; font: bold 13px "DejaVu Sans"; min-width: 84px; }
-        QLabel#padUnit { color: #9fb4c6; font: bold 24px "DejaVu Sans Mono"; }
-        QLabel#padPreview { font: 13px "DejaVu Sans Mono"; color: #9fb4c6; }
-        QLineEdit {
-            font: bold 28px "DejaVu Sans Mono"; color: #e6f1f8;
-            background: rgba(0, 0, 0, 0.35); border: 1px solid rgba(63, 224, 255, 0.35);
-            padding: 4px 8px; selection-background-color: rgba(63, 224, 255, 0.45);
-        }
-        QLineEdit[active="true"] { border: 2px solid #3fe0ff; background: rgba(63, 224, 255, 0.10); }
-        QPushButton {
-            background: rgba(63, 224, 255, 0.06); color: #e6f1f8;
-            border: 1px solid rgba(63, 224, 255, 0.45); padding: 0 10px;
-            font: bold 17px "DejaVu Sans Mono";
-        }
-        QPushButton:hover { background: rgba(63, 224, 255, 0.18); border-color: #3fe0ff; }
-        QPushButton:pressed { background: rgba(63, 224, 255, 0.30); }
-        QPushButton:disabled { color: #4a5a68; border-color: rgba(125, 147, 166, 0.25); }
-        QPushButton#padSel { font: bold 13px "DejaVu Sans"; }
-        QPushButton#padSel:checked { background: rgba(63, 224, 255, 0.22); border-color: #3fe0ff; color: #3fe0ff; }
-        QPushButton#padOk { border-color: rgba(92, 255, 157, 0.7); color: #5cff9d; }
-        QPushButton#padMin { border-color: rgba(255, 181, 71, 0.7); color: #ffb547; font: bold 14px "DejaVu Sans"; }
-        QPushButton#padCancel { border-color: rgba(255, 77, 94, 0.6); }
-    )"));
+    applyScale();
+}
+
+void EntryPad::applyScale() {
+    card_->setStyleSheet(scaleCss(QString::fromUtf8(kSheet)));
+    scaleWidgetTree(this);  // the fields of the open entry are rebuilt at Small sizes, so it runs on each open too
+    if (isVisible()) {
+        layoutCard();
+    }
 }
 
 // ---- the boxes ------------------------------------------------------------------------------
@@ -511,6 +522,7 @@ void EntryPad::showFor(Kind kind) {
     nudge_keys_->setVisible(kind == Kind::Altitude);
     presets_->setVisible((kind == Kind::Duration || kind == Kind::Address || kind == Kind::Number) &&
                          presets_->layout()->count() > 0);
+    scaleWidgetTree(this);  // this entry's fields and chips were just built at Small sizes
     for (auto* w : fields_->findChildren<QWidget*>()) {
         w->ensurePolished();
     }
@@ -1041,7 +1053,7 @@ void EntryPad::layoutCard() {
     fields_->layout()->invalidate();
     card_->layout()->invalidate();
     card_->layout()->activate();
-    const QSize s = card_->layout()->sizeHint().expandedTo(QSize(640, 0));
+    const QSize s = card_->layout()->sizeHint().expandedTo(QSize(sci(640), 0));
     card_->resize(s);
     card_->move((width() - s.width()) / 2, std::max(20, (height() - s.height()) / 2));
     update();

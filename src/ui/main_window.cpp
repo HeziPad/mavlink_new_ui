@@ -79,6 +79,7 @@ AppSettings AppSettings::load() {
     s.trail_secs = q.value(QStringLiteral("map/trail_secs"), s.trail_secs).toInt();
     s.battery_reserve_pct =
         std::clamp(q.value(QStringLiteral("flight/battery_reserve_pct"), s.battery_reserve_pct).toInt(), 15, 50);
+    s.text_size = std::clamp(q.value(QStringLiteral("display/text_size"), s.text_size).toInt(), 0, 2);
 
     // seed missing keys so the settings file is discoverable and hand-editable
     const std::pair<const char*, QVariant> defaults[] = {
@@ -126,6 +127,7 @@ void AppSettings::save() const {
     q.setValue(QStringLiteral("map/trail_on"), trail_on);
     q.setValue(QStringLiteral("map/trail_secs"), trail_secs);
     q.setValue(QStringLiteral("flight/battery_reserve_pct"), battery_reserve_pct);
+    q.setValue(QStringLiteral("display/text_size"), text_size);
 }
 
 // ---- construction ---------------------------------------------------------------
@@ -139,6 +141,7 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
     pal.setColor(QPalette::Window, kBg);
     setPalette(pal);
     setReducedMotion(settings_.reduced_motion);
+    setUiScale(scaleFor(static_cast<TextSize>(settings_.text_size)));  // before any widget is built
     units::setAltUnit(settings_.alt_unit == 1 ? units::Alt::Feet : units::Alt::Meters);
     units::setSpeedUnit(static_cast<units::Speed>(settings_.speed_unit));
     units::setCoordFormat(static_cast<coords::Fmt>(settings_.coord_format));
@@ -182,7 +185,7 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
     bar_ = new TelemetryBar(this);
     dock_ = new ControlDock(this);
     fx_ = new FxOverlay(this);
-    fx_->setTopInset(58);
+    fx_->setTopInset(barBottom());
     alerts_ = new AlertsPanel(this);
     pf_ = std::make_unique<PreflightRunner>(client_.get());
     preflight_ = new PreflightScreen(this, pf_.get());
@@ -216,7 +219,7 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
             return;
         }
         refreshSpeedPanel();
-        speed_panel_->move(std::max(8, width() / 2 + 120), 64);
+        speed_panel_->move(std::max(8, width() / 2 + static_cast<int>(120 * bar_->effectiveScale())), barBottom() + 4);
         speed_panel_->show();
         speed_panel_->raise();
     });
@@ -249,6 +252,7 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
         v.trail_secs = settings_.trail_secs;
         v.labels_english = vector_map_->english();
         v.reserve_pct = settings_.battery_reserve_pct;
+        v.text_size = settings_.text_size;
         v.link = linkValues();
         refreshOfflineCounts();
         updateLinkStatus();
@@ -375,6 +379,7 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
         settings_.save();
         endurance_ms_ = -1000000;  // recompute now
     });
+    connect(settings_screen_, &SettingsScreen::textSizeChanged, this, &MainWindow::applyTextSize);
     connect(settings_screen_, &SettingsScreen::trailChanged, this, [this](bool on, int secs) {
         settings_.trail_on = on;
         settings_.trail_secs = secs;
@@ -608,12 +613,13 @@ void MainWindow::resizeEvent(QResizeEvent* e) {
 
 void MainWindow::layoutOverlays() {
     host_->setGeometry(rect());
-    bar_->setGeometry(8, 8, width() - 16, 52);
+    bar_->setGeometry(8, 8, width() - 16, bar_->heightFor(width() - 16));
     const QSize ds = dock_->sizeHint();
     dock_->setGeometry((width() - ds.width()) / 2, height() - ds.height() - 10, ds.width(), ds.height());
+    fx_->setTopInset(strip_->isVisible() ? strip_->geometry().bottom() + 4 : barBottom());
     host_->setPipMaxWidth((width() - ds.width()) / 2.0 - 32.0);
     strip_->adjustSize();
-    strip_->move((width() - strip_->width()) / 2, 66);
+    strip_->move((width() - strip_->width()) / 2, barBottom() + 6);
     panel_->adjustSize();
     panel_->move((width() - panel_->width()) / 2, height() - ds.height() - 18 - panel_->height());
     orbit_panel_->move(orbitPanelX(), height() - ds.height() - 18 - orbit_panel_->height());
@@ -726,8 +732,32 @@ int MainWindow::orbitPanelX() const {
     return std::max(centred, std::min(clear, width() - orbit_panel_->width() - 8));
 }
 
+int MainWindow::barBottom() const {
+    return bar_->geometry().bottom() + 1;
+}
+
+void MainWindow::applyTextSize(int size) {
+    settings_.text_size = std::clamp(size, 0, 2);
+    settings_.save();
+    setUiScale(scaleFor(static_cast<TextSize>(settings_.text_size)));
+    // stylesheet panels rebuild their sheets; painted widgets read uiScale() on their next paint
+    strip_->applyScale();
+    panel_->applyScale();
+    orbit_panel_->applyScale();
+    speed_panel_->applyScale();
+    pad_->applyScale();
+    layoutOverlays();
+    refreshPlanStrip();
+    if (speed_panel_->isVisible()) {
+        speed_panel_->move(std::max(8, width() / 2 + static_cast<int>(120 * bar_->effectiveScale())), barBottom() + 4);
+    }
+    for (QWidget* w : findChildren<QWidget*>()) {
+        w->update();
+    }
+}
+
 QRect MainWindow::alertsArea() const {
-    const int top = 66;
+    const int top = barBottom() + 6;
     const int bottom = height() - dock_->sizeHint().height() - 20;
     return QRect(8, top, width() - 16, std::max(160, bottom - top));
 }
@@ -1988,7 +2018,7 @@ void MainWindow::exitPlan() {
     planning_ = false;
     map_->setMode(guiding_ ? MapView::Mode::Guide : MapView::Mode::Normal);
     strip_->hide();
-    fx_->setTopInset(58);
+    fx_->setTopInset(barBottom());
     refreshPanel();
     refreshDock();
 }
@@ -1998,9 +2028,9 @@ void MainWindow::refreshPlanStrip() {
     const double route = routeLength(plan);
     strip_->setInfo(static_cast<int>(plan.wps.size()), route, route / std::max(1.0, settings_.cruise_speed),
                     plan.land.has_value(), map_->canUndo(), plan.pattern);
-    strip_->move((width() - strip_->width()) / 2, 66);
+    strip_->move((width() - strip_->width()) / 2, barBottom() + 6);
     // keep toasts / alerts clear of the strip's buttons
-    fx_->setTopInset(strip_->isVisible() ? strip_->geometry().bottom() + 4 : 58);
+    fx_->setTopInset(strip_->isVisible() ? strip_->geometry().bottom() + 4 : barBottom());
     refreshPanel();
     refreshDock();
 }

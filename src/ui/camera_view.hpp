@@ -101,6 +101,12 @@ private:
     Layout layout() const;
     void paintSynthetic(QPainter& p);
     void paintHud(QPainter& p);
+    // The HUD grows with the text size: it is painted scaled by hud_k_ in a
+    // logical rect (hudRect); focal() follows, so the ladder stays true to the FOV.
+    void paintHudScaled(QPainter& p);
+    QRectF hudRect() const;
+    double hud_k_ = 1.0;   // while painting the HUD
+    double hit_k_ = 1.0;   // the scale the HUD's tap targets were laid out at
     void paintHeadingTape(QPainter& p, const QRectF& r);
     void paintReadouts(QPainter& p);
     void paintVerticalTape(QPainter& p, const QRectF& r, double value, double step, bool left,

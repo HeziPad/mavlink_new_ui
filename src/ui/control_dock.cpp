@@ -28,18 +28,26 @@ ControlDock::ControlDock(QWidget* parent) : QWidget(parent) {
     setFocusPolicy(Qt::NoFocus);
 }
 
+namespace {
+// the dock at text size Small; it is painted scaled by uiScale()
+QSizeF logicalHint() {
+    constexpr int n = ControlDock::kSlots;
+    return {n * kSlotW + (n - 1) * kGap + 2 * kPad, kSlotH + 2 * kPad + 6};
+}
+}  // namespace
+
 QSize ControlDock::sizeHint() const {
-    return QSize(static_cast<int>(kSlots * kSlotW + (kSlots - 1) * kGap + 2 * kPad),
-                 static_cast<int>(kSlotH + 2 * kPad + 6));
+    return (logicalHint() * uiScale()).toSize();
 }
 
 QRectF ControlDock::slotRect(int i) const {
-    const QSize sh = sizeHint();
-    const double x0 = (width() - sh.width()) / 2.0 + kPad;
+    // logical (painter-scaled) coordinates
+    const double x0 = (logicalSize(size()).width() - logicalHint().width()) / 2.0 + kPad;
     return {x0 + i * (kSlotW + kGap), kPad + 4, kSlotW, kSlotH};
 }
 
-int ControlDock::slotAt(const QPointF& pos) const {
+int ControlDock::slotAt(const QPointF& physical) const {
+    const QPointF pos = toLogical(physical);
     for (int i = 0; i < kSlots; ++i) {
         if (slotRect(i).contains(pos)) {
             return i;
@@ -217,7 +225,7 @@ void ControlDock::mouseReleaseEvent(QMouseEvent* e) {
         }
     }
     auto& s = slots_[i];
-    if (s.down && !s.consumed && !slotRect(i).adjusted(-12, -12, 12, 12).contains(e->position())) {
+    if (s.down && !s.consumed && !slotRect(i).adjusted(-12, -12, 12, 12).contains(toLogical(e->position()))) {
         // dragged off the slot: cancel rather than fire
         s.down = false;
         if (s.spec.hold_to_confirm) {
@@ -264,9 +272,10 @@ bool ControlDock::event(QEvent* e) {
 void ControlDock::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
+    p.scale(uiScale(), uiScale());  // text size: the whole dock grows
 
-    const QSize sh = sizeHint();
-    const QRectF bar((width() - sh.width()) / 2.0, 4, sh.width(), sh.height() - 6);
+    const QSizeF sh = logicalHint();
+    const QRectF bar((logicalSize(size()).width() - sh.width()) / 2.0, 4, sh.width(), sh.height() - 6);
     drawGlass(p, chamferPath(bar, 18), kCyan, 0.35, kGlassDeep);
     p.setPen(QPen(alpha(kCyan, 0.8), 2));
     p.drawLine(QPointF(bar.left() + 2, bar.top() + 18), QPointF(bar.left() + 18, bar.top() + 2));

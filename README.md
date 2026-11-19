@@ -260,8 +260,11 @@ there and flat ground at home level is used).
 
 The **⚙** at the end of the bar opens **Settings**: altitude in metres or feet,
 speeds in m/s or knots, coordinates as decimal degrees, D° M′ S″ or UTM, the
-flight trail (on/off, last 30 s / 1 / 2 / 5 / 10 min / all), the
-**landing reserve** for the battery time left (20–40 %), and **offline maps**
+**text size** (DISPLAY: Small, Medium 125 %, Large 150 %, applied at once; labels,
+numbers and the boxes, buttons and panels around them grow, while the map and camera
+picture keep their size, and the top bar grows only as far as it still fits the
+screen width), the flight trail (on/off, last 30 s / 1 / 2 / 5 / 10 min / all), the
+**landing reserve** for the battery time left (15–35 %, default 20 %), and **offline maps**
 (see below).
 
 **Mouse over the map** shows the point under the cursor, bottom right:
@@ -586,11 +589,11 @@ route it never wraps back to WP1.
 left**. That's how long the aircraft can keep flying the mission and still have
 enough to do all of this, recomputed every 2 s:
 
-- fly back to L (or home), into a wind taken **50 % stronger** than measured;
+- fly back to L (or home), into a wind taken **20 % stronger** than measured;
 - circle down the approach, **go around once**, and land on the lift rotors.
-  The rotor time covers the transition, the descent and 30 s of extra hover;
-- with all of that **× 1.3**, and the **landing reserve** (Settings → BATTERY,
-  default 25 % of the pack) left untouched.
+  The rotor time covers the transition, the descent and 20 s of extra hover;
+- with all of that **× 1.15**, and the **landing reserve** (Settings → BATTERY,
+  15–35 %, default 20 % of the pack) left untouched.
 
 It uses the lower of the two charge readings (mAh used and the autopilot's %).
 It costs the return from the farthest point of the plan, not only from where

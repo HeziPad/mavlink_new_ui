@@ -23,6 +23,12 @@ class TelemetryBar : public QWidget {
 public:
     explicit TelemetryBar(QWidget* parent);
 
+    // The bar grows with the text size (theme::uiScale) but never past the
+    // width it is given: all chips stay on one row.
+    double effectiveScale(double width) const;
+    double effectiveScale() const { return effectiveScale(width()); }
+    int heightFor(int width) const;
+
     void setState(const VehicleState& s, Clock::time_point now);
     void setAdvisories(const std::vector<Advisory>& list);
     void setSystemsOpen(bool open);

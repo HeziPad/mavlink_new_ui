@@ -69,6 +69,7 @@ public:
 
     bool isOpen() const { return isVisible(); }
     void close();
+    void applyScale();  // text size changed (theme::uiScale)
 
     static constexpr double kMaxFromHome = 50000.0;  // m: further is a typo, not a flight
 

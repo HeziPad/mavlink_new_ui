@@ -26,6 +26,26 @@ QString formatDuration(double s) {
     return QStringLiteral("%1:%2").arg(total / 60).arg(total % 60, 2, 10, QLatin1Char('0'));
 }
 
+// written at text size Small; applyScale() scales every px
+const char* const kSheet = R"(
+        QLabel { background: transparent; color: #e6f1f8; }
+        QLabel#planTitle { color: #ffb547; font: bold 13px "DejaVu Sans"; padding-right: 6px; }
+        QLabel#planInfo { font: 13px "DejaVu Sans Mono"; }
+        QLabel#planWarn { color: #ffb547; font: 12px "DejaVu Sans Mono"; }
+        QLabel#planHint { color: #7d93a6; font: 11px "DejaVu Sans"; }
+        QPushButton {
+            background: rgba(63, 224, 255, 0.06); color: #e6f1f8;
+            border: 1px solid rgba(63, 224, 255, 0.45); padding: 4px 14px;
+            font: bold 12px "DejaVu Sans";
+        }
+        QPushButton:hover { background: rgba(63, 224, 255, 0.18); border-color: #3fe0ff; }
+        QPushButton:pressed { background: rgba(0, 0, 0, 0.5); }
+        QPushButton:disabled { color: #4a5a68; border-color: rgba(125, 147, 166, 0.25); }
+        QPushButton#planTool:checked { background: rgba(255, 181, 71, 0.25); border-color: #ffb547; color: #ffb547; }
+        QPushButton#planCancel { border-color: rgba(255, 77, 94, 0.6); }
+        QPushButton#planCancel:hover { background: rgba(255, 77, 94, 0.18); border-color: #ff4d5e; }
+    )";
+
 }  // namespace
 
 PlanStrip::PlanStrip(QWidget* parent) : QWidget(parent) {
@@ -100,24 +120,7 @@ PlanStrip::PlanStrip(QWidget* parent) : QWidget(parent) {
     hint_->setObjectName(QStringLiteral("planHint"));
     outer->addWidget(hint_);
 
-    setStyleSheet(QStringLiteral(R"(
-        QLabel { background: transparent; color: #e6f1f8; }
-        QLabel#planTitle { color: #ffb547; font: bold 13px "DejaVu Sans"; padding-right: 6px; }
-        QLabel#planInfo { font: 13px "DejaVu Sans Mono"; }
-        QLabel#planWarn { color: #ffb547; font: 12px "DejaVu Sans Mono"; }
-        QLabel#planHint { color: #7d93a6; font: 11px "DejaVu Sans"; }
-        QPushButton {
-            background: rgba(63, 224, 255, 0.06); color: #e6f1f8;
-            border: 1px solid rgba(63, 224, 255, 0.45); padding: 4px 14px;
-            font: bold 12px "DejaVu Sans";
-        }
-        QPushButton:hover { background: rgba(63, 224, 255, 0.18); border-color: #3fe0ff; }
-        QPushButton:pressed { background: rgba(0, 0, 0, 0.5); }
-        QPushButton:disabled { color: #4a5a68; border-color: rgba(125, 147, 166, 0.25); }
-        QPushButton#planTool:checked { background: rgba(255, 181, 71, 0.25); border-color: #ffb547; color: #ffb547; }
-        QPushButton#planCancel { border-color: rgba(255, 77, 94, 0.6); }
-        QPushButton#planCancel:hover { background: rgba(255, 77, 94, 0.18); border-color: #ff4d5e; }
-    )"));
+
 
     connect(wp_tool_, &QPushButton::clicked, this, [this] { emit landingToolToggled(false); });
     connect(land_tool_, &QPushButton::clicked, this, [this] { emit landingToolToggled(true); });
@@ -128,7 +131,17 @@ PlanStrip::PlanStrip(QWidget* parent) : QWidget(parent) {
     connect(loop_, &QPushButton::clicked, this, [this] { emit patternChanged(Pattern::Loop); });
     connect(back_forth_, &QPushButton::clicked, this, [this] { emit patternChanged(Pattern::BackForth); });
     connect(one_way_, &QPushButton::clicked, this, [this] { emit patternChanged(Pattern::OneWay); });
+    applyScale();
     setInfo(0, 0, 0, false, false, Pattern::Loop);
+}
+
+void PlanStrip::applyScale() {
+    setStyleSheet(scaleCss(QString::fromUtf8(kSheet)));
+    scaleWidgetTree(this);
+    for (auto* w : findChildren<QWidget*>()) {
+        w->ensurePolished();
+    }
+    fit();
 }
 
 void PlanStrip::setLandingTool(bool on) {
@@ -151,6 +164,7 @@ void PlanStrip::setInfo(int waypoints, double route_m, double route_s, bool has_
     info_->setText(text);
     warn_->setVisible(!has_land && waypoints > 0);
     warn_->setText(QStringLiteral("No landing point: it will land at home (Land and failsafes)"));
+    info_->ensurePolished();  // measure with the stylesheet font (it changes with the text size)
     info_->setMinimumWidth(info_->fontMetrics().horizontalAdvance(info_->text()) + 8);
     loop_->setChecked(pattern == Pattern::Loop);
     back_forth_->setChecked(pattern == Pattern::BackForth);
@@ -164,7 +178,15 @@ void PlanStrip::setInfo(int waypoints, double route_m, double route_s, bool has_
                    flown);
     undo_->setEnabled(can_undo);
     clear_->setEnabled(waypoints > 0 || has_land);
-    adjustSize();
+    fit();
+}
+
+void PlanStrip::fit() {
+    // the label widths just changed: let the layout see that before sizing,
+    // or adjustSize() uses the previous (smaller) hint and the row overlaps
+    layout()->invalidate();
+    layout()->activate();
+    resize(sizeHint());
 }
 
 void PlanStrip::paintEvent(QPaintEvent*) {

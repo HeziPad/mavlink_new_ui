@@ -180,6 +180,12 @@ private:
     void paintApproach(QPainter& p);
     void paintFootprint(QPainter& p);
     void paintBall(QPainter& p);
+    // text size: the on-screen chrome (paintOverlayChrome) is painted scaled
+    // by chrome_k_ in a logical rect; taps are divided by it
+    double chrome_k_ = 1.0;
+    QRectF lrect() const;
+    double lw() const;
+    double lh() const;
     double metersPerPixel() const;
     void paintOverlayChrome(QPainter& p);
     void paintArea(QPainter& p);

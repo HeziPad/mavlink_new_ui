@@ -14,6 +14,25 @@ namespace gcs::ui {
 
 using namespace theme;
 
+namespace {
+// written at text size Small; applyScale() scales every px
+const char* const kSheet = R"(
+        QLabel { background: transparent; color: #e6f1f8; }
+        QLabel#spTitle { color: #3fe0ff; font: bold 14px "DejaVu Sans"; letter-spacing: 2px; }
+        QLabel#spName { color: #7d93a6; font: bold 11px "DejaVu Sans"; }
+        QLabel#spValue { font: bold 22px "DejaVu Sans Mono"; }
+        QLabel#spParam { color: #5d7386; font: 10px "DejaVu Sans Mono"; }
+        QLabel#spExplain { color: #9fb4c6; font: 12px "DejaVu Sans"; }
+        QLabel#spActive { color: #3fe0ff; font: bold 12px "DejaVu Sans Mono"; }
+        QPushButton {
+            background: rgba(63, 224, 255, 0.06); color: #e6f1f8;
+            border: 1px solid rgba(63, 224, 255, 0.45); padding: 0 16px;
+            font: bold 14px "DejaVu Sans";
+        }
+        QPushButton:checked { background: rgba(63, 224, 255, 0.22); border-color: #3fe0ff; color: #3fe0ff; }
+    )";
+}  // namespace
+
 SpeedPanel::SpeedPanel(QWidget* parent) : QWidget(parent) {
     auto* v = new QVBoxLayout(this);
     v->setContentsMargins(20, 14, 16, 14);
@@ -74,21 +93,7 @@ SpeedPanel::SpeedPanel(QWidget* parent) : QWidget(parent) {
     active_->setObjectName(QStringLiteral("spActive"));
     v->addWidget(active_);
 
-    setStyleSheet(QStringLiteral(R"(
-        QLabel { background: transparent; color: #e6f1f8; }
-        QLabel#spTitle { color: #3fe0ff; font: bold 14px "DejaVu Sans"; letter-spacing: 2px; }
-        QLabel#spName { color: #7d93a6; font: bold 11px "DejaVu Sans"; }
-        QLabel#spValue { font: bold 22px "DejaVu Sans Mono"; }
-        QLabel#spParam { color: #5d7386; font: 10px "DejaVu Sans Mono"; }
-        QLabel#spExplain { color: #9fb4c6; font: 12px "DejaVu Sans"; }
-        QLabel#spActive { color: #3fe0ff; font: bold 12px "DejaVu Sans Mono"; }
-        QPushButton {
-            background: rgba(63, 224, 255, 0.06); color: #e6f1f8;
-            border: 1px solid rgba(63, 224, 255, 0.45); padding: 0 16px;
-            font: bold 14px "DejaVu Sans";
-        }
-        QPushButton:checked { background: rgba(63, 224, 255, 0.22); border-color: #3fe0ff; color: #3fe0ff; }
-    )"));
+    applyScale();
     hide();
 }
 
@@ -115,6 +120,12 @@ void SpeedPanel::setValues(double loiter, double cruise, double max, int mode, c
     explain_->setText(QString::fromLatin1(explain[std::clamp(mode, 0, 2)]));
     active_->setText(active.isEmpty() ? QStringLiteral("now: autopilot default")
                                       : QStringLiteral("now: %1").arg(active));
+    adjustSize();
+}
+
+void SpeedPanel::applyScale() {
+    setStyleSheet(scaleCss(QString::fromUtf8(kSheet)));
+    scaleWidgetTree(this);
     adjustSize();
 }
 

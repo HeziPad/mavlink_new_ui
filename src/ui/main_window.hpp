@@ -80,7 +80,8 @@ struct AppSettings {
     bool ball_collapsed = false; // map attitude ball
     bool trail_on = true;
     int trail_secs = 120;        // 0 = all
-    int battery_reserve_pct = 25;  // battery time left never plans into this much of the pack
+    int battery_reserve_pct = 20;  // battery time left never plans into this much of the pack
+    int text_size = 0;           // theme::TextSize: Small / Medium / Large
 
     static AppSettings load();
     void save() const;
@@ -162,6 +163,8 @@ private:
     std::optional<double> terrain_here_;  // ground (AMSL) under the aircraft, from the elevation map
     std::optional<double> land_ground_;   // ground (AMSL) at the landing point
     void applyCoordFormat(int fmt);
+    void applyTextSize(int size);  // theme::TextSize, live
+    int barBottom() const;         // y just under the telemetry bar
     void showAlerts(bool on);
     QRect alertsArea() const;
     int orbitPanelX() const;

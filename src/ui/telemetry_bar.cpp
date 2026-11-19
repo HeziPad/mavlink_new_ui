@@ -221,21 +221,32 @@ void TelemetryBar::mousePressEvent(QMouseEvent* e) {
     }
 }
 
+namespace {
+// chip widths at scale 1
+constexpr double kLink = 104, kFlight = 250, kEta = 112, kArm = 100, kSafe = 104, kAlt = 200, kSpd = 120, kBat = 156,
+                 kGps = 92, kSys = 108, kGear = 60;
+constexpr double kChipsTotal = kLink + kFlight + kEta + kArm + kSafe + kAlt + kSpd + kBat + kGps + kSys + kGear;
+constexpr double kStripPad = 14;
+constexpr double kStripH = 46;
+constexpr double kBarH = 52;  // strip + 2 px above + room for the glow below
+}  // namespace
+
+double TelemetryBar::effectiveScale(double w) const {
+    return std::max(0.1, std::min(uiScale(), (w - 4.0) / (kChipsTotal + 2 * kStripPad)));
+}
+
+int TelemetryBar::heightFor(int w) const {
+    return static_cast<int>(std::ceil(kBarH * std::max(1.0, effectiveScale(w))));
+}
+
 void TelemetryBar::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
 
-    // chip widths at scale 1
-    const double kLink = 104, kFlight = 250, kEta = 112, kArm = 100, kSafe = 104, kAlt = 200, kSpd = 120, kBat = 156, kGps = 92,
-                 kSys = 108, kGear = 60;
-    const double widths[] = {kLink, kFlight, kEta, kArm, kSafe, kAlt, kSpd, kBat, kGps, kSys, kGear};
-    double total = 0;
-    for (double w : widths) {
-        total += w;
-    }
-    const double pad = 14;
-    const double scale = std::min(1.0, (width() - 4.0) / (total + 2 * pad));
-    const double h = 46;
+    const double total = kChipsTotal;
+    const double pad = kStripPad;
+    const double scale = effectiveScale();
+    const double h = kStripH;
 
     p.translate(width() / 2.0, 0);
     p.scale(scale, scale);

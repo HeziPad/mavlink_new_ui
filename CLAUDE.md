@@ -91,6 +91,15 @@ Three layers with a strict dependency direction: `core` ← `link` ← `ui`.
 - No keyboard shortcuts (operator decision): `MainWindow::eventFilter` swallows every key unless the `EntryPad` is open; the pad is the only keyboard consumer. The pad has one `QLineEdit` box per number (digit-only validators, a thick cursor via a `QProxyStyle`, hemispheres as toggles) in the Settings coordinate format; keypad buttons are `NoFocus` so the box keeps its cursor. LOITER speed = max(AIRSPEED_MIN, Q_ASSIST_SPEED + 2) ≤ cruise, or Q_ASSIST spins the rotors (SITL: assist 18 > min 13). Typed altitudes go through `core/altitude` (ASL/AGL/AFL → height above home, floor = ground at the point + 30 m, 20 m for the approach).
 - Don't gate Launch on the prearm-healthy bit. It is evaluated for the *current* mode (e.g. "QRTL mode not armable") and doesn't apply to the mode Launch switches to.
 
+## Text size
+
+Settings → DISPLAY → TEXT SIZE scales the UI by `theme::uiScale()` (1 / 1.25 / 1.5). Every size in UI code is a logical pixel at Small; scale it in exactly one of these ways, never two (or the font grows twice):
+
+- Widgets that are all chrome (`TelemetryBar`, `ControlDock`, `SettingsScreen`, `AlertsPanel`, `PreflightScreen`, `FxOverlay`) `p.scale(k, k)` and lay out in `logicalSize(size())`; taps go through `toLogical()`. Rects handed to other widgets (`FxOverlay::alertRect`) go back to physical pixels.
+- Views keep their picture: `CameraView` scales only the HUD (`paintHudScaled`, `hudRect()`, `focal()` follows `hud_k_`); `MapView` scales its screen chrome (`paintOverlayChrome`, `chrome_k_`, taps divided by it) and draws markers / home / aircraft scaled around their map point. Lines, circles, trail, tiles and street labels don't scale. The PiP stays compact (k = 1).
+- Stylesheet panels (`PlanStrip`, `OrbitPanel`, `WaypointPanel`, `SpeedPanel`, `EntryPad`) keep their sheet as a Small `kSheet` and `applyScale()` does `setStyleSheet(scaleCss(kSheet))` + `scaleWidgetTree(this)` (layout margins / spacing / spacers and min / max sizes, remembered at Small on first call). Build children with Small numbers; size from fonts after `ensurePolished()`, then invalidate + activate the layout before resizing (a stale hint overlaps the row).
+- `MainWindow::applyTextSize` re-applies it live; the bar's height comes from `TelemetryBar::heightFor`, everything below the bar from `barBottom()`.
+
 ## UI motion
 
 Telemetry arrives at 10–25 Hz. Don't draw the latest sample through a fast exponential tween: it arrives in about 60 ms and then sits still, which looks like a staircase. `MainWindow::frame` pulls every frame and calls `predictAttitude` / `predictPosition` (last sample + rate × age, capped), then views apply light smoothing on top.

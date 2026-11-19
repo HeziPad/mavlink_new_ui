@@ -22,6 +22,7 @@ public:
     // route_m / route_s: one cycle of the pattern (see routeLength)
     void setInfo(int waypoints, double route_m, double route_s, bool has_land, bool can_undo, Pattern pattern);
     void setLandingTool(bool on);  // reflects MapView's add tool
+    void applyScale();             // text size changed (theme::uiScale)
 
 signals:
     void landingToolToggled(bool on);
@@ -35,6 +36,7 @@ protected:
     void paintEvent(QPaintEvent* e) override;
 
 private:
+    void fit();  // resize to the laid-out contents
     QLabel* info_;
     QLabel* warn_;
     QPushButton* wp_tool_;
