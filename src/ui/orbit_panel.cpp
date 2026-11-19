@@ -27,13 +27,31 @@ QPushButton* makeButton(const QString& text) {
     auto* b = new QPushButton(text);
     b->setFocusPolicy(Qt::NoFocus);
     b->setCursor(Qt::PointingHandCursor);
-    // size from the stylesheet font explicitly (it is applied late)
+    // size from the stylesheet font explicitly (it is applied late); at
+    // text size Small: applyScale() scales it
     QFont f(QStringLiteral("DejaVu Sans Mono"));
     f.setBold(true);
     f.setPixelSize(14);
     b->setMinimumSize(std::max(kTouch, QFontMetrics(f).horizontalAdvance(text) + 24), kTouch);
     return b;
 }
+
+// written at text size Small; applyScale() scales every px
+const char* const kSheet = R"(
+        QLabel { background: transparent; color: #e6f1f8; }
+        QLabel#orbTitle { color: #3fe0ff; font: bold 12px "DejaVu Sans"; }
+        QLabel#orbName { color: #7d93a6; font: bold 11px "DejaVu Sans"; }
+        QLabel#orbValue { font: bold 20px "DejaVu Sans Mono"; min-width: 96px; }
+        QLabel#orbNow { color: #7d93a6; font: 11px "DejaVu Sans Mono"; }
+        QLabel#orbNote { color: #7d93a6; font: 10px "DejaVu Sans Mono"; }
+        QPushButton {
+            background: rgba(63, 224, 255, 0.06); color: #e6f1f8;
+            border: 1px solid rgba(63, 224, 255, 0.45); padding: 0 10px;
+            font: bold 14px "DejaVu Sans Mono";
+        }
+        QPushButton:hover { background: rgba(63, 224, 255, 0.18); border-color: #3fe0ff; }
+        QPushButton:pressed { background: rgba(63, 224, 255, 0.30); }
+    )";
 
 }  // namespace
 
@@ -103,6 +121,16 @@ QWidget* OrbitPanel::column(const QString& name, QLabel*& value, const std::init
     return w;
 }
 
+void OrbitPanel::applyScale() {
+    setStyleSheet(scaleCss(QString::fromUtf8(kSheet)));
+    scaleWidgetTree(this);
+    ensurePolished();
+    for (auto* w : findChildren<QWidget*>()) {
+        w->ensurePolished();
+    }
+    adjustSize();
+}
+
 double OrbitPanel::stepFor(const Step& st) const {
     return st.altitude ? units::altStepMeters(st.meters) : st.meters;
 }
@@ -147,25 +175,7 @@ OrbitPanel::OrbitPanel(QWidget* parent) : QWidget(parent) {
     alt_->setCursor(Qt::PointingHandCursor);
     alt_->installEventFilter(this);  // tap the altitude: type it
 
-    setStyleSheet(QStringLiteral(R"(
-        QLabel { background: transparent; color: #e6f1f8; }
-        QLabel#orbTitle { color: #3fe0ff; font: bold 12px "DejaVu Sans"; }
-        QLabel#orbName { color: #7d93a6; font: bold 11px "DejaVu Sans"; }
-        QLabel#orbValue { font: bold 20px "DejaVu Sans Mono"; min-width: 96px; }
-        QLabel#orbNow { color: #7d93a6; font: 11px "DejaVu Sans Mono"; }
-        QLabel#orbNote { color: #7d93a6; font: 10px "DejaVu Sans Mono"; }
-        QPushButton {
-            background: rgba(63, 224, 255, 0.06); color: #e6f1f8;
-            border: 1px solid rgba(63, 224, 255, 0.45); padding: 0 10px;
-            font: bold 14px "DejaVu Sans Mono";
-        }
-        QPushButton:hover { background: rgba(63, 224, 255, 0.18); border-color: #3fe0ff; }
-        QPushButton:pressed { background: rgba(63, 224, 255, 0.30); }
-    )"));
-    ensurePolished();
-    for (auto* w : findChildren<QWidget*>()) {
-        w->ensurePolished();
-    }
+    applyScale();
     setValues(QStringLiteral("HOLD"), 80.0f, 80.0f, false, -1.0);
 }
 

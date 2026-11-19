@@ -189,7 +189,7 @@ void PreflightScreen::stepBy(int delta) {
 // ---- input ------------------------------------------------------------------------------------
 
 void PreflightScreen::mousePressEvent(QMouseEvent* e) {
-    const QPointF pos = e->position();
+    const QPointF pos = toLogical(e->position());  // painted scaled by the text size
     press_pos_ = pos;
     press_scroll_ = list_scroll_;
     dragging_ = false;
@@ -212,7 +212,7 @@ void PreflightScreen::mouseMoveEvent(QMouseEvent* e) {
     if (!(e->buttons() & Qt::LeftButton)) {
         return;
     }
-    const double dy = e->position().y() - press_pos_.y();
+    const double dy = toLogical(e->position()).y() - press_pos_.y();
     if (list_rect_.contains(press_pos_) && std::abs(dy) > 8) {
         dragging_ = true;
         pressed_ = -1;
@@ -223,7 +223,7 @@ void PreflightScreen::mouseMoveEvent(QMouseEvent* e) {
 void PreflightScreen::mouseReleaseEvent(QMouseEvent* e) {
     if (pressed_ >= 0 && pressed_ < static_cast<int>(hits_.size()) && !dragging_) {
         const Hit h = hits_[pressed_];
-        if (h.rect.contains(e->position())) {
+        if (h.rect.contains(toLogical(e->position()))) {
             if (h.hold) {
                 if (hold_t_ < h.hold_secs) {
                     toast_ = QStringLiteral("Hold it for %1 s").arg(h.hold_secs, 0, 'f', 0);
@@ -240,7 +240,7 @@ void PreflightScreen::mouseReleaseEvent(QMouseEvent* e) {
 }
 
 void PreflightScreen::wheelEvent(QWheelEvent* e) {
-    if (list_rect_.contains(e->position())) {
+    if (list_rect_.contains(toLogical(e->position()))) {
         list_scroll_ = std::clamp(list_scroll_ - e->angleDelta().y() / 2.0, 0.0,
                                   std::max(0.0, list_content_h_ - list_rect_.height()));
     }
@@ -314,11 +314,13 @@ void PreflightScreen::paintEvent(QPaintEvent*) {
     p.setRenderHint(QPainter::Antialiasing);
     hits_.clear();
     const double e = easeOutCubic(open_);
-    const QRectF full = rect();
-    p.fillRect(full, alpha(kBg, 0.99 * e));  // opaque: banners behind must not show through
+    p.fillRect(rect(), alpha(kBg, 0.99 * e));  // opaque: banners behind must not show through
     if (!reducedMotion()) {
-        drawScanlines(p, full, 0.4 * e);
+        drawScanlines(p, rect(), 0.4 * e);
     }
+    // text size: everything on the screen grows; layout in logical pixels
+    p.scale(uiScale(), uiScale());
+    const QRectF full(QPointF(0, 0), logicalSize(size()));
     p.setOpacity(e);
     p.translate(0, (1.0 - e) * 30.0);
 
@@ -356,8 +358,10 @@ void PreflightScreen::paintEvent(QPaintEvent*) {
     }
 
     const double top = r.top() + 60, bottom = r.bottom() - 64;
-    const bool wide = r.width() >= 1250;
-    const double rail_w = wide ? 210 : 170, list_w = wide ? 270 : 220, data_w = wide ? 230 : 0;
+    // the data column needs ~1240 logical px (1920 at text size Large); the
+    // rail keeps its width either way, or "AIRFRAME 0/7" is clipped
+    const bool wide = r.width() >= 1240;
+    const double rail_w = 210, list_w = wide ? 270 : 220, data_w = wide ? 230 : 0;
     const QRectF rail(r.left(), top, rail_w, bottom - top);
     const QRectF list(rail.right() + 12, top, list_w, bottom - top);
     const QRectF data_col(r.right() - data_w, top, data_w, bottom - top);

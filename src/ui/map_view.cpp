@@ -179,6 +179,10 @@ QString MapView::pipTag() const {
 
 void MapView::setState(const VehicleState& s) {
     s_ = s;
+    if (s.has_vfr_hud) {
+        as_.set(s.airspeed);
+        gs_.set(s.groundspeed);
+    }
     vehicle_plan_ = s.mission_known ? extractPlan(s.mission) : MissionPlan{};
     if (plan_fixup_) {
         plan_fixup_(vehicle_plan_);
@@ -503,6 +507,8 @@ void MapView::tick(double dt) {
         const double target = ball_collapsed_ ? 0.0 : 1.0;
         ball_open_ = reducedMotion() ? target : ball_open_ + std::clamp(target - ball_open_, -dt * 5.0, dt * 5.0);
     }
+    as_.step(dt);
+    gs_.step(dt);
 
     // smooth zoom, anchored under the cursor unless following
     if (zoom_ != zoom_target_) {
@@ -548,7 +554,7 @@ void MapView::toLatLon(const QPointF& pt, double& lat, double& lon) const {
 }
 
 int MapView::planPointAt(const QPointF& pos) const {
-    const double radius = touch_input_ ? kHitRadiusTouch : kHitRadiusMouse;
+    const double radius = (touch_input_ ? kHitRadiusTouch : kHitRadiusMouse) * uiScale();  // markers grow with it
     int best = kNone;
     double best_d = radius;
     auto consider = [&](int id, const UserWaypoint& wp) {
@@ -828,17 +834,30 @@ void MapView::mouseReleaseEvent(QMouseEvent* e) {
     pointerRelease(e->position());
 }
 
+QRectF MapView::lrect() const {
+    return {0.0, 0.0, lw(), lh()};
+}
+
+double MapView::lw() const {
+    return width() / chrome_k_;
+}
+
+double MapView::lh() const {
+    return height() / chrome_k_;
+}
+
 void MapView::pointerPress(const QPointF& pos) {
-    if (ball_rect_.contains(pos)) {
+    const QPointF cpos = pos / chrome_k_;  // the chrome's tap targets are in its scaled coordinates
+    if (ball_rect_.contains(cpos)) {
         setBallCollapsed(!ball_collapsed_);
         emit ballCollapsedChanged(ball_collapsed_);
         return;
     }
-    if (follow_chip_.contains(pos)) {
+    if (follow_chip_.contains(cpos)) {
         setFollow(!follow_);
         return;
     }
-    if (layer_chip_.contains(pos)) {
+    if (layer_chip_.contains(cpos)) {
         setLayer(layer_ == TileCache::Streets ? TileCache::Satellite : TileCache::Streets);
         return;
     }
@@ -859,11 +878,11 @@ std::array<QPointF, 4> MapView::areaCorners() const {
 }
 
 bool MapView::areaPress(const QPointF& pos) {
-    if (area_cancel_rect_.contains(pos)) {
+    if (area_cancel_rect_.contains(pos / chrome_k_)) {
         emit areaCancel();
         return true;
     }
-    if (area_dl_rect_.contains(pos)) {
+    if (area_dl_rect_.contains(pos / chrome_k_)) {
         if (area_can_dl_ && area_sel_) emit areaDownload();
         return true;
     }
@@ -873,7 +892,7 @@ bool MapView::areaPress(const QPointF& pos) {
     area_handle_ = -1;
     area_new_ = false;
     if (area_sel_) {
-        const double hit = touch_input_ ? kHitRadiusTouch : kHitRadiusMouse + 6;
+        const double hit = (touch_input_ ? kHitRadiusTouch : kHitRadiusMouse + 6) * uiScale();
         const auto c = areaCorners();
         for (int i = 0; i < 4; ++i) {
             if (QLineF(pos, c[i]).length() <= hit) {
@@ -1046,14 +1065,17 @@ void MapView::paintEvent(QPaintEvent*) {
 
     // home
     if (s_.has_home) {
-        const QPointF h = toScreen(s_.home_lat, s_.home_lon);
-        const QPainterPath hex = hexPath(h, 12);
+        // symbols grow with the text size, around their point on the map
+        p.save();
+        p.translate(toScreen(s_.home_lat, s_.home_lon));
+        p.scale(uiScale(), uiScale());
+        const QPainterPath hex = hexPath(QPointF(0, 0), 12);
         p.setPen(Qt::NoPen);
         p.setBrush(alpha(kBg, 0.8));
         p.drawPath(hex);
         drawGlowPath(p, hex, kGreen, 1.5, 5);
-        drawText(p, QRectF(h.x() - 10, h.y() - 10, 20, 20), Qt::AlignCenter, QStringLiteral("H"),
-                 monoFont(12, true), kGreen);
+        drawText(p, QRectF(-10, -10, 20, 20), Qt::AlignCenter, QStringLiteral("H"), monoFont(12, true), kGreen);
+        p.restore();
     }
 
     // routes: the vehicle's mission underneath, the plan being edited on top
@@ -1388,7 +1410,12 @@ void MapView::paintRoute(QPainter& p, const MissionPlan& plan, const QColor& c, 
 
     const QFont nf = monoFont(11, true);
     const QFont af = monoFont(10);
-    auto marker = [&](const QPointF& sp, int id, const QString& label, const QColor& base, const QString& caption) {
+    auto marker = [&](const QPointF& at, int id, const QString& label, const QColor& base, const QString& caption) {
+        // the marker and its caption grow with the text size, around the point
+        p.save();
+        p.translate(at);
+        p.scale(uiScale(), uiScale());
+        const QPointF sp(0, 0);
         const bool is_active = id == active_index && active_index != kNone;
         const bool is_sel = editable && id == sel_;
         const bool hot = editable && (id == hover_wp_ || id == drag_wp_ || is_sel);
@@ -1422,6 +1449,7 @@ void MapView::paintRoute(QPainter& p, const MissionPlan& plan, const QColor& c, 
             p.drawRect(cr);
             drawText(p, cr, Qt::AlignCenter, caption, af, alpha(mc, 0.95));
         }
+        p.restore();
     };
 
     for (size_t i = 0; i < pts.size(); ++i) {
@@ -1447,7 +1475,7 @@ void MapView::paintRoute(QPainter& p, const MissionPlan& plan, const QColor& c, 
         for (int k = 0; k <= 90; ++k) {
             const double t = k / 90.0;
             const double ang = t * 4.0 * geo::kPi + time_ * (reducedMotion() ? 0.0 : 0.6);
-            const double rr = 34.0 - 16.0 * t;
+            const double rr = (34.0 - 16.0 * t) * uiScale();
             const QPointF q = lp + QPointF(std::cos(ang) * rr, std::sin(ang) * rr);
             k == 0 ? spiral.moveTo(q) : spiral.lineTo(q);
         }
@@ -1465,7 +1493,7 @@ void MapView::paintOrbit(QPainter& p) {
     }
     const QPointF c = toScreen(orbit_->lat, orbit_->lon);
     const double rpx = orbit_->radius / metersPerPixel();
-    const QColor col = orbit_->hold ? kCyan : kAmber;
+    const QColor col = kCyan;  // Hold and Fly To alike (amber is for caution)
     // line from the aircraft while it's still on its way to the circle
     if (has_ac_) {
         const QPointF a = toScreen(ac_lat_, ac_lon_);
@@ -1494,8 +1522,8 @@ void MapView::paintOrbit(QPainter& p) {
             if (circleVisible(c, fpx, QRectF(rect()).adjusted(-40, -40, 40, 40))) {
                 p.drawEllipse(c, fpx, fpx);
             }
-            drawText(p, QRectF(c.x() - 80, c.y() + fpx + 2, 160, 14), Qt::AlignCenter,
-                     QStringLiteral("flown %1 · trimming").arg(formatDistance(orbit_->flown)), labelFont(9),
+            drawText(p, QRectF(c.x() - sc(80), c.y() + fpx + 2, sc(160), sc(14)), Qt::AlignCenter,
+                     QStringLiteral("flown %1 · trimming").arg(formatDistance(orbit_->flown)), labelFont(sc(9)),
                      alpha(kMuted, 0.9));
         }
         if (!compact_) {
@@ -1563,8 +1591,8 @@ void MapView::paintApproach(QPainter& p) {
         const QPointF n(-dir.y(), dir.x());
         p.drawLine(tip, tip - dir * 8.0 + n * 5.0);
         p.drawLine(tip, tip - dir * 8.0 - n * 5.0);
-        drawText(p, QRectF(base.x() - 30, base.y() - 22, 60, 14), Qt::AlignCenter,
-                 units::speedText(s_.wind_speed, 1), monoFont(10), alpha(kText, 0.9));
+        drawText(p, QRectF(base.x() - sc(30), base.y() - sc(22), sc(60), sc(14)), Qt::AlignCenter,
+                 units::speedText(s_.wind_speed, 1), monoFont(sc(10)), alpha(kText, 0.9));
     }
 }
 
@@ -1575,7 +1603,7 @@ void MapView::paintAircraft(QPainter& p) {
     const QPointF c = toScreen(ac_lat_, ac_lon_);
     const VtolState v = effectiveVtolState(s_);
     const QColor col = vtolColor(v);
-    const double scale = compact_ ? 0.75 : 1.0;
+    const double scale = compact_ ? 0.75 : uiScale();  // grows with the text size
 
     if (!reducedMotion()) {
         const double ph = std::fmod(time_ * 0.8, 1.0);
@@ -1637,13 +1665,18 @@ void MapView::paintOverlayChrome(QPainter& p) {
         follow_chip_ = layer_chip_ = ball_rect_ = QRectF();
         return;
     }
+    // text size: the instruments and chips grow; laid out in logical pixels,
+    // tapped through chrome_k_ (pointerPress)
+    chrome_k_ = uiScale();
+    p.save();
+    p.scale(chrome_k_, chrome_k_);
     paintBall(p);
-    const double right = width() - 16.0;
-    double y = height() - 24.0;
+    const double right = lw() - 16.0;
+    double y = lh() - 24.0;
 
     // scale bar
     const double mpp = metersPerPixel();
-    const double target = mpp * 110.0;
+    const double target = mpp * 110.0 * chrome_k_;  // about 110 logical px
     const double mag = std::pow(10.0, std::floor(std::log10(target)));
     double nice = mag;
     for (double m : {1.0, 2.0, 5.0}) {
@@ -1651,7 +1684,7 @@ void MapView::paintOverlayChrome(QPainter& p) {
             nice = m * mag;
         }
     }
-    const double px = nice / mpp;
+    const double px = nice / mpp / chrome_k_;  // map pixels -> the chrome's logical pixels
     p.setPen(QPen(kText, 1.5));
     p.drawLine(QPointF(right - px, y), QPointF(right, y));
     p.drawLine(QPointF(right - px, y - 5), QPointF(right - px, y));
@@ -1707,7 +1740,7 @@ void MapView::paintOverlayChrome(QPainter& p) {
     if (!dl_status_.isEmpty()) {
         const QFont f = labelFont(11);
         const double w = QFontMetricsF(f).horizontalAdvance(dl_status_) + 30;
-        const QRectF box(width() / 2.0 - w / 2.0, mode_ == Mode::Area ? 210 : 104, w, 26);
+        const QRectF box(lw() / 2.0 - w / 2.0, mode_ == Mode::Area ? 210 : 104, w, 26);
         drawGlass(p, chamferPath(box, 7), kCyan, 0.7, kGlassDeep);
         drawText(p, box, Qt::AlignCenter, dl_status_, f, kCyan);
     }
@@ -1719,7 +1752,7 @@ void MapView::paintOverlayChrome(QPainter& p) {
                                  : QStringLiteral("NO OFFLINE MAP HERE · Settings ⚙ → OFFLINE");
         const QFont f = labelFont(11);
         const double w = QFontMetricsF(f).horizontalAdvance(text) + 30;
-        const QRectF box(width() / 2.0 - w / 2.0, height() / 2.0 + 60, w, 28);
+        const QRectF box(lw() / 2.0 - w / 2.0, lh() / 2.0 + 60, w, 28);
         drawGlass(p, chamferPath(box, 7), kAmber, 0.7, kGlassDeep);
         drawText(p, box, Qt::AlignCenter, text, f, kAmber);
     }
@@ -1729,7 +1762,7 @@ void MapView::paintOverlayChrome(QPainter& p) {
         const QString text = QStringLiteral("FLY TO · tap the map to send the aircraft");
         const QFont f = labelFont(11);
         const double w = QFontMetricsF(f).horizontalAdvance(text) + 30;
-        const QRectF box(width() / 2.0 - w / 2.0, 70, w, 26);
+        const QRectF box(lw() / 2.0 - w / 2.0, 70, w, 26);
         drawGlass(p, chamferPath(box, 7), kCyan, 0.8, kGlassDeep);
         drawText(p, box, Qt::AlignCenter, text, f, kCyan);
     }
@@ -1737,12 +1770,16 @@ void MapView::paintOverlayChrome(QPainter& p) {
         paintArea(p);
     }
     if (mode_ != Mode::Normal) {
-        drawBrackets(p, QRectF(rect()).adjusted(8, 8, -8, -8), 28,
+        drawBrackets(p, lrect().adjusted(8, 8, -8, -8), 28,
                      alpha(mode_ == Mode::Plan || mode_ == Mode::Area ? kAmber : kCyan, 0.7), 2.0);
     }
+    p.restore();
 }
 
 void MapView::paintArea(QPainter& p) {
+    // the areas on the map are drawn in widget pixels, under the scaled chrome painter
+    p.save();
+    p.scale(1.0 / chrome_k_, 1.0 / chrome_k_);
     const QRectF view = QRectF(rect()).adjusted(-20, -20, 20, 20);
     // what's downloaded already
     for (const auto& a : areas_) {
@@ -1765,20 +1802,21 @@ void MapView::paintArea(QPainter& p) {
             p.drawRect(QRectF(q.x() - 9, q.y() - 9, 18, 18));
         }
     }
+    p.restore();
     // top: what to do
     {
         const QString text = area_sel_ ? QStringLiteral("AREA · drag a corner to adjust · drag elsewhere for a new one")
                                        : QStringLiteral("AREA · drag a rectangle over the area you want in full detail");
         const QFont f = labelFont(11);
         const double w = QFontMetricsF(f).horizontalAdvance(text) + 30;
-        const QRectF box(width() / 2.0 - w / 2.0, 70, w, 26);
+        const QRectF box(lw() / 2.0 - w / 2.0, 70, w, 26);
         drawGlass(p, chamferPath(box, 7), kAmber, 0.8, kGlassDeep);
         drawText(p, box, Qt::AlignCenter, text, f, kAmber);
     }
     // bottom panel: size, new vs shared tiles, DOWNLOAD / CANCEL
     // at the top, under the hint: the bottom belongs to the dock and the picture-in-picture
-    const double pw = std::min(width() - 32.0, 640.0);
-    const QRectF panel(width() / 2.0 - pw / 2.0, 104, pw, 96);
+    const double pw = std::min(lw() - 32.0, 640.0);
+    const QRectF panel(lw() / 2.0 - pw / 2.0, 104, pw, 96);
     drawGlass(p, chamferPath(panel, 10), kAmber, 0.8, alpha(kGlassDeep, 0.95));
     drawText(p, QRectF(panel.left() + 16, panel.top() + 10, pw - 300, 22), Qt::AlignLeft | Qt::AlignVCenter,
              area_sel_ ? area_info1_ : QStringLiteral("no area yet"), monoFont(12, true), area_warn_ ? kRed : kText);
@@ -1908,6 +1946,36 @@ void MapView::paintBall(QPainter& p) {
     }
     paintWindGauge(p, wbox.adjusted(8, e > 0.5 ? 20 : 6, -8, -6), w, heading_.value, time_, true, e < 0.5);
     ball_rect_ = ball_rect_.united(wbox.adjusted(-4, -4, 4, 4));
+
+    // speeds, under the wind: folds with the ball and the wind (to the airspeed alone)
+    const double se = e;
+    const QRectF sbox(box.left(), wbox.bottom() + 8, box.width(), lerp(48.0, 78.0, se));
+    ball_rect_ = ball_rect_.united(sbox.adjusted(-4, -4, 4, 4));
+    drawGlass(p, chamferPath(sbox, 10), kCyan, 0.45, alpha(kGlassDeep, 0.85));
+    const bool vfr = s_.has_vfr_hud;
+    const QString as = vfr ? units::speedText(as_.value, 0, false) : QStringLiteral("—");
+    const QString gs = vfr ? units::speedText(gs_.value, 0, false) : QStringLiteral("—");
+    if (se > 0.5) {
+        p.setOpacity(std::clamp((se - 0.5) * 2.0, 0.0, 1.0));
+        drawText(p, QRectF(sbox.left() + 10, sbox.top() + 4, sbox.width() - 20, 14), Qt::AlignLeft | Qt::AlignVCenter,
+                 QStringLiteral("SPEED %1").arg(units::speedUnitLabel()), labelFont(9), kMuted);
+        auto row = [&](double y, const QString& name, const QString& v) {
+            drawText(p, QRectF(sbox.left() + 12, y, 60, 24), Qt::AlignLeft | Qt::AlignVCenter, name, labelFont(10.5),
+                     alpha(kMuted, 0.95));
+            drawText(p, QRectF(sbox.left() + 60, y, sbox.width() - 72, 24), Qt::AlignRight | Qt::AlignVCenter, v,
+                     monoFont(16, true), vfr ? kText : kMuted);
+        };
+        row(sbox.top() + 22, QStringLiteral("AIR"), as);
+        row(sbox.top() + 48, QStringLiteral("GROUND"), gs);
+        p.setOpacity(1.0);
+    } else {
+        p.setOpacity(std::clamp((0.5 - se) * 2.0, 0.0, 1.0));
+        drawText(p, QRectF(sbox.left(), sbox.top() + 4, sbox.width(), 13), Qt::AlignCenter, QStringLiteral("AS"),
+                 labelFont(8.5), kMuted);
+        drawText(p, QRectF(sbox.left(), sbox.top() + 17, sbox.width(), 26), Qt::AlignCenter, as, monoFont(16, true),
+                 vfr ? kText : kMuted);
+        p.setOpacity(1.0);
+    }
 }
 
 }  // namespace gcs::ui

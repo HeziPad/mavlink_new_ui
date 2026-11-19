@@ -38,8 +38,8 @@ static void testGroundSpeed() {
 static void testReturnCost() {
     Inputs in = baseInputs();
     const ReturnCost calm = returnCost(in, in.here, 10.0, 60.0);
-    // rotors: 15 + 24/1.5 + 6/0.5 + 30 = 73 s
-    CHECK_NEAR(calm.rotor_s, 73.0, 1e-9);
+    // rotors: 15 + 24/1.5 + 6/0.5 + 20 = 63 s
+    CHECK_NEAR(calm.rotor_s, 63.0, 1e-9);
     CHECK(calm.cruise_s > 2000.0 / 20.0);
     const double expect = (10.0 * calm.cruise_s + 60.0 * calm.rotor_s) / 3.6 * kReturnMargin;
     CHECK_NEAR(calm.mah, expect, 1e-6);
@@ -69,8 +69,8 @@ static void testEstimate() {
     in.battery_pct = 70;
     e = estimate(in);
     CHECK_NEAR(e.remaining_mah, 7000.0, 1e-6);
-    CHECK_NEAR(e.reserve_mah, 2500.0, 1e-6);
-    const double expect_left = (7000.0 - 2500.0 - e.worst.mah) / (10.0 / 3.6);
+    CHECK_NEAR(e.reserve_mah, 2000.0, 1e-6);
+    const double expect_left = (7000.0 - 2000.0 - e.worst.mah) / (10.0 / 3.6);
     CHECK_NEAR(e.time_left_s, expect_left, 1e-6);
     CHECK(e.time_left_s > kCautionS);
     CHECK(e.level == Level::None);
@@ -88,7 +88,7 @@ static void testEstimate() {
     in.route.clear();
     in.battery_pct = -1;
     // 50 mAh (18 s of cruise) above what the return from here plus the reserve need
-    in.consumed_mah = 10000.0 - 2500.0 - e.here.mah - 50.0;
+    in.consumed_mah = 10000.0 - 2000.0 - e.here.mah - 50.0;
     Estimate low = estimate(in);
     CHECK(low.level == Level::Caution);
     in.consumed_mah += 100.0;

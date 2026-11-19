@@ -1,6 +1,7 @@
 #include "settings_screen.hpp"
 
 #include "anim.hpp"
+#include "core/endurance.hpp"
 #include "theme.hpp"
 
 #include <QFontMetricsF>
@@ -20,7 +21,7 @@ const std::vector<int>& SettingsScreen::trailChoices() {
 }
 
 const std::vector<int>& SettingsScreen::reserveChoices() {
-    static const std::vector<int> c = {20, 25, 30, 35, 40};
+    static const std::vector<int> c = {15, 20, 25, 30, 35};
     return c;
 }
 
@@ -49,6 +50,7 @@ SettingsScreen::SettingsScreen(QWidget* parent) : QWidget(parent) {
     for (int pct : reserveChoices()) {
         reserve_.labels << QStringLiteral("%1 %").arg(pct);
     }
+    text_size_.labels = {QStringLiteral("SMALL"), QStringLiteral("MEDIUM"), QStringLiteral("LARGE")};
     link_type_.labels = {QStringLiteral("UDP · NETWORK"), QStringLiteral("SERIAL · USB / RADIO")};
     for (int b : link::serialBauds()) {
         baud_.labels << QString::number(b);
@@ -70,12 +72,16 @@ void SettingsScreen::open(const Values& v) {
     labels_.selected = v.labels_english ? 1 : 0;
     online_.selected = off_.online ? 1 : 0;
     const auto& rc = reserveChoices();
-    const auto rit = std::find(rc.begin(), rc.end(), v.reserve_pct);
-    reserve_.selected = rit != rc.end() ? static_cast<int>(rit - rc.begin()) : 1;
+    // the nearest choice, so a value saved from an older choice list still shows
+    const auto rit = std::min_element(rc.begin(), rc.end(), [&](int a, int b) {
+        return std::abs(a - v.reserve_pct) < std::abs(b - v.reserve_pct);
+    });
+    reserve_.selected = static_cast<int>(rit - rc.begin());
+    text_size_.selected = std::clamp(v.text_size, 0, 2);
     setLink(v.link);
     applied_ = v.link;
     refreshPorts();
-    for (Segmented* s : {&alt_, &speed_, &coord_, &trail_on_, &trail_len_, &labels_, &online_, &reserve_, &link_type_, &baud_}) {
+    for (Segmented* s : {&alt_, &speed_, &coord_, &trail_on_, &trail_len_, &labels_, &online_, &reserve_, &text_size_, &link_type_, &baud_}) {
         s->knob = s->selected;
     }
     confirm_ = Confirm::None;
@@ -124,7 +130,7 @@ void SettingsScreen::tick(double dt) {
         return;
     }
     const double k = reducedMotion() ? 1.0 : 1.0 - std::exp(-16.0 * dt);
-    for (Segmented* s : {&alt_, &speed_, &coord_, &trail_on_, &trail_len_, &labels_, &online_, &reserve_, &link_type_, &baud_}) {
+    for (Segmented* s : {&alt_, &speed_, &coord_, &trail_on_, &trail_len_, &labels_, &online_, &reserve_, &text_size_, &link_type_, &baud_}) {
         s->knob += (s->selected - s->knob) * k;
     }
     // the serial port list follows what is plugged in
@@ -137,11 +143,16 @@ void SettingsScreen::tick(double dt) {
     update();
 }
 
+QSizeF SettingsScreen::lsize() const {
+    return logicalSize(size());
+}
+
 QRectF SettingsScreen::panelRect() const {
-    const double w = std::min(860.0, width() - 48.0);
+    const QSizeF s = lsize();
+    const double w = std::min(860.0, s.width() - 48.0);
     const double want = category_ == kLink ? 640.0 : (category_ == kOffline || category_ == kUnits ? 560.0 : 480.0);
-    const double h = std::min(want, height() - 80.0);
-    return {(width() - w) / 2.0, (height() - h) / 2.0, w, h};
+    const double h = std::min(want, s.height() - 80.0);
+    return {(s.width() - w) / 2.0, (s.height() - h) / 2.0, w, h};
 }
 
 bool SettingsScreen::pressSegmented(Segmented& seg, const QPointF& pos) {
@@ -159,7 +170,7 @@ bool SettingsScreen::pressSegmented(Segmented& seg, const QPointF& pos) {
 }
 
 void SettingsScreen::mousePressEvent(QMouseEvent* e) {
-    const QPointF pos = e->position();
+    const QPointF pos = toLogical(e->position());  // the panel is painted scaled by the text size
     if (open_target_ < 0.5) {
         return;
     }
@@ -199,6 +210,10 @@ void SettingsScreen::mousePressEvent(QMouseEvent* e) {
             emit speedUnitChanged(speed_.selected);
         } else if (pressSegmented(coord_, pos)) {
             emit coordFormatChanged(coord_.selected);
+        }
+    } else if (category_ == kDisplay) {
+        if (pressSegmented(text_size_, pos)) {
+            emit textSizeChanged(text_size_.selected);
         }
     } else if (category_ == kBattery) {
         if (pressSegmented(reserve_, pos)) {
@@ -281,6 +296,8 @@ void SettingsScreen::paintEvent(QPaintEvent*) {
     if (!reducedMotion()) {
         drawScanlines(p, r, 0.5 * e);
     }
+    // the panel itself grows with the text size (taps go through toLogical)
+    p.scale(uiScale(), uiScale());
 
     // ---- panel: slides up as it opens ----------------------------------------------
     const QRectF pr = panelRect();
@@ -309,7 +326,7 @@ void SettingsScreen::paintEvent(QPaintEvent*) {
     const QRectF cat_col(pr.left() + 24, top, 190, pr.bottom() - top - 24);
     p.setPen(QPen(alpha(kCyan, 0.18), 1));
     p.drawLine(QPointF(cat_col.right() + 16, cat_col.top()), QPointF(cat_col.right() + 16, cat_col.bottom()));
-    const char* names[kCategories] = {"CONNECTION", "UNITS", "MAP", "BATTERY", "OFFLINE"};
+    const char* names[kCategories] = {"CONNECTION", "UNITS", "DISPLAY", "MAP", "BATTERY", "OFFLINE"};
     cat_rects_.clear();
     for (int i = 0; i < kCategories; ++i) {
         const QRectF item(cat_col.left(), cat_col.top() + i * 60, cat_col.width(), 52);
@@ -331,7 +348,7 @@ void SettingsScreen::paintEvent(QPaintEvent*) {
         paintLink(p, body);
     } else if (category_ == kUnits) {
         paintRow(p, body, QStringLiteral("ALTITUDE"),
-                 QStringLiteral("HUD tape, telemetry bar, map labels, panels and steppers"));
+                 QStringLiteral("altitudes only: HUD tape, telemetry bar, map labels, panels, steppers"));
         paintSegmented(p, QRectF(body.left(), body.top() + 50, std::min(body.width(), 360.0), 54), alt_);
         paintRow(p, body.adjusted(0, 122, 0, 0), QStringLiteral("SPEED"),
                  QStringLiteral("airspeed, ground speed and wind"));
@@ -340,18 +357,30 @@ void SettingsScreen::paintEvent(QPaintEvent*) {
                  QStringLiteral("aircraft position, map cursor, camera target"));
         paintSegmented(p, QRectF(body.left(), body.top() + 294, std::min(body.width(), 480.0), 54), coord_);
         drawText(p, QRectF(body.left(), body.bottom() - 18, body.width(), 18), Qt::AlignLeft | Qt::AlignVCenter,
-                 QStringLiteral("distances stay metric · UTM on WGS84"), labelFont(10, false), alpha(kMuted, 0.8));
+                 QStringLiteral("distances and sizes stay metric · UTM on WGS84"), labelFont(10, false), alpha(kMuted, 0.8));
     } else if (category_ == kOffline) {
         paintOffline(p, body);
+    } else if (category_ == kDisplay) {
+        paintRow(p, body, QStringLiteral("TEXT SIZE"),
+                 QStringLiteral("labels, numbers and the boxes around them · map and camera keep their size"));
+        paintSegmented(p, QRectF(body.left(), body.top() + 54, std::min(body.width(), 480.0), 58), text_size_);
+        const QStringList notes = {
+            QStringLiteral("SMALL fits the most on screen · LARGE reads at arm's length in sunlight"),
+            QStringLiteral("The top bar grows only as far as it still fits the screen width")};
+        for (int i = 0; i < notes.size(); ++i) {
+            drawText(p, QRectF(body.left(), body.top() + 136 + i * 22, body.width(), 20),
+                     Qt::AlignLeft | Qt::AlignVCenter, notes[i], labelFont(10.5, false), i == 0 ? kText : kMuted);
+        }
     } else if (category_ == kBattery) {
         paintRow(p, body, QStringLiteral("LANDING RESERVE"),
                  QStringLiteral("battery that \"time left\" never counts on, on top of the return and the landing"));
         paintSegmented(p, QRectF(body.left(), body.top() + 54, body.width(), 58), reserve_);
         const QStringList notes = {
             QStringLiteral("TIME LEFT (battery chip, in flight) = how long it can keep flying the mission and still:"),
-            QStringLiteral("  · fly back to L (or home) into a wind 50 % stronger than measured"),
+            QStringLiteral("  · fly back to L (or home) into a wind %1 % stronger than measured")
+                .arg(std::lround((endurance::kWindFactor - 1.0) * 100.0)),
             QStringLiteral("  · circle down the approach, go around once, and land on the lift rotors"),
-            QStringLiteral("  · with all of that x 1.3, and this reserve left untouched"),
+            QStringLiteral("  · with all of that x %1, and this reserve left untouched").arg(endurance::kReturnMargin),
             QStringLiteral("Warns at 5 min, says LAND NOW at 0. It never lands by itself.")};
         for (int i = 0; i < notes.size(); ++i) {
             drawText(p, QRectF(body.left(), body.top() + 136 + i * 22, body.width(), 20),

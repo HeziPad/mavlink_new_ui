@@ -1,6 +1,7 @@
 #include "main_window.hpp"
 
 #include "alerts_panel.hpp"
+#include "hud_panel.hpp"
 #include "camera_view.hpp"
 #include "control_dock.hpp"
 #include "core/geo.hpp"
@@ -9,6 +10,7 @@
 #include "link/mavlink_client.hpp"
 #include "map_view.hpp"
 #include "orbit_panel.hpp"
+#include "payload_panel.hpp"
 #include "elevation_cache.hpp"
 #include "entry_pad.hpp"
 #include "speed_panel.hpp"
@@ -29,6 +31,7 @@
 #include "waypoint_panel.hpp"
 
 #include <QApplication>
+#include <QDir>
 #include <QCloseEvent>
 #include <QKeyEvent>
 #include <QMouseEvent>
@@ -43,6 +46,28 @@
 namespace gcs::ui {
 
 using namespace theme;
+
+// Payload ICDs (icds/*.json): GCS_ICD_DIR, then next to the binary (an install
+// or a package), then the source tree (a build directory).
+static QString payloadIcdDir() {
+    const QString env = qEnvironmentVariable("GCS_ICD_DIR");
+    if (!env.isEmpty()) {
+        return env;
+    }
+    const QString app = QCoreApplication::applicationDirPath();
+    for (const QString& d : {app + QStringLiteral("/icds"), app + QStringLiteral("/../share/mavlink_gcs_ui/icds"),
+                             app + QStringLiteral("/../Resources/icds")}) {
+        if (QDir(d).exists()) {
+            return QDir(d).absolutePath();
+        }
+    }
+#ifdef GCS_SOURCE_DIR
+    if (QDir(QStringLiteral(GCS_SOURCE_DIR "/icds")).exists()) {
+        return QStringLiteral(GCS_SOURCE_DIR "/icds");
+    }
+#endif
+    return {};
+}
 
 // ---- settings -------------------------------------------------------------------
 
@@ -74,11 +99,13 @@ AppSettings AppSettings::load() {
     s.speed_mode = std::clamp(q.value(QStringLiteral("flight/speed_mode"), s.speed_mode).toInt(), 0, 2);
     s.hud_reference = q.value(QStringLiteral("camera/hud_reference"), s.hud_reference).toInt();
     s.wind_north_up = q.value(QStringLiteral("camera/wind_north_up"), s.wind_north_up).toBool();
+    s.hud = q.value(QStringLiteral("camera/hud"), s.hud).toString();
     s.ball_collapsed = q.value(QStringLiteral("map/ball_collapsed"), s.ball_collapsed).toBool();
     s.trail_on = q.value(QStringLiteral("map/trail_on"), s.trail_on).toBool();
     s.trail_secs = q.value(QStringLiteral("map/trail_secs"), s.trail_secs).toInt();
     s.battery_reserve_pct =
         std::clamp(q.value(QStringLiteral("flight/battery_reserve_pct"), s.battery_reserve_pct).toInt(), 15, 50);
+    s.text_size = std::clamp(q.value(QStringLiteral("display/text_size"), s.text_size).toInt(), 0, 2);
 
     // seed missing keys so the settings file is discoverable and hand-editable
     const std::pair<const char*, QVariant> defaults[] = {
@@ -122,10 +149,12 @@ void AppSettings::save() const {
     q.setValue(QStringLiteral("flight/speed_mode"), speed_mode);
     q.setValue(QStringLiteral("camera/hud_reference"), hud_reference);
     q.setValue(QStringLiteral("camera/wind_north_up"), wind_north_up);
+    q.setValue(QStringLiteral("camera/hud"), hud);
     q.setValue(QStringLiteral("map/ball_collapsed"), ball_collapsed);
     q.setValue(QStringLiteral("map/trail_on"), trail_on);
     q.setValue(QStringLiteral("map/trail_secs"), trail_secs);
     q.setValue(QStringLiteral("flight/battery_reserve_pct"), battery_reserve_pct);
+    q.setValue(QStringLiteral("display/text_size"), text_size);
 }
 
 // ---- construction ---------------------------------------------------------------
@@ -139,6 +168,7 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
     pal.setColor(QPalette::Window, kBg);
     setPalette(pal);
     setReducedMotion(settings_.reduced_motion);
+    setUiScale(scaleFor(static_cast<TextSize>(settings_.text_size)));  // before any widget is built
     units::setAltUnit(settings_.alt_unit == 1 ? units::Alt::Feet : units::Alt::Meters);
     units::setSpeedUnit(static_cast<units::Speed>(settings_.speed_unit));
     units::setCoordFormat(static_cast<coords::Fmt>(settings_.coord_format));
@@ -171,6 +201,7 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
     camera_->setCamera(settings_.camera_hfov, settings_.camera_tilt);
     camera_->setHudReference(settings_.hud_reference == 1 ? CameraView::HudRef::Body : CameraView::HudRef::Los);
     camera_->setWindNorthUp(settings_.wind_north_up);
+    camera_->setHudConfig(hud::decode(settings_.hud.toStdString()));  // empty: the starting CUSTOM set
 
     host_ = new ViewHost(map_, camera_, this);
     strip_ = new PlanStrip(this);
@@ -182,8 +213,17 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
     bar_ = new TelemetryBar(this);
     dock_ = new ControlDock(this);
     fx_ = new FxOverlay(this);
-    fx_->setTopInset(58);
+    fx_->setTopInset(barBottom());
     alerts_ = new AlertsPanel(this);
+    hud_panel_ = new HudPanel(this);
+    payload_panel_ = new PayloadPanel(this);
+    for (const auto& dev : client_->payloadSnapshot().devices) {
+        if (dev.icd) {
+            if (auto a = payload::makeAdapter(dev.icd->id)) {
+                adapters_[dev.icd->id] = std::move(a);
+            }
+        }
+    }
     pf_ = std::make_unique<PreflightRunner>(client_.get());
     preflight_ = new PreflightScreen(this, pf_.get());
     pf_->onToast = [this](const QString& t, bool good) { fx_->toast(t, good ? kGreen : kRed, QStringLiteral("Preflight")); };
@@ -216,19 +256,12 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
             return;
         }
         refreshSpeedPanel();
-        speed_panel_->move(std::max(8, width() / 2 + 120), 64);
+        speed_panel_->move(std::max(8, width() / 2 + static_cast<int>(120 * bar_->effectiveScale())), barBottom() + 4);
         speed_panel_->show();
         speed_panel_->raise();
     });
 
     connect(bar_, &TelemetryBar::systemsTapped, this, [this] { showAlerts(!alerts_->isVisible()); });
-    connect(bar_, &TelemetryBar::safetyBlocked, this,
-            [this](const QString& reason) { fx_->toast(reason, kMuted, QStringLiteral("Safety")); });
-    connect(bar_, &TelemetryBar::safetyToggleRequested, this, [this](bool make_safe) {
-        client_->runSequence("safety", {link::makeSetSafety(make_safe)});
-        fx_->toast(make_safe ? QStringLiteral("Safety ON: motors cut") : QStringLiteral("Safety OFF: motors live"),
-                   make_safe ? kAmber : kRed, QStringLiteral("Safety"));
-    });
 
     bar_->setAltRef(settings_.alt_ref);
     connect(bar_, &TelemetryBar::altRefChanged, this, [this](int ref) {
@@ -249,6 +282,7 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
         v.trail_secs = settings_.trail_secs;
         v.labels_english = vector_map_->english();
         v.reserve_pct = settings_.battery_reserve_pct;
+        v.text_size = settings_.text_size;
         v.link = linkValues();
         refreshOfflineCounts();
         updateLinkStatus();
@@ -375,6 +409,7 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
         settings_.save();
         endurance_ms_ = -1000000;  // recompute now
     });
+    connect(settings_screen_, &SettingsScreen::textSizeChanged, this, &MainWindow::applyTextSize);
     connect(settings_screen_, &SettingsScreen::trailChanged, this, [this](bool on, int secs) {
         settings_.trail_on = on;
         settings_.trail_secs = secs;
@@ -402,16 +437,43 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
         settings_.save();
     });
     connect(camera_, &CameraView::groundClicked, this, &MainWindow::onCameraClick);
+    // the HUD: the panel edits it live; box folds and the brackets change it on the video
+    connect(camera_, &CameraView::hudPanelRequested, this, [this] { showHudPanel(!hud_panel_->isVisible()); });
+    connect(camera_, &CameraView::hudConfigChanged, this, [this] {
+        hud_panel_->setConfig(camera_->hudConfig());
+        saveHudConfig();
+    });
+    connect(hud_panel_, &HudPanel::configChanged, this, [this] {
+        camera_->setHudConfig(hud_panel_->config());
+        saveHudConfig();
+    });
+    connect(hud_panel_, &HudPanel::closeRequested, this, [this] { showHudPanel(false); });
+    // payloads: the generic panel sends any ICD command; numbers come from the pad
+    connect(camera_, &CameraView::payloadPanelRequested, this,
+            [this] { showPayloadPanel(!payload_panel_->isVisible()); });
+    connect(payload_panel_, &PayloadPanel::closeRequested, this, [this] { showPayloadPanel(false); });
+    connect(payload_panel_, &PayloadPanel::commandRequested, this,
+            [this](const QString& icd, const QString& name, const std::vector<double>& args) {
+                client_->sendPayloadCommand(icd.toStdString(), name.toStdString(), args);
+            });
+    connect(payload_panel_, &PayloadPanel::numberRequested, this, [this](const QString& title, int v, int lo, int hi) {
+        pad_->openNumber(title, QStringLiteral("VALUE"), v, lo, hi, {},
+                         [this](int x) { payload_panel_->setEditedNumber(x); });
+    });
+    connect(host_, &ViewHost::swapped, this, [this] {
+        if (host_->mainView() != camera_) {
+            showHudPanel(false);  // it edits the video: only while the video is the main view
+        }
+    });
     connect(camera_, &CameraView::windNorthUpChanged, this, [this](bool on) {
         settings_.wind_north_up = on;
         settings_.save();
     });
-    connect(camera_, &CameraView::hudReferenceChanged, this, [this](int ref) {
+    // what the HUD rulers follow: switched in the HUD panel (the panel shows it, no toast)
+    connect(hud_panel_, &HudPanel::rulerRefChanged, this, [this](int ref) {
         settings_.hud_reference = ref;
         settings_.save();
-        fx_->toast(ref == 1 ? QStringLiteral("HUD rulers follow the aircraft body")
-                            : QStringLiteral("HUD rulers follow the camera line of sight"),
-                   ref == 1 ? kAmber : kGreen, QStringLiteral("HUD"));
+        camera_->setHudReference(ref == 1 ? CameraView::HudRef::Body : CameraView::HudRef::Los, true);
     });
     connect(map_, &MapView::selectionChanged, this, &MainWindow::refreshPanel);
     connect(map_, &MapView::addToolChanged, this,
@@ -526,7 +588,15 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
         openCoordPad(QStringLiteral("FLY TO · POSITION"), init, [this](double lat, double lon) { sendGuided(lat, lon); });
     });
     connect(orbit_panel_, &OrbitPanel::altitudeTapped, this, [this] {
-        if (orbit_) {
+        if (guiding_ && guide_draft_) {
+            openAltPad(QStringLiteral("FLY TO · ALTITUDE"), s_.lat, s_.lon, guide_draft_->alt, altitude::kMinAgl,
+                       [this](double rel) {
+                           if (guide_draft_) {
+                               guide_draft_->alt = static_cast<float>(rel);
+                               refreshOrbitPanel();
+                           }
+                       });
+        } else if (orbit_) {
             openAltPad(orbit_->hold ? QStringLiteral("HOLD · ALTITUDE") : QStringLiteral("FLY TO · ALTITUDE"), orbit_->lat,
                        orbit_->lon, orbit_->alt, altitude::kMinAgl, [this](double rel) {
                            if (orbit_) {
@@ -608,12 +678,13 @@ void MainWindow::resizeEvent(QResizeEvent* e) {
 
 void MainWindow::layoutOverlays() {
     host_->setGeometry(rect());
-    bar_->setGeometry(8, 8, width() - 16, 52);
+    bar_->setGeometry(8, 8, width() - 16, bar_->heightFor(width() - 16));
     const QSize ds = dock_->sizeHint();
     dock_->setGeometry((width() - ds.width()) / 2, height() - ds.height() - 10, ds.width(), ds.height());
+    fx_->setTopInset(strip_->isVisible() ? strip_->geometry().bottom() + 4 : barBottom());
     host_->setPipMaxWidth((width() - ds.width()) / 2.0 - 32.0);
     strip_->adjustSize();
-    strip_->move((width() - strip_->width()) / 2, 66);
+    strip_->move((width() - strip_->width()) / 2, barBottom() + 6);
     panel_->adjustSize();
     panel_->move((width() - panel_->width()) / 2, height() - ds.height() - 18 - panel_->height());
     orbit_panel_->move(orbitPanelX(), height() - ds.height() - 18 - orbit_panel_->height());
@@ -626,6 +697,15 @@ void MainWindow::layoutOverlays() {
     }
     if (alerts_->isVisible()) {
         alerts_->place(alertsArea());
+        fx_->setRightInset(alerts_->width() + 8.0);  // its width follows the text size
+    }
+    if (hud_panel_->isVisible()) {
+        hud_panel_->place(alertsArea());
+        fx_->setRightInset(hud_panel_->width() + 8.0);
+    }
+    if (payload_panel_->isVisible()) {
+        payload_panel_->place(alertsArea());
+        fx_->setRightInset(payload_panel_->width() + 8.0);
     }
     strip_->raise();
     panel_->raise();
@@ -633,6 +713,8 @@ void MainWindow::layoutOverlays() {
     bar_->raise();
     dock_->raise();
     alerts_->raise();
+    hud_panel_->raise();
+    payload_panel_->raise();
     fx_->raise();
     if (settings_screen_->isVisible()) {
         settings_screen_->raise();
@@ -676,6 +758,11 @@ void MainWindow::frame() {
         updateLinkStatus();
     }
     alerts_->tick(dt);
+    if (hud_panel_->isVisible()) {
+        hud_panel_->setLiveVideo(camera_->live());
+    }
+    hud_panel_->tick(dt);
+    payload_panel_->tick(dt);
     pf_->update(s_, Clock::now(), video_->frameAge());
     preflight_->tick(dt);
     if (preflight_->isOpen() && isAirborne(s_)) {
@@ -726,8 +813,32 @@ int MainWindow::orbitPanelX() const {
     return std::max(centred, std::min(clear, width() - orbit_panel_->width() - 8));
 }
 
+int MainWindow::barBottom() const {
+    return bar_->geometry().bottom() + 1;
+}
+
+void MainWindow::applyTextSize(int size) {
+    settings_.text_size = std::clamp(size, 0, 2);
+    settings_.save();
+    setUiScale(scaleFor(static_cast<TextSize>(settings_.text_size)));
+    // stylesheet panels rebuild their sheets; painted widgets read uiScale() on their next paint
+    strip_->applyScale();
+    panel_->applyScale();
+    orbit_panel_->applyScale();
+    speed_panel_->applyScale();
+    pad_->applyScale();
+    layoutOverlays();
+    refreshPlanStrip();
+    if (speed_panel_->isVisible()) {
+        speed_panel_->move(std::max(8, width() / 2 + static_cast<int>(120 * bar_->effectiveScale())), barBottom() + 4);
+    }
+    for (QWidget* w : findChildren<QWidget*>()) {
+        w->update();
+    }
+}
+
 QRect MainWindow::alertsArea() const {
-    const int top = 66;
+    const int top = barBottom() + 6;
     const int bottom = height() - dock_->sizeHint().height() - 20;
     return QRect(8, top, width() - 16, std::max(160, bottom - top));
 }
@@ -784,6 +895,7 @@ link::MavlinkClient::Config MainWindow::linkConfig() const {
     cfg.remote_port = static_cast<uint16_t>(settings_.remote_port);
     cfg.serial_port = settings_.serial_port.toStdString();
     cfg.serial_baud = settings_.serial_baud;
+    cfg.payload_icd_dir = payloadIcdDir().toStdString();
     return cfg;
 }
 
@@ -882,11 +994,114 @@ void MainWindow::showAlerts(bool on) {
         fx_->setRightInset(0.0);
         return;
     }
+    if (hud_panel_->isVisible()) {
+        hud_panel_->hide();  // one panel on the right at a time
+        camera_->setHudPanelOpen(false);
+    }
+    payload_panel_->hide();
     alerts_->setAdvisories(advisories_, linkAlive(s_, Clock::now()));
     alerts_->place(alertsArea());
     alerts_->show();
     alerts_->raise();
     fx_->setRightInset(alerts_->width() + 8.0);
+}
+
+void MainWindow::showPayloadPanel(bool on) {
+    if (on) {
+        showAlerts(false);
+        showHudPanel(false);
+        speed_panel_->hide();
+        updatePayload();
+        payload_panel_->place(alertsArea());
+        payload_panel_->show();
+        payload_panel_->raise();
+        fx_->setRightInset(payload_panel_->width() + 8.0);
+    } else if (payload_panel_->isVisible()) {
+        payload_panel_->hide();
+        fx_->setRightInset(0.0);
+    }
+}
+
+void MainWindow::updatePayload() {
+    payload_snap_ = client_->payloadSnapshot();
+    payload_view_.reset();
+    payload_cam_.clear();
+    bool any_alive = false;
+    payload_panel_->setSnapshot(payload_snap_);
+    std::optional<payload::PayloadView> panel_view;
+    std::vector<std::pair<std::string, payload::CommandCall>> actions;
+    for (const auto& dev : payload_snap_.devices) {
+        if (!dev.icd) {
+            continue;
+        }
+        any_alive = any_alive || dev.alive;
+        const auto it = adapters_.find(dev.icd->id);
+        if (it == adapters_.end()) {
+            continue;
+        }
+        const bool selected = dev.icd->id == payload_panel_->selectedIcd();
+        if (selected) {
+            actions = it->second->quickActions(dev);
+        }
+        payload::PayloadView v;
+        if (dev.alive && it->second->view(dev, v)) {
+            if (v.camera && !payload_view_) {
+                payload_view_ = v;
+                payload_cam_ = dev.icd->id;
+            }
+            if (selected) {
+                panel_view = v;
+            }
+        }
+    }
+    payload_panel_->setAdapterInfo(panel_view, actions);
+    camera_->setPayloadChip(!payload_snap_.devices.empty(), payload_panel_->isVisible(), any_alive);
+    const double h = cameraHfov();
+    if (std::abs(h - payload_hfov_sent_) > 0.01) {
+        payload_hfov_sent_ = h;
+        camera_->setCamera(h, settings_.camera_tilt);
+    }
+}
+
+std::optional<CameraLos> MainWindow::payloadLos(const geo::Attitude& aircraft) const {
+    if (!payload_view_ || !payload_view_->camera) {
+        return std::nullopt;
+    }
+    CameraLos los;
+    los.gimbal = true;
+    los.earth = payload_view_->earth;
+    const geo::Attitude rel = geo::relativeTo(aircraft, los.earth);
+    los.pan_rel = rel.yaw_deg;
+    los.tilt_rel = rel.pitch_deg;
+    return los;
+}
+
+double MainWindow::cameraHfov() const {
+    return payload_view_ && payload_view_->hfov_deg > 0.1 ? payload_view_->hfov_deg : settings_.camera_hfov;
+}
+
+void MainWindow::showHudPanel(bool on) {
+    if (on) {
+        showAlerts(false);
+        payload_panel_->hide();
+        speed_panel_->hide();
+        hud_panel_->setConfig(camera_->hudConfig());
+        hud_panel_->setRulerRef(settings_.hud_reference);
+        hud_panel_->setLiveVideo(camera_->live());
+        hud_panel_->place(alertsArea());
+        hud_panel_->show();
+        hud_panel_->raise();
+        fx_->setRightInset(hud_panel_->width() + 8.0);
+    } else if (hud_panel_->isVisible()) {
+        hud_panel_->hide();
+        fx_->setRightInset(0.0);
+    }
+    camera_->setHudPanelOpen(on);
+}
+
+void MainWindow::saveHudConfig() {
+    settings_.hud = QString::fromStdString(hud::encode(camera_->hudConfig()));
+    settings_.save();
 }
 
 void MainWindow::openPreflight() {
@@ -939,7 +1154,7 @@ void MainWindow::updateHeights(qint64 now_ms) {
     if (land_ground_ && s_.has_position) {
         afl = s_.alt_amsl - *land_ground_;
     }
-    bar_->setAltitudes(agl, rf.has_value(), afl);
+    bar_->setAltitudes(agl, afl);
 
     // the map's nav box: ground under the aircraft, and where it is going (5 Hz)
     if (now_ms - nav_ms_ < 200) {
@@ -1194,7 +1409,6 @@ void MainWindow::updateSpeedTarget(qint64 now_ms) {
     if (want == Target::Default && (!speed_sent_ || *speed_sent_ == Target::Default || *speed_sent_ == Target::Cruise)) {
         speed_sent_ = want;  // nothing of ours to undo
         speed_label_.clear();
-        bar_->setSpeedTarget(speed_label_);
         return;
     }
     client_->runSequence("speed", {link::makeChangeSpeed(v)});
@@ -1202,7 +1416,6 @@ void MainWindow::updateSpeedTarget(qint64 now_ms) {
     const double shown = want == Target::Loiter ? loiter : want == Target::Max ? s_.airspeed_max : s_.airspeed_cruise;
     speed_label_ = want == Target::Default ? QString()
                                            : QStringLiteral("%1 %2").arg(QLatin1String(targetName(want)), units::speedText(shown));
-    bar_->setSpeedTarget(speed_label_);
     if (speed_panel_->isVisible()) {
         refreshSpeedPanel();
     }
@@ -1231,6 +1444,7 @@ void MainWindow::pullState() {
     for (const auto& ev : client_->pollEvents()) {
         handleEvent(ev);
     }
+    updatePayload();
 
     // mode / VTOL change banners
     if (s_.has_heartbeat && s_.mode_name != last_mode_) {
@@ -1280,6 +1494,9 @@ void MainWindow::pullState() {
     }
     updateHeights(clock_.elapsed());
     updateSpeedTarget(clock_.elapsed());
+    autoSafetyOnLanded();
+    bar_->setSpeed(speed_sent_ ? static_cast<int>(*speed_sent_) : 0, settings_.speed_mode, isAirborne(s_));
+    bar_->setCommandedAlt(commandedAltRel());
     bar_->setState(s_, now);
     map_->setState(s_);
     map_->setDefaultLoiterRadius(defaultRadius());
@@ -1293,7 +1510,9 @@ void MainWindow::updateMotion() {
     const auto now = Clock::now();
     if (s_.has_attitude) {
         const geo::Attitude att = predictAttitude(s_, now);
-        const CameraLos los = cameraLos(s_, att, settings_.camera_tilt, now, settings_.gimbal_body_frame);
+        // a payload reporting its own line of sight (payload adapter) wins over the gimbal
+        const CameraLos los =
+            payloadLos(att).value_or(cameraLos(s_, att, settings_.camera_tilt, now, settings_.gimbal_body_frame));
         camera_->setMotion(att, los);
         map_->setHeading(att.yaw_deg);
         map_->setAttitude(att.roll_deg, att.pitch_deg);
@@ -1346,7 +1565,7 @@ void MainWindow::updateFootprint(const CameraLos& los) {
         return;
     }
     geo::CameraModel cam;
-    cam.hfov_deg = settings_.camera_hfov;
+    cam.hfov_deg = cameraHfov();
     cam.mount_pitch_deg = 0.0;  // los.earth already includes the mount / gimbal
     cam.width = 1600.0;
     cam.height = 1600.0 / camera_->aspect();
@@ -1693,6 +1912,12 @@ void MainWindow::handleEvent(const link::LinkEvent& ev) {
     case T::Error:
         fx_->toast(text, kRed, QStringLiteral("Error"));
         break;
+    case T::PayloadResult:
+        payload_panel_->addResult(text, ev.ok);
+        if (!ev.ok) {
+            fx_->toast(text, kRed, QStringLiteral("Payload"));
+        }
+        break;
     case T::ParamSet:
         pf_->onEvent(ev);
         fx_->toast(ev.ok ? QStringLiteral("%1 = %2 (confirmed)").arg(QString::fromStdString(ev.tag), text)
@@ -1768,6 +1993,9 @@ void MainWindow::refreshDock() {
             spec.hold_to_confirm = true;
             spec.hint = mission ? QStringLiteral("Hold: vertical takeoff, straight transition, then the plan")
                                 : QStringLiteral("Hold: vertical takeoff, straight transition, then Hold");
+            if (safetyState(s_) == SafetyState::Live && !s_.armed) {
+                spec.hint += QStringLiteral("\nSafety OFF: motors live (it turns back ON after landing)");
+            }
             // Not a lock: the pre-arm bit is evaluated in the *current* mode, and
             // the sequence changes mode first (e.g. "QRTL mode not armable"
             // clears once in AUTO). The vehicle has the final say via the ARM ack.
@@ -1782,8 +2010,16 @@ void MainWindow::refreshDock() {
                 spec.enabled = false;
                 spec.reason = pf_->launchBlockReason(s_, Clock::now());
             } else if (safetyState(s_) == SafetyState::Safe) {
-                spec.enabled = false;
-                spec.reason = QStringLiteral("Safety ON: motors cut. Hold SAFETY in the top bar for 1 s to turn it off");
+                // first hold: motors live; the button then becomes Takeoff / Launch
+                spec.label = QStringLiteral("Safety Off");
+                spec.icon = DockIcon::Safety;
+                spec.accent = kAmber;
+                spec.hint = QStringLiteral("Safety is ON: motors cut.\nHold 1 s: motors live. Then hold again to take off");
+                if (clock_.elapsed() < safety_pending_until_ms_) {
+                    spec.label = QStringLiteral("Safety…");
+                    spec.enabled = false;
+                    spec.reason = QStringLiteral("Turning the safety off");
+                }
             } else if (!gpsHealthy(s_) || !s_.has_home) {
                 spec.enabled = false;
                 spec.reason = QStringLiteral("Waiting for GPS fix and home position");
@@ -1925,13 +2161,26 @@ void MainWindow::onTriggered(int slot) {
         }
         break;
     case kLaunch:
+        if (!isAirborne(s_) && !s_.armed && safetyState(s_) == SafetyState::Safe) {
+            // the first of the two holds: motors live
+            client_->runSequence("safety", {link::makeSetSafety(false)});
+            safety_pending_until_ms_ = clock_.elapsed() + 2500;
+            fx_->toast(QStringLiteral("Safety OFF: motors live · hold again to take off"), kRed,
+                       QStringLiteral("Safety"));
+            refreshDock();
+            break;
+        }
         launchOrAuto();
         break;
     case kGuide:
         if (!isAirborne(s_) && !s_.armed) {
             openPreflight();
         } else {
+            if (guiding_ && orbit_ && !orbit_->hold) {
+                hold_panel_hidden_ = true;  // Fly To off by hand: its panel goes too (the circle goes on)
+            }
             setGuide(!guiding_);
+            refreshDock();
         }
         break;
     case kHold:
@@ -1988,7 +2237,7 @@ void MainWindow::exitPlan() {
     planning_ = false;
     map_->setMode(guiding_ ? MapView::Mode::Guide : MapView::Mode::Normal);
     strip_->hide();
-    fx_->setTopInset(58);
+    fx_->setTopInset(barBottom());
     refreshPanel();
     refreshDock();
 }
@@ -1998,9 +2247,9 @@ void MainWindow::refreshPlanStrip() {
     const double route = routeLength(plan);
     strip_->setInfo(static_cast<int>(plan.wps.size()), route, route / std::max(1.0, settings_.cruise_speed),
                     plan.land.has_value(), map_->canUndo(), plan.pattern);
-    strip_->move((width() - strip_->width()) / 2, 66);
+    strip_->move((width() - strip_->width()) / 2, barBottom() + 6);
     // keep toasts / alerts clear of the strip's buttons
-    fx_->setTopInset(strip_->isVisible() ? strip_->geometry().bottom() + 4 : 58);
+    fx_->setTopInset(strip_->isVisible() ? strip_->geometry().bottom() + 4 : barBottom());
     refreshPanel();
     refreshDock();
 }
@@ -2148,6 +2397,16 @@ void MainWindow::setGuide(bool on) {
     if (on && planning_) {
         exitPlan();
     }
+    // no circle of ours to adjust yet (AUTO, climb-out): the panel edits the
+    // altitude / radius / direction the first target will be flown at
+    guide_draft_.reset();
+    if (on && !(orbit_ && s_.custom_mode == plane::GUIDED)) {
+        Orbit d;
+        d.alt = static_cast<float>(std::max(30.0, std::round(s_.alt_rel)));
+        d.radius = static_cast<float>(defaultRadius());
+        d.hold = false;
+        guide_draft_ = d;
+    }
     if (!planning_) {
         map_->setMode(on ? MapView::Mode::Guide : MapView::Mode::Normal);
     }
@@ -2159,7 +2418,9 @@ void MainWindow::sendGuided(double lat, double lon) {
     takeoff_handoff_ = false;  // a guided target from the hover flies off on the wing
     climb_out_ = false;
     Orbit o;
-    if (orbit_) {
+    if (guide_draft_) {
+        o = *guide_draft_;  // what the panel was set to before the first target
+    } else if (orbit_) {
         o = *orbit_;  // keep the altitude / radius / direction being flown
     } else {
         o.alt = static_cast<float>(std::max(30.0, std::round(s_.alt_rel)));
@@ -2173,6 +2434,11 @@ void MainWindow::sendGuided(double lat, double lon) {
     sendOrbit();
     map_->ping(lat, lon, kCyan);
     dock_->setPending(kGuide, true);
+    // one target per press of Fly To: the button and its panel go off (press Fly To
+    // again to adjust this circle or pick a new target); the circle goes on
+    hold_panel_hidden_ = true;
+    setGuide(false);
+    refreshDock();
 }
 
 double MainWindow::defaultRadius() const {
@@ -2217,6 +2483,16 @@ void MainWindow::updateOrbitTrim() {
 }
 
 void MainWindow::adjustOrbit(float d_alt, float d_radius, bool flip) {
+    if (guiding_ && guide_draft_) {
+        // nothing flown yet: only the values the first target will use
+        guide_draft_->alt = std::clamp(guide_draft_->alt + d_alt, kMinOrbitAlt, kMaxOrbitAlt);
+        guide_draft_->radius = std::clamp(guide_draft_->radius + d_radius, kMinOrbitRadius, kMaxOrbitRadius);
+        if (flip) {
+            guide_draft_->ccw = !guide_draft_->ccw;
+        }
+        refreshOrbitPanel();
+        return;
+    }
     if (!orbit_) {
         if (onEndHold()) {
             adjustEndHold(d_alt, d_radius, flip);
@@ -2241,12 +2517,15 @@ void MainWindow::adjustOrbit(float d_alt, float d_radius, bool flip) {
 }
 
 void MainWindow::refreshOrbitPanel() {
-    // Hold: always while holding; Fly To: while its button is on (the circle
-    // keeps flying when it's off)
-    const bool show = orbit_ && (guiding_ || (orbit_->hold && !hold_panel_hidden_)) && !planning_ &&
+    // Hold: shown until hidden (Hold pressed again); Fly To: while its button is on
+    const bool show = orbit_ && (guiding_ || !hold_panel_hidden_) && !planning_ &&
                       s_.custom_mode == plane::GUIDED && isAirborne(s_);
-    orbit_panel_->setCoordButton(show && !orbit_->hold);
-    if (show) {
+    const bool draft = guiding_ && guide_draft_ && !planning_ && isAirborne(s_);
+    orbit_panel_->setCoordButton(draft || (show && !orbit_->hold));
+    if (draft) {
+        orbit_panel_->setValues(QStringLiteral("FLY TO"), guide_draft_->alt, guide_draft_->radius, guide_draft_->ccw,
+                                s_.alt_rel);
+    } else if (show) {
         orbit_panel_->setValues(orbit_->hold ? QStringLiteral("HOLD") : QStringLiteral("FLY TO"), orbit_->alt,
                                 orbit_->radius, orbit_->ccw, s_.alt_rel, orbitDraw().flown, orbitDraw().trimmed);
     } else if (!planning_ && onEndHold()) {
@@ -2325,15 +2604,28 @@ void MainWindow::sendEndHold(qint64 now_ms) {
 }
 
 void MainWindow::onCameraClick(double px, double py, double w, double h) {
+    if (!guiding_ && payload_view_ && w > 0 && h > 0) {
+        // not guiding: a tap on the video asks the camera payload to track there
+        const auto it = adapters_.find(payload_cam_);
+        if (it != adapters_.end()) {
+            const double nw = 0.08, nh = 0.08 * w / h;
+            if (const auto call = it->second->trackAt(px / w, py / h, nw, nh)) {
+                client_->sendPayloadCommand(payload_cam_, call->name, call->args);
+                fx_->toast(QStringLiteral("Track requested"), kCyan, QStringLiteral("Payload"));
+            }
+        }
+        return;
+    }
     if (!guiding_ || !s_.has_position) {
         return;
     }
-    // cast through the camera's actual line of sight (gimbal, or the fixed mount)
+    // cast through the camera's actual line of sight (payload, gimbal, or the fixed mount)
     const auto now = Clock::now();
     const geo::Attitude att = predictAttitude(s_, now);
-    const CameraLos los = cameraLos(s_, att, settings_.camera_tilt, now, settings_.gimbal_body_frame);
+    const CameraLos los =
+        payloadLos(att).value_or(cameraLos(s_, att, settings_.camera_tilt, now, settings_.gimbal_body_frame));
     geo::CameraModel cam;
-    cam.hfov_deg = settings_.camera_hfov;
+    cam.hfov_deg = cameraHfov();
     cam.mount_pitch_deg = 0.0;  // los.earth already includes the mount / gimbal
     cam.width = w;
     cam.height = h;
@@ -2427,6 +2719,7 @@ void MainWindow::hold() {
     takeoff_handoff_ = false;
     climb_out_ = false;
     land_pending_ = false;
+    hold_panel_hidden_ = false;  // a new hold always shows its panel
     setGuide(false);
     if (!s_.has_position) {
         return;
@@ -2580,6 +2873,15 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* e) {
                 return !dock_->geometry().contains(local);  // the dock still does what it says
             }
         }
+        // the HUD panel: a tap outside closes it, except on the HUD chip (it toggles)
+        if (hud_panel_->isVisible()) {
+            const QPoint local = mapFromGlobal(global).toPoint();
+            const QRectF chip = camera_->hudChipRect().translated(camera_->mapTo(this, QPoint(0, 0)));
+            if (!hud_panel_->geometry().contains(local) && !chip.contains(local) && !bar_->geometry().contains(local)) {
+                showHudPanel(false);
+                return !dock_->geometry().contains(local);
+            }
+        }
         // the SYSTEMS panel has no close button: a tap outside it closes it (the
         // top bar is left alone, its SYSTEMS chip toggles the panel itself)
         if (alerts_->isVisible() && !preflight_->isOpen()) {
@@ -2597,6 +2899,47 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* e) {
         return !(pad_ && pad_->isOpen());
     }
     return QWidget::eventFilter(obj, e);
+}
+
+void MainWindow::autoSafetyOnLanded() {
+    // Back on the ground and disarmed (ArduPlane disarms a few seconds after
+    // touchdown): safety ON, so the motors can't start by accident. Only after
+    // the disarm: while armed it would cut every output, the pusher too.
+    const bool disarmed_now = was_armed_ && !s_.armed && s_.has_heartbeat;
+    was_armed_ = s_.armed;
+    if (disarmed_now && !isAirborne(s_) && safetyState(s_) == SafetyState::Live) {
+        client_->runSequence("safety", {link::makeSetSafety(true)});
+        fx_->toast(QStringLiteral("On the ground: safety ON, motors cut"), kAmber, QStringLiteral("Safety"));
+    }
+}
+
+std::optional<double> MainWindow::commandedAltRel() const {
+    // what the GCS asked for (height above home), not the autopilot's slewing
+    // target, so the bar's "→" stays put during a climb
+    if (!s_.armed) {
+        return std::nullopt;
+    }
+    if (takeoff_handoff_ || climb_out_) {
+        return settings_.takeoff_alt;
+    }
+    if (s_.custom_mode == plane::GUIDED && orbit_) {
+        return orbit_->alt;
+    }
+    if (s_.custom_mode == plane::AUTO && s_.mission_known && s_.mission_current >= 1 &&
+        s_.mission_current < static_cast<int>(s_.mission.size())) {
+        const MissionItem& it = s_.mission[s_.mission_current];
+        switch (it.command) {
+        case mav::kCmdNavWaypoint:
+        case mav::kCmdNavLoiterUnlim:
+        case mav::kCmdNavLoiterTurns:
+        case mav::kCmdNavLoiterTime:
+        case mav::kCmdNavLoiterToAlt:
+            return it.z;
+        default:
+            break;
+        }
+    }
+    return std::nullopt;
 }
 
 }  // namespace gcs::ui

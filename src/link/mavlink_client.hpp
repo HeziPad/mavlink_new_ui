@@ -4,6 +4,7 @@
 #include "core/vehicle_state.hpp"
 #include "link_events.hpp"
 #include "mission_transfer.hpp"
+#include "payload/payload_manager.hpp"
 #include "transport.hpp"
 
 #include <atomic>
@@ -40,6 +41,8 @@ public:
         int serial_baud = 57600;
         uint8_t gcs_sysid = 255;
         uint8_t gcs_compid = 190;
+        // payload ICDs (*.json) to load; empty: none
+        std::string payload_icd_dir;
     };
 
     explicit MavlinkClient(Config cfg);
@@ -81,6 +84,14 @@ public:
     // roll, r yaw -1000..1000; z throttle 0..1000.
     void manualControl(int x, int y, int z, int r, int hold_ms = 400);
     void stopManualControl();
+
+    // ---- payloads (icds/*.json, see payload/payload_manager.hpp) --------------
+    payload::PayloadSnapshot payloadSnapshot() const;
+    // a command by its ICD name; the outcome comes back as LinkEvent::PayloadResult
+    void sendPayloadCommand(const std::string& icd_id, const std::string& command, std::vector<double> args);
+    // repeat at hz (joystick, keep-alives); hz <= 0 stops it
+    void streamPayloadCommand(const std::string& icd_id, const std::string& command, std::vector<double> args,
+                              double hz);
 
 
 private:
@@ -124,6 +135,8 @@ private:
     bool had_vehicle_ = false;  // a vehicle was found before (reconfigure keeps what is known)
     std::unique_ptr<MissionTransfer> mission_;
     std::unique_ptr<CommandSender> commands_;
+    std::unique_ptr<payload::PayloadManager> payload_;
+    payload::PayloadSnapshot payload_shared_;  // mutex_
     Clock::time_point last_gcs_heartbeat_{};
     Clock::time_point last_stream_request_{};
     Clock::time_point last_home_request_{};

@@ -11,7 +11,7 @@
 
 namespace gcs::ui {
 
-enum class DockIcon { Plan, Upload, Launch, Takeoff, Auto, Guide, Hold, Land, Preflight };
+enum class DockIcon { Plan, Upload, Launch, Takeoff, Auto, Guide, Hold, Land, Preflight, Safety };
 
 struct DockSlotSpec {
     QString label;

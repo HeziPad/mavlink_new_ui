@@ -4,6 +4,11 @@
 #include <QFontDatabase>
 #include <QPainter>
 #include <QPixmap>
+#include <QGridLayout>
+#include <QLayout>
+#include <QRegularExpression>
+#include <QSpacerItem>
+#include <QWidget>
 
 #include <algorithm>
 #include <cmath>
@@ -12,6 +17,109 @@ namespace gcs::ui::theme {
 
 namespace {
 bool g_reduced_motion = false;
+double g_ui_scale = 1.0;
+}
+
+double scaleFor(TextSize t) {
+    switch (t) {
+    case TextSize::Medium:
+        return 1.25;
+    case TextSize::Large:
+        return 1.5;
+    case TextSize::Small:
+        break;
+    }
+    return 1.0;
+}
+
+double uiScale() {
+    return g_ui_scale;
+}
+
+void setUiScale(double k) {
+    g_ui_scale = std::clamp(k, 0.5, 3.0);
+}
+
+int sci(double px) {
+    return static_cast<int>(std::lround(sc(px)));
+}
+
+QString scaleCss(const QString& css) {
+    static const QRegularExpression re(QStringLiteral("(\\d+(?:\\.\\d+)?)px"));
+    QString out;
+    out.reserve(css.size());
+    qsizetype last = 0;
+    for (auto it = re.globalMatch(css); it.hasNext();) {
+        const QRegularExpressionMatch m = it.next();
+        out += css.mid(last, m.capturedStart() - last);
+        const double px = m.captured(1).toDouble();
+        out += px <= 1.0 ? m.captured(0) : cssPx(px);
+        last = m.capturedEnd();
+    }
+    out += css.mid(last);
+    return out;
+}
+
+void scaleWidgetTree(QWidget* root) {
+    const double k = g_ui_scale;
+    auto scaled = [k](int v) { return static_cast<int>(std::lround(v * k)); };
+    for (QLayout* l : root->findChildren<QLayout*>()) {
+        if (!l->property("gcsBase").isValid()) {
+            const QMargins m = l->contentsMargins();
+            l->setProperty("gcsBase", QRect(m.left(), m.top(), m.right(), m.bottom()));
+            l->setProperty("gcsBaseSpacing", l->spacing());
+            if (auto* g = qobject_cast<QGridLayout*>(l)) {
+                l->setProperty("gcsBaseH", g->horizontalSpacing());
+                l->setProperty("gcsBaseV", g->verticalSpacing());
+            }
+        }
+        const QRect m = l->property("gcsBase").toRect();
+        l->setContentsMargins(scaled(m.x()), scaled(m.y()), scaled(m.width()), scaled(m.height()));
+        const int sp = l->property("gcsBaseSpacing").toInt();
+        if (auto* g = qobject_cast<QGridLayout*>(l)) {
+            g->setHorizontalSpacing(scaled(l->property("gcsBaseH").toInt()));
+            g->setVerticalSpacing(scaled(l->property("gcsBaseV").toInt()));
+        } else if (sp >= 0) {
+            l->setSpacing(scaled(sp));
+        }
+        for (int i = 0; i < l->count(); ++i) {
+            QSpacerItem* s = l->itemAt(i)->spacerItem();
+            if (!s) {
+                continue;
+            }
+            const QByteArray key = "gcsSpacer" + QByteArray::number(i);
+            if (!l->property(key.constData()).isValid()) {
+                l->setProperty(key.constData(), s->sizeHint());
+            }
+            const QSize b = l->property(key.constData()).toSize();
+            s->changeSize(scaled(b.width()), scaled(b.height()), s->sizePolicy().horizontalPolicy(),
+                          s->sizePolicy().verticalPolicy());
+        }
+        l->invalidate();
+    }
+    for (QWidget* w : root->findChildren<QWidget*>()) {
+        if (!w->property("gcsBaseMin").isValid()) {
+            w->setProperty("gcsBaseMin", w->minimumSize());
+            w->setProperty("gcsBaseMax", w->maximumSize());
+        }
+        const QSize mn = w->property("gcsBaseMin").toSize();
+        const QSize mx = w->property("gcsBaseMax").toSize();
+        w->setMinimumSize(scaled(mn.width()), scaled(mn.height()));
+        w->setMaximumSize(mx.width() >= QWIDGETSIZE_MAX ? QWIDGETSIZE_MAX : scaled(mx.width()),
+                          mx.height() >= QWIDGETSIZE_MAX ? QWIDGETSIZE_MAX : scaled(mx.height()));
+    }
+}
+
+QString cssPx(double px) {
+    return QStringLiteral("%1px").arg(std::max(1L, std::lround(sc(px))));
+}
+
+QSizeF logicalSize(const QSizeF& physical) {
+    return physical / g_ui_scale;
+}
+
+QPointF toLogical(const QPointF& physical) {
+    return physical / g_ui_scale;
 }
 
 bool reducedMotion() {

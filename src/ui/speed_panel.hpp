@@ -19,6 +19,7 @@ public:
 
     // < 0: unknown (not read yet)
     // loiter_flown: what is actually commanded when circling (kept above Q_ASSIST_SPEED)
+    void applyScale();  // text size changed (theme::uiScale)
     void setValues(double loiter, double cruise, double max, int mode, const QString& active, double loiter_flown,
                    double q_assist);
 

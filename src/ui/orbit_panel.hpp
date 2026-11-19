@@ -29,6 +29,7 @@ public:
     // relabel the altitude steppers after a unit change
     void unitsChanged();
     void setCoordButton(bool on);  // ⌖ COORD: only for Fly To
+    void applyScale();             // text size changed (theme::uiScale)
 
 signals:
     void altitudeDelta(float delta);

@@ -48,6 +48,7 @@ set(GCS_LINK_SOURCES
     src/link/mavlink_client.cpp
     src/link/mavlink_globals.cpp
     src/link/mission_transfer.cpp
+    src/payload/payload_manager.cpp
 )
 
 add_library(gcs_core STATIC
@@ -59,6 +60,8 @@ add_library(gcs_core STATIC
     src/core/coords.cpp
     src/core/endurance.cpp
     src/core/flight_status.cpp
+    src/core/hud_config.cpp
+    src/core/display_round.cpp
     src/core/mission.cpp
     src/core/mvt.cpp
     src/core/orbit_trim.cpp
@@ -68,6 +71,11 @@ add_library(gcs_core STATIC
     src/core/speed_mode.cpp
     src/core/tiles.cpp
     src/core/vehicle_state.cpp
+    src/payload/adapter.cpp
+    src/payload/adapters/nextvision.cpp
+    src/payload/icd.cpp
+    src/payload/icd_codec.cpp
+    src/payload/json.cpp
     src/link/serial_transport.cpp
     src/link/udp_transport.cpp
     ${GCS_LINK_SOURCES}
@@ -96,8 +104,10 @@ add_executable(mavlink_gcs_ui
     src/ui/elevation_cache.cpp
     src/ui/entry_pad.cpp
     src/ui/fx_overlay.cpp
+    src/ui/hud_panel.cpp
     src/ui/main_window.cpp
     src/ui/orbit_panel.cpp
+    src/ui/payload_panel.cpp
     src/ui/map_view.cpp
     src/ui/offline_downloader.cpp
     src/ui/offline_store.cpp
@@ -119,6 +129,8 @@ add_executable(mavlink_gcs_ui
     src/ui/wind_gauge.cpp
 )
 target_link_libraries(mavlink_gcs_ui PRIVATE gcs_core Qt6::Widgets Qt6::Network)
+# payload ICDs: found in the source tree when running from a build directory
+target_compile_definitions(mavlink_gcs_ui PRIVATE GCS_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 gcs_warnings(mavlink_gcs_ui)
 # bundled fonts: the same look and text metrics on every OS (theme::loadFonts)
 qt_add_resources(mavlink_gcs_ui fonts
@@ -152,7 +164,7 @@ endif()
 
 # ---- tests ----------------------------------------------------------------------
 enable_testing()
-foreach(name geo altitude coords endurance flight_status mission_builder mission_transfer command_sender lift_rotors health orbit_trim preflight offline_map transport)
+foreach(name geo altitude coords display_round endurance flight_status hud_config mission_builder mission_transfer command_sender lift_rotors health orbit_trim preflight offline_map transport)
     add_executable(test_${name} tests/test_${name}.cpp)
     target_link_libraries(test_${name} PRIVATE gcs_core)
     gcs_warnings(test_${name})
@@ -161,6 +173,15 @@ foreach(name geo altitude coords endurance flight_status mission_builder mission
     endif()
     add_test(NAME ${name} COMMAND test_${name})
 endforeach()
+# payload ICD engine: reads icds/*.json from the source tree
+add_executable(test_payload tests/test_payload.cpp)
+target_link_libraries(test_payload PRIVATE gcs_core)
+target_compile_definitions(test_payload PRIVATE GCS_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+gcs_warnings(test_payload)
+if(NOT MSVC)
+    target_compile_options(test_payload PRIVATE -Wno-address-of-packed-member -Wno-pedantic)
+endif()
+add_test(NAME payload COMMAND test_payload)
 
 # ---- install & packages -----------------------------------------------------------
 # Linux: binary + desktop entry + icons. Windows / macOS: a self-contained
@@ -173,10 +194,17 @@ if(WIN32 OR APPLE)
         install(TARGETS mavlink_gcs_ui BUNDLE DESTINATION . RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
         qt_generate_deploy_app_script(TARGET mavlink_gcs_ui OUTPUT_SCRIPT gcs_deploy NO_UNSUPPORTED_PLATFORM_ERROR)
         install(SCRIPT ${gcs_deploy})
+        # payload ICDs next to the binary (Windows) / in the bundle (macOS)
+        if(APPLE)
+            install(DIRECTORY icds/ DESTINATION mavlink_gcs_ui.app/Contents/Resources/icds FILES_MATCHING PATTERN "*.json")
+        else()
+            install(DIRECTORY icds/ DESTINATION ${CMAKE_INSTALL_BINDIR}/icds FILES_MATCHING PATTERN "*.json")
+        endif()
     endif()
 else()
     install(TARGETS mavlink_gcs_ui RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
     install(FILES resources/mavlink_gcs_ui.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+    install(DIRECTORY icds/ DESTINATION ${CMAKE_INSTALL_DATADIR}/mavlink_gcs_ui/icds FILES_MATCHING PATTERN "*.json")
     foreach(size 16 24 32 48 64 128 256 512)
         install(FILES resources/icons/mavlink_gcs_ui_${size}.png
                 DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/${size}x${size}/apps

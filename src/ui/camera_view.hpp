@@ -1,10 +1,14 @@
 #pragma once
 
 #include "anim.hpp"
+#include "core/hud_config.hpp"
 #include "core/vehicle_state.hpp"
 #include "view_host.hpp"
 
 #include <QImage>
+#include <QRectF>
+
+#include <array>
 #include <QPixmap>
 
 namespace gcs::ui {
@@ -20,7 +24,7 @@ class VideoReceiver;
 //
 // The main rulers (horizon/ladder, roll scale, heading tape) follow either the
 // camera LOS (lines up with the video) or the aircraft body (nose = screen
-// centre); a chip under the AIRCRAFT box switches, with an animated sweep.
+// centre); the HUD panel switches it, with an animated sweep.
 class CameraView : public HudView {
     Q_OBJECT
 
@@ -32,6 +36,27 @@ public:
     HudRef hudReference() const { return ref_; }
     void setWindNorthUp(bool on) { wind_north_up_ = on; update(); }
     bool windNorthUp() const { return wind_north_up_; }
+
+    // What the HUD draws (HudPanel edits it; box folds and the measuring
+    // brackets are changed here too and reported by hudConfigChanged).
+    void setHudConfig(const hud::Config& c);
+    const hud::Config& hudConfig() const { return cfg_; }
+    // the HUD colour swatches (hud::Config::color)
+    static QColor swatch(int index);
+    // a crosshair style centred on c, scaled by k (also the HUD panel's previews)
+    static void drawReticle(QPainter& p, const QPointF& c, hud::Crosshair style, const QColor& color,
+                            double line_factor, double k, const QRectF& bounds);
+    // the HUD chip in widget pixels (empty in PiP), for MainWindow's outside-tap test
+    QRectF hudChipRect() const { return QRectF(hud_chip_.topLeft() * hit_k_, hud_chip_.size() * hit_k_); }
+    // the chip lights while the HUD panel is open
+    void setHudPanelOpen(bool open) { hud_panel_open_ = open; update(); }
+    // the PAYLOAD chip (next to HUD): shown while a payload ICD is loaded
+    QRectF payloadChipRect() const { return QRectF(payload_chip_.topLeft() * hit_k_, payload_chip_.size() * hit_k_); }
+    void setPayloadChip(bool shown, bool open, bool alive) {
+        payload_chip_shown_ = shown;
+        payload_panel_open_ = open;
+        payload_alive_ = alive;
+    }
 
     QString pipTag() const override;
     QColor pipTagColor() const override;
@@ -63,8 +88,10 @@ public:
 
 signals:
     void groundClicked(double px, double py, double width, double height);
-    void hudReferenceChanged(int ref);  // HudRef
     void windNorthUpChanged(bool on);
+    void hudConfigChanged();      // a box folded / unfolded, the brackets resized
+    void hudPanelRequested();     // the HUD chip
+    void payloadPanelRequested(); // the PAYLOAD chip
 
 protected:
     void paintEvent(QPaintEvent* e) override;
@@ -74,10 +101,51 @@ public:
 
 protected:
     void mousePressEvent(QMouseEvent* e) override;
+    void mouseMoveEvent(QMouseEvent* e) override;
+    void mouseReleaseEvent(QMouseEvent* e) override;
+    void wheelEvent(QWheelEvent* e) override;
+    bool event(QEvent* e) override;
     void compactChanged() override { setGuideMode(guide_); }
 
 private:
     void paintLosTarget(QPainter& p);
+    // ---- configurable HUD -----------------------------------------------------------
+    hud::Config cfg_ = hud::defaultConfig();
+    QColor hudColor() const { return swatch(cfg_.color); }
+    double lw(double w) const { return w * cfg_.lineFactor(); }  // a HUD pen width
+    bool shows(hud::Element e) const { return cfg_.shows(e); }
+    // the rulers follow the body only while some ruler is shown
+    double bodyBlend() const;
+    // the picture on screen, physical px: the letterboxed video when live
+    QRectF pictureRect() const;
+    void paintCrosshair(QPainter& p, const QPointF& c, double alpha_k);
+    void paintMeasure(QPainter& p, const QPointF& c);
+    void paintHudChip(QPainter& p);
+    void paintVideoTag(QPainter& p);
+    QRectF hud_chip_;
+    bool hud_panel_open_ = false;
+    QRectF payload_chip_;
+    bool payload_chip_shown_ = false, payload_panel_open_ = false, payload_alive_ = false;
+    // side boxes fold to one line: 0 folded .. 1 open, animated
+    std::array<double, hud::kBoxes> box_open_{};
+    std::array<QRectF, hud::kBoxes> box_hit_{};
+    void paintBoxFrame(QPainter& p, const QRectF& box, const QString& title, const QColor& title_color,
+                       hud::Box which);
+    bool boxOpen(hud::Box b) const { return box_open_[static_cast<size_t>(b)] > 0.5; }
+    // measuring brackets: the shown size eases toward cfg_.measure_*
+    double measure_w_shown_ = 4.0, measure_h_shown_ = 2.5;
+    enum class MeasureDrag { None, Width, Height, Both };
+    MeasureDrag measure_drag_ = MeasureDrag::None;
+    double measure_glow_ = 0.0;
+    bool pinching_ = false;
+    double pinch_start_dist_ = 0.0, pinch_w0_ = 0.0, pinch_h0_ = 0.0;
+    MeasureDrag measureHandleAt(const QPointF& logical) const;
+    QSizeF measureHalfPx() const;  // half width / height of the brackets, logical px
+    void scaleMeasure(double factor);
+    // one path for mouse and a single finger (physical px)
+    void pointerPress(const QPointF& pos);
+    void pointerMove(const QPointF& pos);
+    void pointerRelease();
     QString flight_label_;
     LosTarget los_target_;
     double focal() const;
@@ -88,19 +156,24 @@ private:
     double refPitch() const;
     double refYaw() const;
     void paintRollScale(QPainter& p, const QPointF& c, double rad);
-    void paintRefChip(QPainter& p);
     void paintWind(QPainter& p);
 
-    // Left column (AIRCRAFT, LOS, HUD chip, WIND), the tapes just inside it
+    // Left column (TARGET, AIRCRAFT, LOS, WIND), the tapes just inside it
     // and the ladder between the tapes. One place, so paint and hit-tests agree.
     struct Layout {
-        QRectF target, aircraft, los, chip, wind;
+        QRectF target, aircraft, los, wind;
         QRectF as_tape, alt_tape;
         QRectF ladder_clip;
     };
     Layout layout() const;
     void paintSynthetic(QPainter& p);
     void paintHud(QPainter& p);
+    // The HUD grows with the text size: it is painted scaled by hud_k_ in a
+    // logical rect (hudRect); focal() follows, so the ladder stays true to the FOV.
+    void paintHudScaled(QPainter& p);
+    QRectF hudRect() const;
+    double hud_k_ = 1.0;   // while painting the HUD
+    double hit_k_ = 1.0;   // the scale the HUD's tap targets were laid out at
     void paintHeadingTape(QPainter& p, const QRectF& r);
     void paintReadouts(QPainter& p);
     void paintVerticalTape(QPainter& p, const QRectF& r, double value, double step, bool left,
@@ -137,7 +210,6 @@ private:
     HudRef ref_ = HudRef::Los;
     double ref_blend_ = 0.0;  // 0 = LOS, 1 = body; animates toward ref_
     double ref_glitch_ = 0.0;
-    QRectF ref_chip_;
     QRectF wind_rect_;
     bool wind_north_up_ = false;  // HUD wind gauge: false = relative to the nose
 

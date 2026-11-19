@@ -139,18 +139,27 @@ double AlertsPanel::contentHeight(double w) const {
     return h;
 }
 
+namespace {
+// the panel in logical (text-size scaled) pixels: it is painted scaled by uiScale()
+QRectF logicalRect(const QWidget* w) {
+    return {QPointF(0, 0), logicalSize(w->size())};
+}
+}  // namespace
+
 void AlertsPanel::place(const QRect& area) {
     area_ = area;
-    const double w = std::min(kWidth, area.width() - 16.0);
+    const double k = uiScale();
+    const double w = std::min(kWidth, area.width() / k - 16.0);
     const double want = kHeader + kPills + kPad + contentHeight(w - 2 * kPad) + kPad;
-    const double h = std::min(want, static_cast<double>(area.height()));
-    setGeometry(static_cast<int>(area.right() - w), area.top(), static_cast<int>(w), static_cast<int>(h));
+    const double h = std::min(want, area.height() / k);
+    setGeometry(static_cast<int>(area.right() - w * k), area.top(), static_cast<int>(w * k), static_cast<int>(h * k));
     clampScroll();
 }
 
 void AlertsPanel::clampScroll() {
-    const double view = height() - kHeader - kPills - kPad;
-    const double content = contentHeight(width() - 2 * kPad) + kPad;
+    const QRectF lr = logicalRect(this);
+    const double view = lr.height() - kHeader - kPills - kPad;
+    const double content = contentHeight(lr.width() - 2 * kPad) + kPad;
     scroll_ = std::clamp(scroll_, 0.0, std::max(0.0, content - view));
 }
 
@@ -168,7 +177,7 @@ void AlertsPanel::tick(double dt) {
 void AlertsPanel::mousePressEvent(QMouseEvent* e) {
     pressing_ = true;
     dragged_ = false;
-    press_pos_ = e->position();
+    press_pos_ = toLogical(e->position());
     press_scroll_ = scroll_;
 }
 
@@ -176,7 +185,7 @@ void AlertsPanel::mouseMoveEvent(QMouseEvent* e) {
     if (!pressing_) {
         return;
     }
-    const double dy = e->position().y() - press_pos_.y();
+    const double dy = toLogical(e->position()).y() - press_pos_.y();
     if (!dragged_ && std::abs(dy) > 8) {
         dragged_ = true;
     }
@@ -194,7 +203,7 @@ void AlertsPanel::mouseReleaseEvent(QMouseEvent* e) {
         return;
     }
     // a tap on a card opens it (or folds it back to its title)
-    const int i = cardAt(e->position());
+    const int i = cardAt(toLogical(e->position()));
     if (i < 0) {
         return;
     }
@@ -207,7 +216,7 @@ void AlertsPanel::mouseReleaseEvent(QMouseEvent* e) {
 }
 
 int AlertsPanel::cardAt(const QPointF& pos) const {
-    const QRectF r = QRectF(rect()).adjusted(1, 1, -1, -1);
+    const QRectF r = logicalRect(this).adjusted(1, 1, -1, -1);
     const QRectF view(r.left() + kPad, r.top() + kHeader + kPills, r.width() - 2 * kPad,
                       r.height() - kHeader - kPills - kPad);
     if (!view.contains(pos)) {
@@ -233,7 +242,8 @@ void AlertsPanel::wheelEvent(QWheelEvent* e) {
 void AlertsPanel::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
-    const QRectF r = QRectF(rect()).adjusted(1, 1, -1, -1);
+    p.scale(uiScale(), uiScale());  // text size: the whole panel grows
+    const QRectF r = logicalRect(this).adjusted(1, 1, -1, -1);
     drawGlass(p, chamferPath(r, 14), kCyan, 0.6, alpha(kGlassDeep, 0.97));
     p.setPen(QPen(kCyan, 2));
     p.drawLine(QPointF(r.left() + 1, r.top() + 14), QPointF(r.left() + 14, r.top() + 1));

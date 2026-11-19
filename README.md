@@ -153,6 +153,27 @@ battery monitor, and the failsafe settings below. The start location comes from:
 
 Any other arguments go to `sim_vehicle.py` (e.g. `tools/sitl.sh --speedup 2`).
 
+### With a NextVision TRIP camera (simulated)
+
+`../nextvision_mavlink_sim` simulates a NextVision TRIP gimbal camera. It is wired like the real one, between the
+autopilot (SITL SERIAL2) and this GCS:
+
+```sh
+../nextvision_mavlink_sim/scripts/sitl_trip.sh --video   # SITL + TRIP; the TRIP talks to 127.0.0.1:14551
+./build/mavlink_gcs_ui
+```
+
+What you get:
+- **Flying:** the vehicle is reached through the TRIP's bridge.
+- **PAYLOAD chip** (next to HUD on the video): opens the camera panel.
+  - Live decoded reports.
+  - Every ICD command, with editable parameters.
+  - Quick modes and sensors.
+- **LOS on the map and HUD:** the camera's line of sight and footprint come from the TRIP's own reports.
+- **Tap-to-track:** tapping the video (when not guiding) starts the TRIP's tracker on that spot.
+
+Other payload ICDs work the same way. Drop a JSON file in `icds/` (see `icds/README.md`).
+
 ### Test video
 
 ```sh
@@ -168,12 +189,12 @@ and shows `NO VIDEO`.
 | Key | Button | What it does |
 |-----|--------|--------------|
 | 1 | **Plan / Sync ↑** | First press: edit the mission on the map. Second press: upload it; if the aircraft is flying the plan (AUTO), it switches to the new plan right away at its nearest waypoint. **Hold**: re-download the vehicle's mission |
-| 2 | **Takeoff / Launch / Resume Plan** | On the ground (**hold 1 s** to confirm): GUIDED + arm + vertical takeoff. At the takeoff altitude it flies a **straight climb-out leg** (300 m, into the wind when there is some, else straight ahead) for the transition, and only once it is wing-borne does it turn to the plan (AUTO from WP1), or Hold when there is no mission. Locked while the safety switch is on. Airborne: **Resume Plan** goes back to the planned loop on the wing (AUTO), also mid-landing (aborts it). If the vehicle's current item isn't a loop waypoint (still the VTOL takeoff after a Hold during the climb, or the landing), it is reset to the loop first, so AUTO never re-runs a rotor takeoff. While flying the loop it reads **On Plan** |
-| 3 | **Fly To** | Toggle. Tap the map, or the ground in the camera view, to circle there on the wing (GUIDED) |
+| 2 | **Takeoff / Launch / Resume Plan** | On the ground (**hold 1 s** to confirm): GUIDED + arm + vertical takeoff. At the takeoff altitude it flies a **straight climb-out leg** (300 m, into the wind when there is some, else straight ahead) for the transition, and only once it is wing-borne does it turn to the plan (AUTO from WP1), or Hold when there is no mission. While the safety switch is ON it reads **Safety Off** (padlock): the first hold turns the safety off (motors live), and the button then becomes Takeoff / Launch for the second hold. Airborne: **Resume Plan** goes back to the planned loop on the wing (AUTO), also mid-landing (aborts it). If the vehicle's current item isn't a loop waypoint (still the VTOL takeoff after a Hold during the climb, or the landing), it is reset to the loop first, so AUTO never re-runs a rotor takeoff. While flying the loop it reads **On Plan** |
+| 3 | **Fly To** | One target per press: press it, then tap the map (or the ground in the camera view) to circle there on the wing (GUIDED). The button then goes off, so a new target needs a new press |
 | 4 | **Hold** | Instant. Circle where the aircraft is, on the wing (GUIDED). During a landing this is a go-around |
 | 5 | **Land** | **Hold 1 s**. Circle down beside the landing point **L** on the wing, leave into the wind, back-transition and land vertically. Without an L it lands at home the same way |
 
-**Hold and Fly To circles:** while holding (press **Hold** again to hide or show it), or while the **Fly To** button is on, a panel above the dock sets the
+**Hold and Fly To circles:** while holding (press **Hold** again to hide or show it), or while the **Fly To** button is on (press it again to adjust the circle it is flying), a panel above the dock sets the
 **altitude** (−10 / −1 / +1 / +10 m, or −50 … +50 ft; 20–5000 m), the
 **radius** (−50 … +50 m, 40–5000 m) and the **direction** (CW / CCW). Holding a
 button repeats and speeds up (×5 after 1 s, ×10 after 2.5 s). Changes apply
@@ -188,8 +209,8 @@ flown circle matches the dotted one. The panel shows `≈ flown 91` while it
 trims and `✓ flown 80` once it matches. The readout is live (the last lap's
 worth of samples, from a quarter lap on); the trim itself acts on full laps. Both use `DO_REPOSITION`, so the vehicle shows
 GUIDED. In AUTO the altitude comes from the plan: edit the waypoint instead.
-The ALT chip shows the commanded altitude as `62→80` while the aircraft climbs
-or descends to it.
+The ALT chip shows the commanded altitude as `60→80` while the aircraft climbs
+or descends to it (what the GCS asked for, so it doesn't drift during the climb).
 
 **Landing and failsafes:** there is one way down, and the failsafes use it too.
 
@@ -225,6 +246,13 @@ To swap the map and camera, tap the small picture-in-picture view.
 Everything is made for touch first, with the mouse as an alternative. Locked
 buttons say why when pressed (and on hover with a mouse).
 
+The **telemetry bar** keeps to the essentials, left to right: **LINK** (signal
+bars only: green when strong, amber when weak or stale, a red ✕ when the link
+is lost), **BATTERY** (gauge and %, green / amber under 40 % / red under 20 %),
+**TIME LEFT** (battery flying time, h:mm), **FLIGHT**, **ETA**, **ALT**,
+**SPEED**, **SYSTEMS** and the ⚙. GPS problems show under SYSTEMS, and armed
+shows in the FLIGHT chip ("ARMED · ON GROUND").
+
 **SYSTEMS** in the telemetry bar counts problems. Tap it (or the red alert
 banner) to open the alerts panel; tap it again, tap anywhere outside the panel
 to close it. It shows status pills (link, GPS, navigation, sensors,
@@ -237,18 +265,26 @@ messages in plain language. PreArm cards stay while ArduPilot keeps repeating
 them (every 30 s) and clear when the vehicle arms. The panel only explains: it
 never changes the vehicle.
 
-The **FLIGHT** chip says in plain words what the aircraft is doing: ON GROUND,
+The **FLIGHT MODE** chip says in plain words what the aircraft is doing: ON GROUND,
 TAKEOFF, TRANSITION, CLIMB-OUT, ON PLAN · WP3, END HOLD, HOLD, FLY TO,
-LANDING · APPROACH / VERTICAL, RTL, QLAND (other modes by their ArduPilot name,
-which is also in the chip's small print). The **ETA** chip beside it shows what
+LANDING · APPROACH / VERTICAL, RTL, QLAND (other modes by their ArduPilot name). The **ETA** chip beside it shows what
 it is flying to and when it gets there. A rotor glyph lights while the lift
 rotors spin, and "· ROTOR ASSIST" flags Q_ASSIST in cruise.
 
 The **ALT** chip switches reference on a tap: **ASL** (sea level), **AGL**
 (the ground below: the rangefinder when its reading is valid, i.e. pointing
 down, fresh, inside its range and not at its maximum, the aircraft not banked
-or pitched over 30°; otherwise the terrain map, marked "terrain") and **AFL**
-(above the landing point's ground). AS · GS show whole numbers.
+or pitched over 30°; otherwise the terrain map) and **AFL**
+(above the landing point's ground). Altitudes in the bar are rounded to 10 (m
+or ft): 323 shows 320, 328 shows 330, and a value hovering at 325 doesn't
+flicker (it moves on 2 past the boundary).
+
+The **SPEED** chip has no numbers: it shows the speed the GCS commands in words
+(**LOITER**, **CRUISE**, **MAX**) and the speed mode above it (**ECO**, **NORMAL**,
+**FAST**, as one to three chevrons). The numbers are on the map, in the **SPEED**
+box under WIND (air and ground speed). The ATTITUDE, WIND and SPEED boxes fold
+together: tap any of them (folded, SPEED shows the airspeed alone). The SPEED
+chip carries a small ▾, like the ALT chip's cycle mark: tap it for the speed mode.
 
 The map's **nav box** (bottom right) shows the aircraft's coordinates and the
 ground below it, the target it is flying to (WPn, APPROACH, L, HOLD, FLY TO,
@@ -260,8 +296,11 @@ there and flat ground at home level is used).
 
 The **⚙** at the end of the bar opens **Settings**: altitude in metres or feet,
 speeds in m/s or knots, coordinates as decimal degrees, D° M′ S″ or UTM, the
-flight trail (on/off, last 30 s / 1 / 2 / 5 / 10 min / all), the
-**landing reserve** for the battery time left (20–40 %), and **offline maps**
+**text size** (DISPLAY: Small, Medium 125 %, Large 150 %, applied at once; labels,
+numbers and the boxes, buttons and panels around them grow, while the map and camera
+picture keep their size, and the top bar grows only as far as it still fits the
+screen width), the flight trail (on/off, last 30 s / 1 / 2 / 5 / 10 min / all), the
+**landing reserve** for the battery time left (15–35 %, default 20 %), and **offline maps**
 (see below).
 
 **Mouse over the map** shows the point under the cursor, bottom right:
@@ -273,13 +312,15 @@ flight trail (on/off, last 30 s / 1 / 2 / 5 / 10 min / all), the
 Ground height comes from SRTM elevation data (AWS Terrain Tiles, about ±10 m).
 It measures the surface, so it includes roofs and tree tops.
 
-**SAFETY** in the bar is the hardware safety switch: `ON` (amber, motor
-outputs cut, Launch locked) or `OFF` (red, motors live). Hold it for 1 s to switch, in either
-direction (`MAV_CMD_DO_SET_SAFETY_SWITCH_STATE`). It's locked while armed:
-engaging safety in flight would cut the pusher and servos too. The GCS never
-changes it on its own. **Safety is ON after every power-up**
-(`BRD_SAFETY_DEFLT = 1`, checked and fixed by preflight, applied after a
-reboot), so turning it off is always a deliberate step.
+**Safety switch** (`MAV_CMD_DO_SET_SAFETY_SWITCH_STATE`): it is only needed
+for takeoff, so it lives on the **Takeoff / Launch** button. While safety is ON
+(motor outputs cut) the button reads **Safety Off**: hold it 1 s and the motors
+go live, then hold it again to take off. **After every landing the GCS turns
+safety back ON** as soon as the vehicle disarms on the ground (never while
+armed: that would cut the pusher and servos too). The preflight screen can
+also switch it. **Safety is ON after every power-up** (`BRD_SAFETY_DEFLT = 1`,
+checked and fixed by preflight, applied after a reboot), so turning it off is
+always a deliberate step.
 
 After an RTL / QLAND landing (a failsafe) the vehicle sits in a mode ArduPlane can't
 arm in, so its pre-arm check fails. SYSTEMS shows that as an info card, not a
@@ -506,9 +547,10 @@ offline/areas.json                      the full-detail areas (outlines on the m
 ## Settings
 
 The in-app settings screen (⚙) switches altitudes between metres and feet
-everywhere (HUD tape, telemetry bar, map labels, panels and steppers), speeds
+(only altitudes: HUD tape, telemetry bar, map labels, panels and steppers), speeds
 between m/s and knots (AS/GS, HUD, wind), and coordinates between decimal
-degrees, D° M′ S″ and UTM (WGS84). Distances stay metric. `core/coords` also
+degrees, D° M′ S″ and UTM (WGS84). Distances and sizes (such as the camera's
+measuring brackets) stay metric. `core/coords` also
 parses those formats, for coordinate inputs.
 
 `~/.config/mavlink_gcs_ui/mavlink_gcs_ui.conf` is created on first run.
@@ -522,9 +564,51 @@ override the file for one run.
 
 ## Camera view
 
+The video comes first. By default (**CUSTOM**, as first installed) it shows only a crosshair, the
+heading tape, a slim status line and the **CAMERA TARGET** box. The AIRCRAFT,
+LOS and WIND boxes are folded to one line each, and there is no ladder, roll
+arc, tapes, vignette or scanlines.
+
+**HUD panel.** Tap **HUD ▾** (top left, under the bar) to open the HUD LOADOUT
+panel on the right. Every change shows live on the video behind it, and is
+remembered:
+
+- **Presets:** CLEAN (crosshair only), CUSTOM (your own mix) and FULL
+  (everything). Your edits are saved in CUSTOM: try CLEAN or FULL and tap
+  CUSTOM to get your mix back. Turning something on or off under CLEAN or FULL
+  starts a new CUSTOM mix from what is on screen. A preset keeps your
+  crosshair, line width and colour.
+- **Show on the video:** pitch ladder, roll arc, heading, speed and altitude
+  tapes, flight-path marker, status line, the target / aircraft / camera LOS /
+  wind boxes, and SENSOR FX (vignette + scanlines).
+- **HUD rulers follow:** LOS or BODY (see below).
+- **Crosshair:** cross, dot, ring, scope (duplex), box, fine (full-width lines),
+  measure, or none.
+- **Line width** (thin / normal / bold) and **colour** (green, cyan, amber,
+  white, red, magenta). Warnings stay amber and red whatever the colour.
+
+**Folding boxes.** Tap any box in the left column to fold it to a one-line
+summary (e.g. `ACFT R+2° P−1° 003°`, `TARGET 820 m`), and tap again to open it.
+On the open WIND box, the header folds it and the gauge switches north-up.
+
+**Measuring.** The **MEASURE** crosshair is four corner brackets around the
+centre. To fit them to a target:
+
+- drag a corner (both sides) or an edge (one side);
+- pinch with two fingers, use a trackpad pinch, or turn the mouse wheel.
+
+Under the brackets it reads the target's size at the range under the
+crosshair, e.g. `W 4.2 m × H 2.1 m @ 820 m`, always in metres. It is approximate:
+
+- It assumes the target faces the camera.
+- It uses the camera field of view from the settings, so that must match the lens.
+- The range comes from the terrain map under the crosshair. With no terrain
+  data it uses flat ground at home level and shows `≈` in amber.
+- Above the horizon or beyond 3 km there is no range, and it shows the angles instead.
+
 The horizon, elevation ladder, roll scale and heading tape follow either the
-camera's **line of sight (LOS)** or the **aircraft body**. Tap the **HUD ·
-LOS / HUD · BODY** chip under the AIRCRAFT box to switch.
+camera's **line of sight (LOS)** or the **aircraft body**. Switch it in the HUD
+panel (**HUD RULERS FOLLOW**).
 
 - **LOS** (default): the rulers overlay the video. The heading tape shows the
   LOS azimuth, with a cyan caret for the aircraft's nose.
@@ -538,14 +622,12 @@ readout. It turns amber beyond 45°. The LOS comes from the
 gimbal (`GIMBAL_DEVICE_ATTITUDE_STATUS`), or from the fixed-mount tilt when no
 gimbal reports.
 
-Two readouts sit beside it:
+The left column holds, top to bottom (each can be hidden or folded):
 
-The left column holds, top to bottom:
-
+- **CAMERA TARGET:** where the crosshair meets the ground, its height and the slant range.
 - **AIRCRAFT:** roll, pitch and heading, with a small attitude ball.
 - **GIMBAL · LOS** (or FIXED MOUNT): pan and tilt **relative to the aircraft**,
   with the earth-frame azimuth and elevation underneath.
-- The **HUD RULERS** switch (LOS / BODY).
 - **WIND** (tap: relative to the nose, or north-up).
 
 The flight-path marker (circle with three ticks) is where the aircraft is
@@ -582,15 +664,15 @@ the aircraft is already on top of the nearest), not where it left off. On a
 back-and-forth it keeps the direction the aircraft is flying. On a one-way
 route it never wraps back to WP1.
 
-**Battery time left.** In flight the battery chip shows, for example, **14:20
-left**. That's how long the aircraft can keep flying the mission and still have
+**Battery time left.** In flight the **TIME LEFT** chip shows, for example,
+**0:14** (h:mm). That's how long the aircraft can keep flying the mission and still have
 enough to do all of this, recomputed every 2 s:
 
-- fly back to L (or home), into a wind taken **50 % stronger** than measured;
+- fly back to L (or home), into a wind taken **20 % stronger** than measured;
 - circle down the approach, **go around once**, and land on the lift rotors.
-  The rotor time covers the transition, the descent and 30 s of extra hover;
-- with all of that **× 1.3**, and the **landing reserve** (Settings → BATTERY,
-  default 25 % of the pack) left untouched.
+  The rotor time covers the transition, the descent and 20 s of extra hover;
+- with all of that **× 1.15**, and the **landing reserve** (Settings → BATTERY,
+  15–35 %, default 20 % of the pack) left untouched.
 
 It uses the lower of the two charge readings (mAh used and the autopilot's %).
 It costs the return from the farthest point of the plan, not only from where
@@ -607,7 +689,7 @@ constant). The critical alert doesn't wait for the smoothing.
 - If even a return from here would eat into the reserve: a critical card and
   the red banner.
 
-**Airspeed.** Tap the AS · GS chip to see the aircraft's three airspeeds,
+**Airspeed.** Tap the SPEED chip to see the aircraft's three airspeeds,
 read from its own parameters and never changed by the GCS: **LOITER**
 (`AIRSPEED_MIN`), **CRUISE** (`AIRSPEED_CRUISE`) and **MAX** (`AIRSPEED_MAX`).
 The one choice there is the **SPEED MODE**, which picks the speed per
@@ -623,7 +705,7 @@ ArduPlane raises its minimum speed in banked turns by itself (TECS load
 factor). LOITER is also kept 2 m/s above `Q_ASSIST_SPEED`, or the lift rotors
 would spin to help the wing (SITL's quadplane ships `Q_ASSIST_SPEED` 18 above
 `AIRSPEED_MIN` 13, so it loiters at 20 there). The active target shows in the
-FLIGHT chip's small print.
+SPEED chip.
 
 It only warns; it never lands by itself. Tap the chip for the card that
 explains the numbers. It needs `BATT_CAPACITY` and a current sensor.

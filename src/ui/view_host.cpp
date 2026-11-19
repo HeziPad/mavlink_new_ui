@@ -98,9 +98,9 @@ void HudView::finishView(QPainter& p) const {
 
     // header tag
     const QString tag = pipTag();
-    const QFont f = theme::labelFont(10.5);
-    const double tw = QFontMetricsF(f).horizontalAdvance(tag) + 20;
-    const QRectF tr(r.left() + kPipCut + 2, r.top() + 8, tw, 18);
+    const QFont f = theme::labelFont(theme::sc(10.5));  // grows with the text size
+    const double tw = QFontMetricsF(f).horizontalAdvance(tag) + theme::sc(20);
+    const QRectF tr(r.left() + kPipCut + 2, r.top() + 8, tw, theme::sc(18));
     theme::drawGlass(p, theme::chamferPath(tr, 5), pipTagColor(), 0.6, theme::kGlassDeep);
     theme::drawText(p, tr, Qt::AlignCenter, tag, f, pipTagColor());
 }

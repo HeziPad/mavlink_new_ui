@@ -10,6 +10,7 @@
 #include "core/vehicle_state.hpp"
 #include "link/link_events.hpp"
 #include "link/mavlink_client.hpp"
+#include "payload/adapter.hpp"
 #include "map_view.hpp"
 #include "settings_screen.hpp"
 
@@ -17,6 +18,7 @@
 #include <QString>
 #include <QWidget>
 
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -31,6 +33,7 @@ class MavlinkClient;
 namespace gcs::ui {
 
 class AlertsPanel;
+class HudPanel;
 class ElevationCache;
 class VectorMap;
 class OfflineDownloader;
@@ -38,6 +41,7 @@ class CameraView;
 class ControlDock;
 class FxOverlay;
 class OrbitPanel;
+class PayloadPanel;
 class PlanStrip;
 class PreflightRunner;
 class PreflightScreen;
@@ -77,10 +81,12 @@ struct AppSettings {
     int speed_mode = 0;          // speed::Mode: ECO / NORMAL / FAST
     int hud_reference = 0;       // CameraView::HudRef
     bool wind_north_up = false;  // camera HUD wind gauge
+    QString hud;                 // camera HUD: hud::encode (empty: the default)
     bool ball_collapsed = false; // map attitude ball
     bool trail_on = true;
     int trail_secs = 120;        // 0 = all
-    int battery_reserve_pct = 25;  // battery time left never plans into this much of the pack
+    int battery_reserve_pct = 20;  // battery time left never plans into this much of the pack
+    int text_size = 0;           // theme::TextSize: Small / Medium / Large
 
     static AppSettings load();
     void save() const;
@@ -140,6 +146,12 @@ private:
     std::optional<speed::Target> speed_sent_;
     uint32_t speed_mode_seen_ = 0xffffffff;
     QString speed_label_;
+    // safety on the Launch button: a sent "safety off" waits for the state (ms)
+    qint64 safety_pending_until_ms_ = 0;
+    bool was_armed_ = false;
+    void autoSafetyOnLanded();
+    // the altitude the GCS commanded (above home), for the bar's "→"
+    std::optional<double> commandedAltRel() const;
     int wp_hold_seq_ = -1;          // the waypoint hold being flown
     qint64 wp_hold_since_ms_ = -1;  // when its circle was reached
     bool wp_hold_cut_ = false;      // its end (SET_MISSION_CURRENT) was sent
@@ -162,6 +174,8 @@ private:
     std::optional<double> terrain_here_;  // ground (AMSL) under the aircraft, from the elevation map
     std::optional<double> land_ground_;   // ground (AMSL) at the landing point
     void applyCoordFormat(int fmt);
+    void applyTextSize(int size);  // theme::TextSize, live
+    int barBottom() const;         // y just under the telemetry bar
     void showAlerts(bool on);
     QRect alertsArea() const;
     int orbitPanelX() const;
@@ -224,6 +238,21 @@ private:
     FxOverlay* fx_ = nullptr;
     SettingsScreen* settings_screen_ = nullptr;
     AlertsPanel* alerts_ = nullptr;
+    HudPanel* hud_panel_ = nullptr;  // HUD LOADOUT over the video
+    void showHudPanel(bool on);
+    // ---- payloads (icds/*.json): the generic panel + adapters (payload/adapter.hpp)
+    PayloadPanel* payload_panel_ = nullptr;
+    void showPayloadPanel(bool on);
+    void updatePayload();
+    // the camera LOS from a payload adapter, when one reports it (else the gimbal / fixed mount)
+    std::optional<CameraLos> payloadLos(const geo::Attitude& aircraft) const;
+    double cameraHfov() const;  // the payload's FOV when it reports one, else the setting
+    std::map<std::string, std::unique_ptr<payload::PayloadAdapter>> adapters_;
+    payload::PayloadSnapshot payload_snap_;
+    std::optional<payload::PayloadView> payload_view_;  // the camera payload's view
+    std::string payload_cam_;                            // its ICD id
+    double payload_hfov_sent_ = 0.0;
+    void saveHudConfig();
     std::unique_ptr<PreflightRunner> pf_;
     PreflightScreen* preflight_ = nullptr;
     bool flew_ = false;  // airborne since the last preflight (offers the turnaround)
@@ -282,6 +311,8 @@ private:
         bool hold = true;  // false: a Guide target
     };
     std::optional<Orbit> orbit_;
+    // Fly To pressed with no circle of ours yet: the panel's values for the first target
+    std::optional<Orbit> guide_draft_;
     bool hold_panel_hidden_ = false;  // Hold pressed again while holding: panel tucked away
     // ArduPlane flies the loiter bigger than asked; this trims the commanded
     // radius from measured laps so the flown circle matches the drawn one

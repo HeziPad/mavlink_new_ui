@@ -48,7 +48,8 @@ public:
         bool trail_on = true;
         int trail_secs = 120; // 0 = everything kept
         bool labels_english = false;
-        int reserve_pct = 25;  // battery time left: never plan into this much of the pack
+        int reserve_pct = 20;  // battery time left: never plan into this much of the pack
+        int text_size = 0;     // theme::TextSize
     };
     // the landing reserves offered (% of the pack)
     static const std::vector<int>& reserveChoices();
@@ -88,6 +89,7 @@ signals:
     void speedUnitChanged(int unit);
     void coordFormatChanged(int fmt);
     void reserveChanged(int pct);
+    void textSizeChanged(int size);  // theme::TextSize
     void trailChanged(bool on, int secs);
     void offlineCountry();       // download / update the country pack
     void offlineCancel();
@@ -106,7 +108,7 @@ protected:
     void mousePressEvent(QMouseEvent* e) override;
 
 private:
-    enum Category { kLink = 0, kUnits, kMap, kBattery, kOffline, kCategories };
+    enum Category { kLink = 0, kUnits, kDisplay, kMap, kBattery, kOffline, kCategories };
     // a segmented control: one finger-sized cell per option, sliding highlight
     struct Segmented {
         QStringList labels;
@@ -117,6 +119,7 @@ private:
     };
 
     QRectF panelRect() const;
+    QSizeF lsize() const;  // the widget in logical (text-size scaled) pixels
     void paintSegmented(QPainter& p, const QRectF& r, Segmented& seg);
     void paintRow(QPainter& p, const QRectF& r, const QString& title, const QString& sub);
     void paintOffline(QPainter& p, const QRectF& body);
@@ -144,6 +147,7 @@ private:
     Segmented labels_;
     Segmented online_;
     Segmented reserve_;
+    Segmented text_size_;
     Offline off_;
     QRectF country_rect_, area_rect_, clear_rect_, delete_rect_, folder_rect_;
     // CONNECTION

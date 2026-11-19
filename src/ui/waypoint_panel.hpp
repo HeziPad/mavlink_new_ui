@@ -38,6 +38,7 @@ public:
     void setHold(const HoldView& v);
     // relabel the steppers after a display unit change (they step in m or ft)
     void unitsChanged();
+    void applyScale();  // text size changed (theme::uiScale)
 
 signals:
     void altitudeDelta(float delta);

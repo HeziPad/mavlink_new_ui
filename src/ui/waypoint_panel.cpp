@@ -23,6 +23,28 @@ namespace {
 
 constexpr int kTouch = 52;  // px; comfortably above the ~44-48 px touch-target minimum
 
+// written at text size Small; applyScale() scales every px
+const char* const kSheet = R"(
+        QLabel { background: transparent; color: #e6f1f8; }
+        QLabel#wpTitle { color: #ffb547; font: bold 12px "DejaVu Sans"; }
+        QLabel#wpAlt { font: bold 24px "DejaVu Sans Mono"; min-width: 110px;
+                       border-bottom: 1px dashed rgba(63, 224, 255, 0.6); }
+        QLabel#wpNote { color: #7d93a6; font: 11px "DejaVu Sans"; }
+        QLabel#wpHold { font: bold 16px "DejaVu Sans Mono"; }
+        QLabel#wpHoldValue { font: bold 18px "DejaVu Sans Mono";
+                             border-bottom: 1px dashed rgba(63, 224, 255, 0.6); }
+        QPushButton {
+            background: rgba(63, 224, 255, 0.06); color: #e6f1f8;
+            border: 1px solid rgba(63, 224, 255, 0.45); padding: 0 12px;
+            font: bold 14px "DejaVu Sans Mono";
+        }
+        QPushButton:hover { background: rgba(63, 224, 255, 0.18); border-color: #3fe0ff; }
+        QPushButton:pressed { background: rgba(63, 224, 255, 0.30); }
+        QPushButton#wpDelete { border-color: rgba(255, 77, 94, 0.6); }
+        QPushButton#wpDelete:hover { background: rgba(255, 77, 94, 0.18); border-color: #ff4d5e; }
+        QPushButton#wpDelete:pressed { background: rgba(255, 77, 94, 0.30); }
+    )";
+
 QPushButton* makeButton(const QString& text, const QString& name = {}) {
     auto* b = new QPushButton(text);
     b->setFocusPolicy(Qt::NoFocus);
@@ -161,26 +183,8 @@ WaypointPanel::WaypointPanel(QWidget* parent) : QWidget(parent) {
     rows->addWidget(hold_row_);
     hold_row_->hide();
 
-    setStyleSheet(QStringLiteral(R"(
-        QLabel { background: transparent; color: #e6f1f8; }
-        QLabel#wpTitle { color: #ffb547; font: bold 12px "DejaVu Sans"; }
-        QLabel#wpAlt { font: bold 24px "DejaVu Sans Mono"; min-width: 110px;
-                       border-bottom: 1px dashed rgba(63, 224, 255, 0.6); }
-        QLabel#wpNote { color: #7d93a6; font: 11px "DejaVu Sans"; }
-        QLabel#wpHold { font: bold 16px "DejaVu Sans Mono"; }
-        QLabel#wpHoldValue { font: bold 18px "DejaVu Sans Mono";
-                             border-bottom: 1px dashed rgba(63, 224, 255, 0.6); }
-        QPushButton {
-            background: rgba(63, 224, 255, 0.06); color: #e6f1f8;
-            border: 1px solid rgba(63, 224, 255, 0.45); padding: 0 12px;
-            font: bold 14px "DejaVu Sans Mono";
-        }
-        QPushButton:hover { background: rgba(63, 224, 255, 0.18); border-color: #3fe0ff; }
-        QPushButton:pressed { background: rgba(63, 224, 255, 0.30); }
-        QPushButton#wpDelete { border-color: rgba(255, 77, 94, 0.6); }
-        QPushButton#wpDelete:hover { background: rgba(255, 77, 94, 0.18); border-color: #ff4d5e; }
-        QPushButton#wpDelete:pressed { background: rgba(255, 77, 94, 0.30); }
-    )"));
+    setStyleSheet(scaleCss(QString::fromUtf8(kSheet)));
+    scaleWidgetTree(this);
 
     connect(insert_, &QPushButton::clicked, this, &WaypointPanel::insertRequested);
     connect(delete_, &QPushButton::clicked, this, &WaypointPanel::deleteRequested);
@@ -254,6 +258,16 @@ bool WaypointPanel::eventFilter(QObject* obj, QEvent* e) {
         return true;
     }
     return QWidget::eventFilter(obj, e);
+}
+
+void WaypointPanel::applyScale() {
+    setStyleSheet(scaleCss(QString::fromUtf8(kSheet)));
+    scaleWidgetTree(this);
+    ensurePolished();
+    for (auto* w : findChildren<QWidget*>()) {
+        w->ensurePolished();
+    }
+    relayout();
 }
 
 void WaypointPanel::relayout() {

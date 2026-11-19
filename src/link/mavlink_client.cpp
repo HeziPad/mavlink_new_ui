@@ -125,6 +125,18 @@ MavlinkClient::MavlinkClient(Config cfg) : cfg_(std::move(cfg)) {
             ev.text = r.ok ? r.label : (r.label.empty() ? r.text : r.label + " " + r.text);
             publish(std::move(ev));
         });
+
+    payload_ = std::make_unique<payload::PayloadManager>([this](const mavlink_message_t& m) { sendMessage(m); });
+    payload_->setOwnIds(ids_.own_sys, ids_.own_comp);
+    if (!cfg_.payload_icd_dir.empty()) {
+        for (const auto& problem : payload_->loadDirectory(cfg_.payload_icd_dir)) {
+            LinkEvent ev;
+            ev.type = LinkEvent::Type::Error;
+            ev.text = "payload ICD " + problem;
+            events_.push_back(std::move(ev));
+        }
+    }
+    payload_shared_ = payload_->snapshot();
 }
 
 MavlinkClient::~MavlinkClient() {
@@ -144,6 +156,31 @@ void MavlinkClient::stop() {
     if (thread_.joinable()) {
         thread_.join();
     }
+}
+
+payload::PayloadSnapshot MavlinkClient::payloadSnapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return payload_shared_;
+}
+
+void MavlinkClient::sendPayloadCommand(const std::string& icd_id, const std::string& command,
+                                       std::vector<double> args) {
+    post([this, icd_id, command, args = std::move(args)] {
+        if (!payload_->send(icd_id, command, args, Clock::now())) {
+            LinkEvent ev;
+            ev.type = LinkEvent::Type::PayloadResult;
+            ev.tag = icd_id;
+            ev.text = command + ": not in the ICD";
+            publish(std::move(ev));
+        }
+    });
+}
+
+void MavlinkClient::streamPayloadCommand(const std::string& icd_id, const std::string& command,
+                                         std::vector<double> args, double hz) {
+    post([this, icd_id, command, args = std::move(args), hz] {
+        payload_->stream(icd_id, command, args, hz, Clock::now());
+    });
 }
 
 VehicleState MavlinkClient::snapshot() const {
@@ -513,6 +550,11 @@ void MavlinkClient::handleMessage(const mavlink_message_t& msg) {
         state_.radio_txbuf = r.txbuf;
         state_.radio_rxerrors = r.rxerrors;
         state_dirty_ = true;
+        return;
+    }
+    // payload ICDs (reports, their ACKs): matched by the payload's own ids,
+    // which need not be the vehicle's
+    if (payload_->handleMessage(msg, now)) {
         return;
     }
     if (!vehicle_locked_ || msg.sysid != ids_.target_sys) {
@@ -1054,6 +1096,21 @@ void MavlinkClient::decodeGimbal(const mavlink_message_t& msg) {
 void MavlinkClient::periodic(Clock::time_point now) {
     using std::chrono::milliseconds;
     using std::chrono::seconds;
+
+    payload_->periodic(now);
+    for (auto& o : payload_->takeOutcomes()) {
+        LinkEvent ev;
+        ev.type = LinkEvent::Type::PayloadResult;
+        ev.tag = o.icd_id;
+        ev.ok = o.ok;
+        ev.text = o.name + ": " + o.text;
+        publish(std::move(ev));
+    }
+    if (payload_->dirty()) {
+        payload_->clearDirty();
+        std::lock_guard<std::mutex> lock(mutex_);
+        payload_shared_ = payload_->snapshot();
+    }
 
     if (transport_->canSend() && now - last_gcs_heartbeat_ >= seconds(1)) {
         last_gcs_heartbeat_ = now;
