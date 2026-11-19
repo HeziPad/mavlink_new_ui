@@ -509,9 +509,10 @@ offline/areas.json                      the full-detail areas (outlines on the m
 ## Settings
 
 The in-app settings screen (⚙) switches altitudes between metres and feet
-everywhere (HUD tape, telemetry bar, map labels, panels and steppers), speeds
+(only altitudes: HUD tape, telemetry bar, map labels, panels and steppers), speeds
 between m/s and knots (AS/GS, HUD, wind), and coordinates between decimal
-degrees, D° M′ S″ and UTM (WGS84). Distances stay metric. `core/coords` also
+degrees, D° M′ S″ and UTM (WGS84). Distances and sizes (such as the camera's
+measuring brackets) stay metric. `core/coords` also
 parses those formats, for coordinate inputs.
 
 `~/.config/mavlink_gcs_ui/mavlink_gcs_ui.conf` is created on first run.
@@ -525,7 +526,7 @@ override the file for one run.
 
 ## Camera view
 
-The video comes first. By default (**STANDARD**) it shows only a crosshair, the
+The video comes first. By default (**CUSTOM**, as first installed) it shows only a crosshair, the
 heading tape, a slim status line and the **CAMERA TARGET** box. The AIRCRAFT,
 LOS and WIND boxes are folded to one line each, and there is no ladder, roll
 arc, tapes, vignette or scanlines.
@@ -534,11 +535,15 @@ arc, tapes, vignette or scanlines.
 panel on the right. Every change shows live on the video behind it, and is
 remembered:
 
-- **Presets:** CLEAN (crosshair only), STANDARD, FULL (everything). Any change
-  of your own reads CUSTOM. A preset keeps your crosshair, line width and colour.
+- **Presets:** CLEAN (crosshair only), CUSTOM (your own mix) and FULL
+  (everything). Your edits are saved in CUSTOM: try CLEAN or FULL and tap
+  CUSTOM to get your mix back. Turning something on or off under CLEAN or FULL
+  starts a new CUSTOM mix from what is on screen. A preset keeps your
+  crosshair, line width and colour.
 - **Show on the video:** pitch ladder, roll arc, heading, speed and altitude
   tapes, flight-path marker, status line, the target / aircraft / camera LOS /
-  wind boxes, the ruler-reference switch, and SENSOR FX (vignette + scanlines).
+  wind boxes, and SENSOR FX (vignette + scanlines).
+- **HUD rulers follow:** LOS or BODY (see below).
 - **Crosshair:** cross, dot, ring, scope (duplex), box, fine (full-width lines),
   measure, or none.
 - **Line width** (thin / normal / bold) and **colour** (green, cyan, amber,
@@ -555,7 +560,7 @@ centre. To fit them to a target:
 - pinch with two fingers, use a trackpad pinch, or turn the mouse wheel.
 
 Under the brackets it reads the target's size at the range under the
-crosshair, e.g. `W 4.2 m × H 2.1 m @ 820 m`. It is approximate:
+crosshair, e.g. `W 4.2 m × H 2.1 m @ 820 m`, always in metres. It is approximate:
 
 - It assumes the target faces the camera.
 - It uses the camera field of view from the settings, so that must match the lens.
@@ -564,8 +569,8 @@ crosshair, e.g. `W 4.2 m × H 2.1 m @ 820 m`. It is approximate:
 - Above the horizon or beyond 3 km there is no range, and it shows the angles instead.
 
 The horizon, elevation ladder, roll scale and heading tape follow either the
-camera's **line of sight (LOS)** or the **aircraft body**. Tap the **HUD ·
-LOS / HUD · BODY** chip under the AIRCRAFT box to switch.
+camera's **line of sight (LOS)** or the **aircraft body**. Switch it in the HUD
+panel (**HUD RULERS FOLLOW**).
 
 - **LOS** (default): the rulers overlay the video. The heading tape shows the
   LOS azimuth, with a cyan caret for the aircraft's nose.
@@ -579,15 +584,12 @@ readout. It turns amber beyond 45°. The LOS comes from the
 gimbal (`GIMBAL_DEVICE_ATTITUDE_STATUS`), or from the fixed-mount tilt when no
 gimbal reports.
 
-Two readouts sit beside it:
-
 The left column holds, top to bottom (each can be hidden or folded):
 
 - **CAMERA TARGET:** where the crosshair meets the ground, its height and the slant range.
 - **AIRCRAFT:** roll, pitch and heading, with a small attitude ball.
 - **GIMBAL · LOS** (or FIXED MOUNT): pan and tilt **relative to the aircraft**,
   with the earth-frame azimuth and elevation underneath.
-- The **HUD RULERS** switch (LOS / BODY).
 - **WIND** (tap: relative to the nose, or north-up).
 
 The flight-path marker (circle with three ticks) is where the aircraft is

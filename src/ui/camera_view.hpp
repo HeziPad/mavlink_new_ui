@@ -24,7 +24,7 @@ class VideoReceiver;
 //
 // The main rulers (horizon/ladder, roll scale, heading tape) follow either the
 // camera LOS (lines up with the video) or the aircraft body (nose = screen
-// centre); a chip under the AIRCRAFT box switches, with an animated sweep.
+// centre); the HUD panel switches it, with an animated sweep.
 class CameraView : public HudView {
     Q_OBJECT
 
@@ -81,7 +81,6 @@ public:
 
 signals:
     void groundClicked(double px, double py, double width, double height);
-    void hudReferenceChanged(int ref);  // HudRef
     void windNorthUpChanged(bool on);
     void hudConfigChanged();      // a box folded / unfolded, the brackets resized
     void hudPanelRequested();     // the HUD chip
@@ -147,13 +146,12 @@ private:
     double refPitch() const;
     double refYaw() const;
     void paintRollScale(QPainter& p, const QPointF& c, double rad);
-    void paintRefChip(QPainter& p);
     void paintWind(QPainter& p);
 
-    // Left column (AIRCRAFT, LOS, HUD chip, WIND), the tapes just inside it
+    // Left column (TARGET, AIRCRAFT, LOS, WIND), the tapes just inside it
     // and the ladder between the tapes. One place, so paint and hit-tests agree.
     struct Layout {
-        QRectF target, aircraft, los, chip, wind;
+        QRectF target, aircraft, los, wind;
         QRectF as_tape, alt_tape;
         QRectF ladder_clip;
     };
@@ -202,7 +200,6 @@ private:
     HudRef ref_ = HudRef::Los;
     double ref_blend_ = 0.0;  // 0 = LOS, 1 = body; animates toward ref_
     double ref_glitch_ = 0.0;
-    QRectF ref_chip_;
     QRectF wind_rect_;
     bool wind_north_up_ = false;  // HUD wind gauge: false = relative to the nose
 

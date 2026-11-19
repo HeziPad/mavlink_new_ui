@@ -40,11 +40,9 @@ void foldedSummary(QPainter& p, const QRectF& box, const QString& text, const QC
              Qt::AlignRight | Qt::AlignVCenter, text, monoFont(11.5, true), c);
 }
 
-// a size in the display unit: 0.8 m, 4.2 m, 37 m (feet when altitudes are in feet)
+// a size, always in metres (only altitudes follow the ft / m setting): 0.8 m, 4.2 m, 37 m
 QString sizeText(double m) {
-    const double v = units::feet() ? m * units::kFeetPerMeter : m;
-    const QString unit = units::feet() ? QStringLiteral("ft") : QStringLiteral("m");
-    return QStringLiteral("%1 %2").arg(v, 0, 'f', v < 10.0 ? 1 : 0).arg(unit);
+    return QStringLiteral("%1 m").arg(m, 0, 'f', m < 10.0 ? 1 : 0);
 }
 }  // namespace
 
@@ -443,7 +441,6 @@ CameraView::Layout CameraView::layout() const {
     place(l.target, shows(hud::Element::TargetBox) && los_target_.valid, 112, open(hud::Box::Target));
     place(l.aircraft, shows(hud::Element::AircraftBox), 92, open(hud::Box::Aircraft));
     place(l.los, shows(hud::Element::LosBox), 104, open(hud::Box::Los));
-    place(l.chip, shows(hud::Element::RefChip), 48, 1.0);
     place(l.wind, shows(hud::Element::WindBox), 120, open(hud::Box::Wind));
     const double tape_h = std::min(r.height() * 0.46, 360.0);
     const double tape_x = kColX + kColW + 12;  // just inside the column, mirrored on the right
@@ -562,10 +559,6 @@ void CameraView::paintHud(QPainter& p) {
         h = QRectF();
     }
     paintReadouts(p);
-    ref_chip_ = QRectF();
-    if (shows(E::RefChip)) {
-        paintRefChip(p);
-    }
     wind_rect_ = QRectF();
     if (shows(E::WindBox)) {
         paintWind(p);
@@ -836,15 +829,10 @@ void CameraView::pointerPress(const QPointF& physical) {
             wind_north_up_ = !wind_north_up_;
             emit windNorthUpChanged(wind_north_up_);
         } else {
-            cfg_.setCollapsed(b, !cfg_.isCollapsed(b));
+            hud::editCollapsed(cfg_, b, !cfg_.isCollapsed(b));
             emit hudConfigChanged();
         }
         update();
-        return;
-    }
-    if (ref_chip_.contains(pos)) {
-        setHudReference(ref_ == HudRef::Los ? HudRef::Body : HudRef::Los, true);
-        emit hudReferenceChanged(static_cast<int>(ref_));
         return;
     }
     measure_drag_ = measureHandleAt(pos);
@@ -1035,30 +1023,6 @@ void CameraView::paintRollScale(QPainter& p, const QPointF& c, double rad) {
     p.restore();
 }
 
-void CameraView::paintRefChip(QPainter& p) {
-    // under the AIRCRAFT box (see paintReadouts)
-    const bool body = ref_ == HudRef::Body;
-    const QColor col = body ? hudColor() : kAmber;  // matches the AIRCRAFT (green) and LOS (yellow) boxes
-    ref_chip_ = layout().chip;
-    drawGlass(p, chamferPath(ref_chip_, 7), col, 0.85, kGlassDeep);
-    const bool misaligned = body && live();
-    drawText(p, QRectF(ref_chip_.left() + 10, ref_chip_.top() + 5, ref_chip_.width() - 20, 14),
-             Qt::AlignLeft | Qt::AlignVCenter,
-             misaligned ? QStringLiteral("HUD RULERS · NOT ON VIDEO") : QStringLiteral("HUD RULERS · TAP"),
-             labelFont(9), misaligned ? alpha(kAmber, 0.9) : alpha(kMuted, 0.95));
-    drawText(p, QRectF(ref_chip_.left() + 10, ref_chip_.top() + 20, 70, 22), Qt::AlignLeft | Qt::AlignVCenter,
-             body ? QStringLiteral("BODY") : QStringLiteral("LOS"), labelFont(14), col);
-    // two-position indicator on the right
-    const QRectF track(ref_chip_.right() - 38, ref_chip_.top() + 25, 28, 12);
-    p.setPen(QPen(alpha(col, 0.6), lw(1)));
-    p.setBrush(alpha(kBg, 0.6));
-    p.drawRoundedRect(track, 6, 6);
-    const double kx = track.left() + 6 + (track.width() - 12) * easeInOutCubic(ref_blend_);
-    p.setPen(Qt::NoPen);
-    p.setBrush(col);
-    p.drawEllipse(QPointF(kx, track.center().y()), 5, 5);
-}
-
 void CameraView::paintWind(QPainter& p) {
     // tap: relative to the nose <-> north up
     const QColor hud = hudColor();
@@ -1230,7 +1194,7 @@ void CameraView::paintReadouts(QPainter& p) {
             QStringLiteral("%1").arg(static_cast<int>(std::lround(cam_az_.value)) % 360, 3, 10, QLatin1Char('0'));
         if (boxOpen(hud::Box::Los)) {
             paintBoxFrame(p, box, gimbal_ ? QStringLiteral("GIMBAL · LOS") : QStringLiteral("FIXED MOUNT · LOS"),
-                          kAmber, hud::Box::Los);
+                          hud, hud::Box::Los);
             p.save();
             p.setClipRect(box);
             // relative to the platform: the main numbers
@@ -1244,7 +1208,7 @@ void CameraView::paintReadouts(QPainter& p) {
                      Qt::AlignRight | Qt::AlignVCenter, earth, monoFont(11), alpha(hud, 0.8));
             p.restore();
         } else {
-            paintBoxFrame(p, box, QStringLiteral("LOS"), kAmber, hud::Box::Los);
+            paintBoxFrame(p, box, QStringLiteral("LOS"), hud, hud::Box::Los);
             foldedSummary(p, box, QStringLiteral("AZ %1 EL %2").arg(az, signedDeg(cam_el_.value)), hud);
         }
     }

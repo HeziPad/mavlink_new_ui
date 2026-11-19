@@ -348,7 +348,7 @@ void SettingsScreen::paintEvent(QPaintEvent*) {
         paintLink(p, body);
     } else if (category_ == kUnits) {
         paintRow(p, body, QStringLiteral("ALTITUDE"),
-                 QStringLiteral("HUD tape, telemetry bar, map labels, panels and steppers"));
+                 QStringLiteral("altitudes only: HUD tape, telemetry bar, map labels, panels, steppers"));
         paintSegmented(p, QRectF(body.left(), body.top() + 50, std::min(body.width(), 360.0), 54), alt_);
         paintRow(p, body.adjusted(0, 122, 0, 0), QStringLiteral("SPEED"),
                  QStringLiteral("airspeed, ground speed and wind"));
@@ -357,7 +357,7 @@ void SettingsScreen::paintEvent(QPaintEvent*) {
                  QStringLiteral("aircraft position, map cursor, camera target"));
         paintSegmented(p, QRectF(body.left(), body.top() + 294, std::min(body.width(), 480.0), 54), coord_);
         drawText(p, QRectF(body.left(), body.bottom() - 18, body.width(), 18), Qt::AlignLeft | Qt::AlignVCenter,
-                 QStringLiteral("distances stay metric · UTM on WGS84"), labelFont(10, false), alpha(kMuted, 0.8));
+                 QStringLiteral("distances and sizes stay metric · UTM on WGS84"), labelFont(10, false), alpha(kMuted, 0.8));
     } else if (category_ == kOffline) {
         paintOffline(p, body);
     } else if (category_ == kDisplay) {

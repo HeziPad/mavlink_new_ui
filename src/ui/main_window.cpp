@@ -177,7 +177,7 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
     camera_->setCamera(settings_.camera_hfov, settings_.camera_tilt);
     camera_->setHudReference(settings_.hud_reference == 1 ? CameraView::HudRef::Body : CameraView::HudRef::Los);
     camera_->setWindNorthUp(settings_.wind_north_up);
-    camera_->setHudConfig(hud::decode(settings_.hud.toStdString()));  // empty: STANDARD
+    camera_->setHudConfig(hud::decode(settings_.hud.toStdString()));  // empty: the starting CUSTOM set
 
     host_ = new ViewHost(map_, camera_, this);
     strip_ = new PlanStrip(this);
@@ -432,12 +432,11 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
         settings_.wind_north_up = on;
         settings_.save();
     });
-    connect(camera_, &CameraView::hudReferenceChanged, this, [this](int ref) {
+    // what the HUD rulers follow: switched in the HUD panel (the panel shows it, no toast)
+    connect(hud_panel_, &HudPanel::rulerRefChanged, this, [this](int ref) {
         settings_.hud_reference = ref;
         settings_.save();
-        fx_->toast(ref == 1 ? QStringLiteral("HUD rulers follow the aircraft body")
-                            : QStringLiteral("HUD rulers follow the camera line of sight"),
-                   ref == 1 ? kAmber : kGreen, QStringLiteral("HUD"));
+        camera_->setHudReference(ref == 1 ? CameraView::HudRef::Body : CameraView::HudRef::Los, true);
     });
     connect(map_, &MapView::selectionChanged, this, &MainWindow::refreshPanel);
     connect(map_, &MapView::addToolChanged, this,
@@ -709,6 +708,9 @@ void MainWindow::frame() {
         updateLinkStatus();
     }
     alerts_->tick(dt);
+    if (hud_panel_->isVisible()) {
+        hud_panel_->setLiveVideo(camera_->live());
+    }
     hud_panel_->tick(dt);
     pf_->update(s_, Clock::now(), video_->frameAge());
     preflight_->tick(dt);
@@ -956,6 +958,8 @@ void MainWindow::showHudPanel(bool on) {
         showAlerts(false);
         speed_panel_->hide();
         hud_panel_->setConfig(camera_->hudConfig());
+        hud_panel_->setRulerRef(settings_.hud_reference);
+        hud_panel_->setLiveVideo(camera_->live());
         hud_panel_->place(alertsArea());
         hud_panel_->show();
         hud_panel_->raise();

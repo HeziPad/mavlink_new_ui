@@ -10,8 +10,8 @@ using namespace gcs::hud;
 
 static void testPresets() {
     const Config d = defaultConfig();
-    CHECK(matchingPreset(d) == Preset::Standard);
-    // STANDARD: a clear picture with the crosshair, heading, status and target
+    CHECK(d.preset == Preset::Custom);
+    // CUSTOM starts clear: the crosshair, heading, status and target
     CHECK(d.shows(Element::HeadingTape));
     CHECK(d.shows(Element::StatusLine));
     CHECK(d.shows(Element::TargetBox));
@@ -21,35 +21,59 @@ static void testPresets() {
     CHECK(!d.shows(Element::SensorFx));
     CHECK(!d.isCollapsed(Box::Target));
     CHECK(d.isCollapsed(Box::Aircraft));
+    CHECK(d.custom_show == d.show);
 
     const Config full = presetConfig(Preset::Full);
     for (int i = 0; i < kElements; ++i) {
         CHECK(full.show[static_cast<size_t>(i)]);
     }
-    CHECK(matchingPreset(full) == Preset::Full);
-    const Config clean = presetConfig(Preset::Clean);
-    CHECK(matchingPreset(clean) == Preset::Clean);
+    CHECK(full.preset == Preset::Full);
+    CHECK(presetConfig(Preset::Clean).preset == Preset::Clean);
 
     // a preset keeps the operator's crosshair, line and colour
     Config styled = d;
     styled.crosshair = Crosshair::Duplex;
     styled.line = 2;
     styled.color = 3;
-    const Config f2 = presetConfig(Preset::Full, styled);
+    Config f2 = styled;
+    applyPreset(f2, Preset::Full);
+    CHECK(f2.preset == Preset::Full);
     CHECK(f2.crosshair == Crosshair::Duplex);
     CHECK(f2.line == 2);
     CHECK(f2.color == 3);
-    CHECK(matchingPreset(f2) == Preset::Full);  // style doesn't make it custom
 
-    // one change: custom
+    // CUSTOM remembers the operator's mix across CLEAN / FULL
     Config c = d;
-    c.setShown(Element::Ladder, true);
-    CHECK(matchingPreset(c) == Preset::Custom);
+    editShown(c, Element::Ladder, true);
+    editCollapsed(c, Box::Wind, false);
+    CHECK(c.preset == Preset::Custom);
+    applyPreset(c, Preset::Full);
+    CHECK(c.shows(Element::SpeedTape));
+    editCollapsed(c, Box::Target, true);  // a fold under FULL doesn't touch the slot
+    CHECK(c.preset == Preset::Full);
+    applyPreset(c, Preset::Clean);
+    CHECK(!c.shows(Element::Ladder));
+    applyPreset(c, Preset::Custom);
+    CHECK(c.shows(Element::Ladder));
+    CHECK(!c.shows(Element::SpeedTape));
+    CHECK(!c.isCollapsed(Box::Wind));
+    CHECK(!c.isCollapsed(Box::Target));
+
+    // an edit under FULL starts a new CUSTOM mix from what is on screen
+    Config e = d;
+    applyPreset(e, Preset::Full);
+    editShown(e, Element::SensorFx, false);
+    CHECK(e.preset == Preset::Custom);
+    CHECK(e.shows(Element::SpeedTape));
+    CHECK(!e.shows(Element::SensorFx));
+    CHECK(e.custom_show == e.show);
     CHECK(std::string(presetName(Preset::Custom)) == "CUSTOM");
 }
 
 static void testEncode() {
-    Config c = presetConfig(Preset::Full);
+    Config c = defaultConfig();
+    editShown(c, Element::Ladder, true);
+    applyPreset(c, Preset::Full);
     c.crosshair = Crosshair::Measure;
     c.line = 0;
     c.color = 5;
@@ -58,7 +82,24 @@ static void testEncode() {
     c.measure_h_deg = 1.5;
     const Config back = decode(encode(c));
     CHECK(back == c);
+    CHECK(back.preset == Preset::Full);
+    CHECK(back.custom_show[static_cast<size_t>(Element::Ladder)]);
     CHECK_NEAR(back.measure_w_deg, 3.25, 1e-9);
+
+    // v1 strings (13 elements, RULER REF at 11) migrate
+    const Config v1std = decode("v1;show=0010001111100;x=cross;line=1;color=0;fold=0111;mw=4000;mh=2500");
+    CHECK(v1std == defaultConfig());
+    const Config v1full = decode("v1;show=1111111111111;x=fine;line=1;color=0;fold=0000;mw=4000;mh=2500");
+    CHECK(v1full.preset == Preset::Full);
+    CHECK(v1full.crosshair == Crosshair::Fine);
+    CHECK(v1full.custom_show == defaultConfig().show);
+    // the RULER REF bit is dropped without shifting SENSOR FX
+    const Config v1fx = decode("v1;show=0010001111110;fold=0111");
+    CHECK(v1fx.preset == Preset::Custom);
+    CHECK(!v1fx.shows(Element::SensorFx));
+    const Config v1fx2 = decode("v1;show=0010001111101;fold=0111");
+    CHECK(v1fx2.shows(Element::SensorFx));
+    CHECK(v1fx2.custom_show == v1fx2.show);
 
     // garbage and partial strings: defaults, plus whatever was understood
     CHECK(decode("") == defaultConfig());

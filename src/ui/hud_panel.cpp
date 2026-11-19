@@ -29,7 +29,9 @@ constexpr double kShowY = kPresetY + kLabelH + kPresetH + 12.0;
 constexpr int kShowCols = 3;
 constexpr double kTileH = 54.0;
 constexpr int kShowRows = (hud::kElements + kShowCols - 1) / kShowCols;
-constexpr double kCrossY = kShowY + kLabelH + kShowRows * (kTileH + kGap) + 4.0;
+constexpr double kRulerY = kShowY + kLabelH + kShowRows * (kTileH + kGap) + 4.0;
+constexpr double kRulerH = 52.0;
+constexpr double kCrossY = kRulerY + kLabelH + kRulerH + 12.0;
 constexpr int kCrossCols = 4;
 constexpr double kCrossH = 74.0;
 constexpr int kCrossRows = (hud::kCrosshairs + kCrossCols - 1) / kCrossCols;
@@ -52,7 +54,6 @@ const char* elementName(hud::Element e) {
     case hud::Element::AircraftBox: return "AIRCRAFT";
     case hud::Element::LosBox: return "CAMERA LOS";
     case hud::Element::WindBox: return "WIND";
-    case hud::Element::RefChip: return "RULER REF";
     case hud::Element::SensorFx: return "SENSOR FX";
     case hud::Element::Count: break;
     }
@@ -144,11 +145,6 @@ void elementIcon(QPainter& p, const QRectF& r, hud::Element e, const QColor& c) 
         p.drawLine(m + QPointF(5, 5), m + QPointF(5, 0));
         p.drawLine(m + QPointF(5, 5), m + QPointF(0, 5));
         break;
-    case hud::Element::RefChip:
-        p.drawRoundedRect(QRectF(m.x() - 11, m.y() - 5, 22, 10), 5, 5);
-        p.setBrush(c);
-        p.drawEllipse(QPointF(m.x() + 6, m.y()), 3, 3);
-        break;
     case hud::Element::SensorFx:
         for (int i = 0; i < 5; ++i) {
             const double y = r.top() + 2 + i * (h - 4) / 4.0;
@@ -171,6 +167,20 @@ HudPanel::HudPanel(QWidget* parent) : QWidget(parent) {
 void HudPanel::setConfig(const hud::Config& c) {
     cfg_ = c;
     update();
+}
+
+void HudPanel::setRulerRef(int ref) {
+    if (ruler_ref_ != ref) {
+        ruler_ref_ = ref;
+        update();
+    }
+}
+
+void HudPanel::setLiveVideo(bool live) {
+    if (live_ != live) {
+        live_ = live;
+        update();
+    }
 }
 
 QRectF HudPanel::logicalRect() const {
@@ -223,6 +233,11 @@ void HudPanel::layoutHits(double width) {
         hits_.push_back({QRectF(kPad + col * (tw + kGap), kShowY + kLabelH + row * (kTileH + kGap), tw, kTileH),
                          kElement, i});
     }
+    // what the rulers follow: LOS / BODY
+    const double rw = (inner - kGap) / 2.0;
+    for (int i = 0; i < 2; ++i) {
+        hits_.push_back({QRectF(kPad + i * (rw + kGap), kRulerY + kLabelH, rw, kRulerH), kRuler, i});
+    }
     // crosshairs
     const double cw = (inner - (kCrossCols - 1) * kGap) / kCrossCols;
     for (int i = 0; i < hud::kCrosshairs; ++i) {
@@ -245,13 +260,23 @@ void HudPanel::layoutHits(double width) {
 void HudPanel::press(const Hit& h) {
     switch (h.kind) {
     case kPreset:
-        cfg_ = hud::presetConfig(static_cast<hud::Preset>(h.index), cfg_);
+        hud::applyPreset(cfg_, static_cast<hud::Preset>(h.index));
         break;
     case kElement: {
         const auto e = static_cast<hud::Element>(h.index);
-        cfg_.setShown(e, !cfg_.shows(e));
+        hud::editShown(cfg_, e, !cfg_.shows(e));
         break;
     }
+    case kRuler:
+        flash_kind_ = h.kind;
+        flash_index_ = h.index;
+        flash_ = 1.0;
+        if (ruler_ref_ != h.index) {
+            ruler_ref_ = h.index;
+            emit rulerRefChanged(h.index);
+        }
+        update();
+        return;
     case kCross:
         cfg_.crosshair = static_cast<hud::Crosshair>(h.index);
         break;
@@ -350,7 +375,7 @@ void HudPanel::paintEvent(QPaintEvent*) {
     p.setClipRect(QRectF(0, viewTop(), lr.width(), lr.height() - viewTop() - 4));
     p.translate(0, viewTop() - scroll_);
 
-    const hud::Preset preset = hud::matchingPreset(cfg_);
+    const hud::Preset preset = cfg_.preset;
     auto label = [&](double y, const QString& text, const QString& right = {}, const QColor& rc = kMuted) {
         drawText(p, QRectF(kPad + 2, y, lr.width() - 2 * kPad, kLabelH - 4), Qt::AlignLeft | Qt::AlignVCenter, text,
                  labelFont(10.5), alpha(kMuted, 0.95));
@@ -361,8 +386,16 @@ void HudPanel::paintEvent(QPaintEvent*) {
     };
     auto flashOf = [&](int kind, int index) { return flash_kind_ == kind && flash_index_ == index ? flash_ : 0.0; };
     label(kPresetY, QStringLiteral("PRESET"),
-          preset == hud::Preset::Custom ? QStringLiteral("CUSTOM · your own mix") : QString(), kAmber);
+          preset == hud::Preset::Custom ? QStringLiteral("CUSTOM · your edits save here")
+                                        : QStringLiteral("an edit starts your CUSTOM mix"),
+          preset == hud::Preset::Custom ? alpha(kCyan, 0.9) : alpha(kMuted, 0.8));
     label(kShowY, QStringLiteral("SHOW ON THE VIDEO"));
+    const bool rulers = cfg_.shows(hud::Element::Ladder) || cfg_.shows(hud::Element::RollScale) ||
+                        cfg_.shows(hud::Element::HeadingTape);
+    label(kRulerY, QStringLiteral("HUD RULERS FOLLOW"),
+          !rulers ? QStringLiteral("no rulers shown")
+                  : (ruler_ref_ == 1 && live_ ? QStringLiteral("BODY · not lined up with the video") : QString()),
+          !rulers ? alpha(kMuted, 0.8) : kAmber);
     label(kCrossY, QStringLiteral("CROSSHAIR"),
           cfg_.crosshair == hud::Crosshair::Measure ? QStringLiteral("drag the corners to fit the target") : QString(),
           alpha(hud, 0.9));
@@ -393,6 +426,19 @@ void HudPanel::paintEvent(QPaintEvent*) {
             p.setPen(Qt::NoPen);
             p.setBrush(on ? hud : alpha(kMuted, 0.35));
             p.drawEllipse(QPointF(t.right() - 9, t.top() + 9), 3, 3);
+            break;
+        }
+        case kRuler: {
+            const bool on = ruler_ref_ == h.index;
+            const QColor c = on ? hud : alpha(kMuted, 0.8);
+            drawGlass(p, chamferPath(t, 8), c, on ? 0.9 : 0.35,
+                      on ? alpha(hud, (rulers ? 0.14 : 0.06) + 0.25 * fl) : alpha(kBg, 0.55));
+            drawText(p, QRectF(t.left(), t.top() + 6, t.width(), 22), Qt::AlignCenter,
+                     h.index == 0 ? QStringLiteral("LOS") : QStringLiteral("BODY"), labelFont(14),
+                     on ? (rulers ? hud : alpha(hud, 0.6)) : kText);
+            drawText(p, QRectF(t.left(), t.top() + 28, t.width(), 16), Qt::AlignCenter,
+                     h.index == 0 ? QStringLiteral("lines up with the video") : QStringLiteral("nose = screen centre"),
+                     labelFont(9, false), alpha(kMuted, 0.95));
             break;
         }
         case kCross: {

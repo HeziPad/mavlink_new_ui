@@ -11,7 +11,8 @@
 namespace gcs::ui {
 
 // "HUD LOADOUT": a glass panel over the right of the video that edits the
-// camera HUD live (hud::Config): presets, which elements show, the crosshair,
+// camera HUD live (hud::Config): presets, which elements show, what the rulers
+// follow (LOS / body), the crosshair,
 // line width and colour. Custom painted, finger-sized, scrolls when it is
 // taller than the window; painted scaled by the text size. Every change is
 // reported at once (configChanged), so the video behind it is the preview.
@@ -23,6 +24,10 @@ public:
 
     void setConfig(const hud::Config& c);
     const hud::Config& config() const { return cfg_; }
+    // what the HUD rulers follow (CameraView::HudRef: 0 LOS, 1 body); not part of the config
+    void setRulerRef(int ref);
+    // live video: BODY rulers don't line up with it (a warning)
+    void setLiveVideo(bool live);
     // right side of `area` (window coordinates), as tall as its content allows
     void place(const QRect& area);
     void tick(double dt);
@@ -30,6 +35,7 @@ public:
 signals:
     void configChanged();
     void closeRequested();
+    void rulerRefChanged(int ref);
 
 protected:
     void paintEvent(QPaintEvent* e) override;
@@ -44,7 +50,7 @@ private:
         int kind;     // Kind
         int index;
     };
-    enum Kind { kClose, kPreset, kElement, kCross, kLine, kColor };
+    enum Kind { kClose, kPreset, kElement, kRuler, kCross, kLine, kColor };
 
     double contentHeight() const;
     void layoutHits(double width);  // fills hits_ for a panel `width` logical px wide
@@ -54,6 +60,8 @@ private:
     double viewTop() const;  // where the scrolling part starts (under the title)
 
     hud::Config cfg_;
+    int ruler_ref_ = 0;
+    bool live_ = false;
     std::vector<Hit> hits_;
     QRect area_;
     double scroll_ = 0.0;
