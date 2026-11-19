@@ -29,6 +29,8 @@ There is no linter; the build uses `-Wall -Wextra -Wpedantic` (MSVC: `/W4 /permi
 
 The app ships on all three; `.github/workflows/build.yml` builds, tests and packages each push on ubuntu / windows (MSVC) / macos. Day-to-day work and SITL stay on Linux, so these rules are what keep the other two working. CI must pass on all three before a merge.
 
+**Every PR gets a full build and test on Windows and macOS before it is called done** (not needed for each push while the work is in progress). That means the CI run for the PR's head commit is green on all three jobs (build, `ctest`, package; `gh pr checks <N> --watch`), and when a real Windows PC or Mac is reachable, the app is also built, tested and started there. Say in the PR which of the two happened.
+
 - **OS calls only in shims.** Outside `src/link/*_transport.cpp` (and any future `platform/` file), nothing includes `<sys/*>`, `<unistd.h>`, `<arpa/*>`, `<netinet/*>`, `<poll.h>`, `<fcntl.h>`, `<termios.h>`, `<windows.h>` or `<winsock2.h>`. `ui` uses Qt APIs; `core` is pure standard C++ with no I/O.
 - **No Linux-only APIs**, even in POSIX branches (`eventfd`, `epoll`, `inotify`, `/proc`, `prctl`, `udev`): macOS is POSIX, not Linux. `__linux__`-only extras (like `/dev/serial/by-id` names) need a fallback on the other branches.
 - **Platform `#if`:** only `_WIN32` / `__APPLE__` / `__linux__` (or `Q_OS_*` in ui), only in shims, and every branch must compile. Code you can't compile here gets compiled by CI; push and watch it (`gh run watch`).
