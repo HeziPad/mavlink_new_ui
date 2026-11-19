@@ -237,12 +237,12 @@ std::vector<Advisory> advisories(const Estimate& e, Level level) {
         printf2("left %.0f mAh, reserve %.0f mAh", e.remaining_mah, e.reserve_mah) + " · " +
         printf2("return+land from here %.0f mAh, from the farthest point %.0f mAh", e.here.mah, e.worst.mah) +
         " · " + printf2("cruise %.1f A, hover %.1f A", e.cruise_a, e.hover_a) +
-        (e.cruise_learned ? "" : " (cruise not learned yet: current x 1.3)") +
-        (e.hover_measured ? "" : " (hover not measured: 4 x cruise)");
+        (e.cruise_learned ? "" : printf1(" (cruise not learned yet: current x %.1f)", kUnlearnedFactor)) +
+        (e.hover_measured ? "" : printf1(" (hover not measured: %.0f x cruise)", kHoverFactor));
     const std::string what =
         "It keeps enough for the flight back, the approach circle, one go-around and the vertical landing (" +
-        printf1("about %.0f s on the lift rotors", e.here.rotor_s) +
-        "), all x 1.3, with the wind taken 50 % stronger, and never touches the reserve.";
+        printf1("about %.0f s on the lift rotors", e.here.rotor_s) + printf1("), all x %.2f", kReturnMargin) +
+        printf1(", with the wind taken %.0f %% stronger, and never touches the reserve.", (kWindFactor - 1.0) * 100.0);
 
     Advisory a;
     a.detail = detail;

@@ -5,9 +5,10 @@
 // once, land vertically on the lift rotors, and touch down with the reserve
 // untouched. Advice only; nothing here changes the vehicle.
 //
-// Deliberately pessimistic. It takes the lower of the two charge gauges, a
-// stronger wind than measured, extra time for every rotor phase, a margin on
-// the whole return and a reserve that is never planned into. The return is
+// Cautious, but not stacked: it takes the lower of the two charge gauges, a
+// somewhat stronger wind than measured, extra hover time, a modest margin on
+// the whole return and a reserve that is never planned into. (Round 17: the
+// first version warned at 70 % and landed with 60 % of a 5 Ah SITL pack.) The return is
 // costed from the worst point of the plan, not just from here.
 
 #include "health.hpp"
@@ -18,22 +19,22 @@
 namespace gcs::endurance {
 
 // ---- assumptions (all on the cautious side) ---------------------------------------
-constexpr double kWindFactor = 1.5;        // the return wind is taken 50 % stronger than measured
+constexpr double kWindFactor = 1.2;        // the return wind is taken 20 % stronger than measured
 constexpr double kMinGroundSpeed = 5.0;    // m/s, floor for a return into a strong headwind
-constexpr double kReturnMargin = 1.3;      // the whole return-and-land cost x 1.3
+constexpr double kReturnMargin = 1.15;     // the whole return-and-land cost x 1.15
 constexpr double kCircleSlack = 1.1;       // a circle in wind takes ~10 % longer than in still air
 constexpr double kWingSinkRate = 2.0;      // m/s, circling down on the wing to the approach altitude
 constexpr double kTransitionS = 15.0;      // back-transition on the rotors
 constexpr double kDescentRate = 1.5;       // m/s, rotor descent (Q_WP_SPEED_DN default)
 constexpr double kFinalAlt = 6.0;          // m, final descent below this (Q_LAND_FINAL_ALT default)
 constexpr double kFinalRate = 0.5;         // m/s (Q_LAND_FINAL_SPD default)
-constexpr double kHoverMarginS = 30.0;     // extra hover: repositioning, a gusty touchdown
+constexpr double kHoverMarginS = 20.0;     // extra hover: repositioning, a gusty touchdown
 constexpr double kHoverFactor = 4.0;       // hover current = 4 x cruise until a takeoff was measured
 constexpr double kUnlearnedFactor = 1.3;   // before kLearnS of cruise: instantaneous cruise current x 1.3
                                            // (no estimate before the first cruise: a takeoff hover
                                            // current is no guide to what cruise costs)
 constexpr double kLearnS = 20.0;           // s of cruise before the learned current is trusted
-constexpr double kDefaultReserve = 0.25;   // never plan into the last 25 % of the pack
+constexpr double kDefaultReserve = 0.20;   // never plan into the last 20 % of the pack
 constexpr double kCautionS = 300.0;        // "return soon" below 5 min
 constexpr double kClearHoldS = 30.0;       // a level clears only after 30 s below it
 constexpr double kCruiseTau = 300.0;       // s, cruise current average (a climb barely moves it)
