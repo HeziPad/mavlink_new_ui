@@ -1,5 +1,5 @@
 # Extra SITL parameters for this GCS (loaded by tools/sitl.sh)
-# safety starts ON after boot: you turn it off by hand (SAFETY in the top bar)
+# safety starts ON after boot: the Takeoff / Launch button turns it off (first hold)
 BRD_SAFETY_DEFLT 1
 # a battery monitor, so the power checks have voltage and current
 BATT_MONITOR 4

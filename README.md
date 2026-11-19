@@ -168,12 +168,12 @@ and shows `NO VIDEO`.
 | Key | Button | What it does |
 |-----|--------|--------------|
 | 1 | **Plan / Sync ↑** | First press: edit the mission on the map. Second press: upload it; if the aircraft is flying the plan (AUTO), it switches to the new plan right away at its nearest waypoint. **Hold**: re-download the vehicle's mission |
-| 2 | **Takeoff / Launch / Resume Plan** | On the ground (**hold 1 s** to confirm): GUIDED + arm + vertical takeoff. At the takeoff altitude it flies a **straight climb-out leg** (300 m, into the wind when there is some, else straight ahead) for the transition, and only once it is wing-borne does it turn to the plan (AUTO from WP1), or Hold when there is no mission. Locked while the safety switch is on. Airborne: **Resume Plan** goes back to the planned loop on the wing (AUTO), also mid-landing (aborts it). If the vehicle's current item isn't a loop waypoint (still the VTOL takeoff after a Hold during the climb, or the landing), it is reset to the loop first, so AUTO never re-runs a rotor takeoff. While flying the loop it reads **On Plan** |
-| 3 | **Fly To** | Toggle. Tap the map, or the ground in the camera view, to circle there on the wing (GUIDED) |
+| 2 | **Takeoff / Launch / Resume Plan** | On the ground (**hold 1 s** to confirm): GUIDED + arm + vertical takeoff. At the takeoff altitude it flies a **straight climb-out leg** (300 m, into the wind when there is some, else straight ahead) for the transition, and only once it is wing-borne does it turn to the plan (AUTO from WP1), or Hold when there is no mission. While the safety switch is ON it reads **Safety Off** (padlock): the first hold turns the safety off (motors live), and the button then becomes Takeoff / Launch for the second hold. Airborne: **Resume Plan** goes back to the planned loop on the wing (AUTO), also mid-landing (aborts it). If the vehicle's current item isn't a loop waypoint (still the VTOL takeoff after a Hold during the climb, or the landing), it is reset to the loop first, so AUTO never re-runs a rotor takeoff. While flying the loop it reads **On Plan** |
+| 3 | **Fly To** | One target per press: press it, then tap the map (or the ground in the camera view) to circle there on the wing (GUIDED). The button then goes off, so a new target needs a new press |
 | 4 | **Hold** | Instant. Circle where the aircraft is, on the wing (GUIDED). During a landing this is a go-around |
 | 5 | **Land** | **Hold 1 s**. Circle down beside the landing point **L** on the wing, leave into the wind, back-transition and land vertically. Without an L it lands at home the same way |
 
-**Hold and Fly To circles:** while holding (press **Hold** again to hide or show it), or while the **Fly To** button is on, a panel above the dock sets the
+**Hold and Fly To circles:** while holding (press **Hold** again to hide or show it), or after a Fly To target (press **Fly To** on and off to hide it), a panel above the dock sets the
 **altitude** (−10 / −1 / +1 / +10 m, or −50 … +50 ft; 20–5000 m), the
 **radius** (−50 … +50 m, 40–5000 m) and the **direction** (CW / CCW). Holding a
 button repeats and speeds up (×5 after 1 s, ×10 after 2.5 s). Changes apply
@@ -188,8 +188,8 @@ flown circle matches the dotted one. The panel shows `≈ flown 91` while it
 trims and `✓ flown 80` once it matches. The readout is live (the last lap's
 worth of samples, from a quarter lap on); the trim itself acts on full laps. Both use `DO_REPOSITION`, so the vehicle shows
 GUIDED. In AUTO the altitude comes from the plan: edit the waypoint instead.
-The ALT chip shows the commanded altitude as `62→80` while the aircraft climbs
-or descends to it.
+The ALT chip shows the commanded altitude as `60→80` while the aircraft climbs
+or descends to it (what the GCS asked for, so it doesn't drift during the climb).
 
 **Landing and failsafes:** there is one way down, and the failsafes use it too.
 
@@ -225,6 +225,13 @@ To swap the map and camera, tap the small picture-in-picture view.
 Everything is made for touch first, with the mouse as an alternative. Locked
 buttons say why when pressed (and on hover with a mouse).
 
+The **telemetry bar** keeps to the essentials, left to right: **LINK** (signal
+bars only: green when strong, amber when weak or stale, a red ✕ when the link
+is lost), **BATTERY** (gauge and %, green / amber under 40 % / red under 20 %),
+**TIME LEFT** (battery flying time, h:mm), **FLIGHT**, **ETA**, **ALT**,
+**SPEED**, **SYSTEMS** and the ⚙. GPS problems show under SYSTEMS, and armed
+shows in the FLIGHT chip ("ARMED · ON GROUND").
+
 **SYSTEMS** in the telemetry bar counts problems. Tap it (or the red alert
 banner) to open the alerts panel; tap it again, tap anywhere outside the panel
 to close it. It shows status pills (link, GPS, navigation, sensors,
@@ -237,18 +244,26 @@ messages in plain language. PreArm cards stay while ArduPilot keeps repeating
 them (every 30 s) and clear when the vehicle arms. The panel only explains: it
 never changes the vehicle.
 
-The **FLIGHT** chip says in plain words what the aircraft is doing: ON GROUND,
+The **FLIGHT MODE** chip says in plain words what the aircraft is doing: ON GROUND,
 TAKEOFF, TRANSITION, CLIMB-OUT, ON PLAN · WP3, END HOLD, HOLD, FLY TO,
-LANDING · APPROACH / VERTICAL, RTL, QLAND (other modes by their ArduPilot name,
-which is also in the chip's small print). The **ETA** chip beside it shows what
+LANDING · APPROACH / VERTICAL, RTL, QLAND (other modes by their ArduPilot name). The **ETA** chip beside it shows what
 it is flying to and when it gets there. A rotor glyph lights while the lift
 rotors spin, and "· ROTOR ASSIST" flags Q_ASSIST in cruise.
 
 The **ALT** chip switches reference on a tap: **ASL** (sea level), **AGL**
 (the ground below: the rangefinder when its reading is valid, i.e. pointing
 down, fresh, inside its range and not at its maximum, the aircraft not banked
-or pitched over 30°; otherwise the terrain map, marked "terrain") and **AFL**
-(above the landing point's ground). AS · GS show whole numbers.
+or pitched over 30°; otherwise the terrain map) and **AFL**
+(above the landing point's ground). Altitudes in the bar are rounded to 10 (m
+or ft): 323 shows 320, 328 shows 330, and a value hovering at 325 doesn't
+flicker (it moves on 2 past the boundary).
+
+The **SPEED** chip has no numbers: it shows the speed the GCS commands in words
+(**LOITER**, **CRUISE**, **MAX**) and the speed mode above it (**ECO**, **NORMAL**,
+**FAST**, as one to three chevrons). The numbers are on the map, in the **SPEED**
+box under WIND (air and ground speed). The ATTITUDE, WIND and SPEED boxes fold
+together: tap any of them (folded, SPEED shows the airspeed alone). The SPEED
+chip carries a small ▾, like the ALT chip's cycle mark: tap it for the speed mode.
 
 The map's **nav box** (bottom right) shows the aircraft's coordinates and the
 ground below it, the target it is flying to (WPn, APPROACH, L, HOLD, FLY TO,
@@ -276,13 +291,15 @@ screen width), the flight trail (on/off, last 30 s / 1 / 2 / 5 / 10 min / all), 
 Ground height comes from SRTM elevation data (AWS Terrain Tiles, about ±10 m).
 It measures the surface, so it includes roofs and tree tops.
 
-**SAFETY** in the bar is the hardware safety switch: `ON` (amber, motor
-outputs cut, Launch locked) or `OFF` (red, motors live). Hold it for 1 s to switch, in either
-direction (`MAV_CMD_DO_SET_SAFETY_SWITCH_STATE`). It's locked while armed:
-engaging safety in flight would cut the pusher and servos too. The GCS never
-changes it on its own. **Safety is ON after every power-up**
-(`BRD_SAFETY_DEFLT = 1`, checked and fixed by preflight, applied after a
-reboot), so turning it off is always a deliberate step.
+**Safety switch** (`MAV_CMD_DO_SET_SAFETY_SWITCH_STATE`): it is only needed
+for takeoff, so it lives on the **Takeoff / Launch** button. While safety is ON
+(motor outputs cut) the button reads **Safety Off**: hold it 1 s and the motors
+go live, then hold it again to take off. **After every landing the GCS turns
+safety back ON** as soon as the vehicle disarms on the ground (never while
+armed: that would cut the pusher and servos too). The preflight screen can
+also switch it. **Safety is ON after every power-up** (`BRD_SAFETY_DEFLT = 1`,
+checked and fixed by preflight, applied after a reboot), so turning it off is
+always a deliberate step.
 
 After an RTL / QLAND landing (a failsafe) the vehicle sits in a mode ArduPlane can't
 arm in, so its pre-arm check fails. SYSTEMS shows that as an info card, not a
@@ -626,8 +643,8 @@ the aircraft is already on top of the nearest), not where it left off. On a
 back-and-forth it keeps the direction the aircraft is flying. On a one-way
 route it never wraps back to WP1.
 
-**Battery time left.** In flight the battery chip shows, for example, **14:20
-left**. That's how long the aircraft can keep flying the mission and still have
+**Battery time left.** In flight the **TIME LEFT** chip shows, for example,
+**0:14** (h:mm). That's how long the aircraft can keep flying the mission and still have
 enough to do all of this, recomputed every 2 s:
 
 - fly back to L (or home), into a wind taken **20 % stronger** than measured;
@@ -651,7 +668,7 @@ constant). The critical alert doesn't wait for the smoothing.
 - If even a return from here would eat into the reserve: a critical card and
   the red banner.
 
-**Airspeed.** Tap the AS · GS chip to see the aircraft's three airspeeds,
+**Airspeed.** Tap the SPEED chip to see the aircraft's three airspeeds,
 read from its own parameters and never changed by the GCS: **LOITER**
 (`AIRSPEED_MIN`), **CRUISE** (`AIRSPEED_CRUISE`) and **MAX** (`AIRSPEED_MAX`).
 The one choice there is the **SPEED MODE**, which picks the speed per
@@ -667,7 +684,7 @@ ArduPlane raises its minimum speed in banked turns by itself (TECS load
 factor). LOITER is also kept 2 m/s above `Q_ASSIST_SPEED`, or the lift rotors
 would spin to help the wing (SITL's quadplane ships `Q_ASSIST_SPEED` 18 above
 `AIRSPEED_MIN` 13, so it loiters at 20 there). The active target shows in the
-FLIGHT chip's small print.
+SPEED chip.
 
 It only warns; it never lands by itself. Tap the chip for the card that
 explains the numbers. It needs `BATT_CAPACITY` and a current sensor.

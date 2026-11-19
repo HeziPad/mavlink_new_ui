@@ -60,6 +60,7 @@ add_library(gcs_core STATIC
     src/core/endurance.cpp
     src/core/flight_status.cpp
     src/core/hud_config.cpp
+    src/core/display_round.cpp
     src/core/mission.cpp
     src/core/mvt.cpp
     src/core/orbit_trim.cpp
@@ -154,7 +155,7 @@ endif()
 
 # ---- tests ----------------------------------------------------------------------
 enable_testing()
-foreach(name geo altitude coords endurance flight_status hud_config mission_builder mission_transfer command_sender lift_rotors health orbit_trim preflight offline_map transport)
+foreach(name geo altitude coords display_round endurance flight_status hud_config mission_builder mission_transfer command_sender lift_rotors health orbit_trim preflight offline_map transport)
     add_executable(test_${name} tests/test_${name}.cpp)
     target_link_libraries(test_${name} PRIVATE gcs_core)
     gcs_warnings(test_${name})

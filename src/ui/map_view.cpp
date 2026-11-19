@@ -179,6 +179,10 @@ QString MapView::pipTag() const {
 
 void MapView::setState(const VehicleState& s) {
     s_ = s;
+    if (s.has_vfr_hud) {
+        as_.set(s.airspeed);
+        gs_.set(s.groundspeed);
+    }
     vehicle_plan_ = s.mission_known ? extractPlan(s.mission) : MissionPlan{};
     if (plan_fixup_) {
         plan_fixup_(vehicle_plan_);
@@ -503,6 +507,8 @@ void MapView::tick(double dt) {
         const double target = ball_collapsed_ ? 0.0 : 1.0;
         ball_open_ = reducedMotion() ? target : ball_open_ + std::clamp(target - ball_open_, -dt * 5.0, dt * 5.0);
     }
+    as_.step(dt);
+    gs_.step(dt);
 
     // smooth zoom, anchored under the cursor unless following
     if (zoom_ != zoom_target_) {
@@ -1940,6 +1946,36 @@ void MapView::paintBall(QPainter& p) {
     }
     paintWindGauge(p, wbox.adjusted(8, e > 0.5 ? 20 : 6, -8, -6), w, heading_.value, time_, true, e < 0.5);
     ball_rect_ = ball_rect_.united(wbox.adjusted(-4, -4, 4, 4));
+
+    // speeds, under the wind: folds with the ball and the wind (to the airspeed alone)
+    const double se = e;
+    const QRectF sbox(box.left(), wbox.bottom() + 8, box.width(), lerp(48.0, 78.0, se));
+    ball_rect_ = ball_rect_.united(sbox.adjusted(-4, -4, 4, 4));
+    drawGlass(p, chamferPath(sbox, 10), kCyan, 0.45, alpha(kGlassDeep, 0.85));
+    const bool vfr = s_.has_vfr_hud;
+    const QString as = vfr ? units::speedText(as_.value, 0, false) : QStringLiteral("—");
+    const QString gs = vfr ? units::speedText(gs_.value, 0, false) : QStringLiteral("—");
+    if (se > 0.5) {
+        p.setOpacity(std::clamp((se - 0.5) * 2.0, 0.0, 1.0));
+        drawText(p, QRectF(sbox.left() + 10, sbox.top() + 4, sbox.width() - 20, 14), Qt::AlignLeft | Qt::AlignVCenter,
+                 QStringLiteral("SPEED %1").arg(units::speedUnitLabel()), labelFont(9), kMuted);
+        auto row = [&](double y, const QString& name, const QString& v) {
+            drawText(p, QRectF(sbox.left() + 12, y, 60, 24), Qt::AlignLeft | Qt::AlignVCenter, name, labelFont(10.5),
+                     alpha(kMuted, 0.95));
+            drawText(p, QRectF(sbox.left() + 60, y, sbox.width() - 72, 24), Qt::AlignRight | Qt::AlignVCenter, v,
+                     monoFont(16, true), vfr ? kText : kMuted);
+        };
+        row(sbox.top() + 22, QStringLiteral("AIR"), as);
+        row(sbox.top() + 48, QStringLiteral("GROUND"), gs);
+        p.setOpacity(1.0);
+    } else {
+        p.setOpacity(std::clamp((0.5 - se) * 2.0, 0.0, 1.0));
+        drawText(p, QRectF(sbox.left(), sbox.top() + 4, sbox.width(), 13), Qt::AlignCenter, QStringLiteral("AS"),
+                 labelFont(8.5), kMuted);
+        drawText(p, QRectF(sbox.left(), sbox.top() + 17, sbox.width(), 26), Qt::AlignCenter, as, monoFont(16, true),
+                 vfr ? kText : kMuted);
+        p.setOpacity(1.0);
+    }
 }
 
 }  // namespace gcs::ui

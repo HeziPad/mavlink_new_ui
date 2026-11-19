@@ -230,13 +230,6 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
     });
 
     connect(bar_, &TelemetryBar::systemsTapped, this, [this] { showAlerts(!alerts_->isVisible()); });
-    connect(bar_, &TelemetryBar::safetyBlocked, this,
-            [this](const QString& reason) { fx_->toast(reason, kMuted, QStringLiteral("Safety")); });
-    connect(bar_, &TelemetryBar::safetyToggleRequested, this, [this](bool make_safe) {
-        client_->runSequence("safety", {link::makeSetSafety(make_safe)});
-        fx_->toast(make_safe ? QStringLiteral("Safety ON: motors cut") : QStringLiteral("Safety OFF: motors live"),
-                   make_safe ? kAmber : kRed, QStringLiteral("Safety"));
-    });
 
     bar_->setAltRef(settings_.alt_ref);
     connect(bar_, &TelemetryBar::altRefChanged, this, [this](int ref) {
@@ -1026,7 +1019,7 @@ void MainWindow::updateHeights(qint64 now_ms) {
     if (land_ground_ && s_.has_position) {
         afl = s_.alt_amsl - *land_ground_;
     }
-    bar_->setAltitudes(agl, rf.has_value(), afl);
+    bar_->setAltitudes(agl, afl);
 
     // the map's nav box: ground under the aircraft, and where it is going (5 Hz)
     if (now_ms - nav_ms_ < 200) {
@@ -1281,7 +1274,6 @@ void MainWindow::updateSpeedTarget(qint64 now_ms) {
     if (want == Target::Default && (!speed_sent_ || *speed_sent_ == Target::Default || *speed_sent_ == Target::Cruise)) {
         speed_sent_ = want;  // nothing of ours to undo
         speed_label_.clear();
-        bar_->setSpeedTarget(speed_label_);
         return;
     }
     client_->runSequence("speed", {link::makeChangeSpeed(v)});
@@ -1289,7 +1281,6 @@ void MainWindow::updateSpeedTarget(qint64 now_ms) {
     const double shown = want == Target::Loiter ? loiter : want == Target::Max ? s_.airspeed_max : s_.airspeed_cruise;
     speed_label_ = want == Target::Default ? QString()
                                            : QStringLiteral("%1 %2").arg(QLatin1String(targetName(want)), units::speedText(shown));
-    bar_->setSpeedTarget(speed_label_);
     if (speed_panel_->isVisible()) {
         refreshSpeedPanel();
     }
@@ -1367,6 +1358,9 @@ void MainWindow::pullState() {
     }
     updateHeights(clock_.elapsed());
     updateSpeedTarget(clock_.elapsed());
+    autoSafetyOnLanded();
+    bar_->setSpeed(speed_sent_ ? static_cast<int>(*speed_sent_) : 0, settings_.speed_mode, isAirborne(s_));
+    bar_->setCommandedAlt(commandedAltRel());
     bar_->setState(s_, now);
     map_->setState(s_);
     map_->setDefaultLoiterRadius(defaultRadius());
@@ -1855,6 +1849,9 @@ void MainWindow::refreshDock() {
             spec.hold_to_confirm = true;
             spec.hint = mission ? QStringLiteral("Hold: vertical takeoff, straight transition, then the plan")
                                 : QStringLiteral("Hold: vertical takeoff, straight transition, then Hold");
+            if (safetyState(s_) == SafetyState::Live && !s_.armed) {
+                spec.hint += QStringLiteral("\nSafety OFF: motors live (it turns back ON after landing)");
+            }
             // Not a lock: the pre-arm bit is evaluated in the *current* mode, and
             // the sequence changes mode first (e.g. "QRTL mode not armable"
             // clears once in AUTO). The vehicle has the final say via the ARM ack.
@@ -1869,8 +1866,16 @@ void MainWindow::refreshDock() {
                 spec.enabled = false;
                 spec.reason = pf_->launchBlockReason(s_, Clock::now());
             } else if (safetyState(s_) == SafetyState::Safe) {
-                spec.enabled = false;
-                spec.reason = QStringLiteral("Safety ON: motors cut. Hold SAFETY in the top bar for 1 s to turn it off");
+                // first hold: motors live; the button then becomes Takeoff / Launch
+                spec.label = QStringLiteral("Safety Off");
+                spec.icon = DockIcon::Safety;
+                spec.accent = kAmber;
+                spec.hint = QStringLiteral("Safety is ON: motors cut.\nHold 1 s: motors live. Then hold again to take off");
+                if (clock_.elapsed() < safety_pending_until_ms_) {
+                    spec.label = QStringLiteral("Safety…");
+                    spec.enabled = false;
+                    spec.reason = QStringLiteral("Turning the safety off");
+                }
             } else if (!gpsHealthy(s_) || !s_.has_home) {
                 spec.enabled = false;
                 spec.reason = QStringLiteral("Waiting for GPS fix and home position");
@@ -2012,13 +2017,26 @@ void MainWindow::onTriggered(int slot) {
         }
         break;
     case kLaunch:
+        if (!isAirborne(s_) && !s_.armed && safetyState(s_) == SafetyState::Safe) {
+            // the first of the two holds: motors live
+            client_->runSequence("safety", {link::makeSetSafety(false)});
+            safety_pending_until_ms_ = clock_.elapsed() + 2500;
+            fx_->toast(QStringLiteral("Safety OFF: motors live · hold again to take off"), kRed,
+                       QStringLiteral("Safety"));
+            refreshDock();
+            break;
+        }
         launchOrAuto();
         break;
     case kGuide:
         if (!isAirborne(s_) && !s_.armed) {
             openPreflight();
         } else {
+            if (guiding_ && orbit_ && !orbit_->hold) {
+                hold_panel_hidden_ = true;  // Fly To off by hand: its panel goes too (the circle goes on)
+            }
             setGuide(!guiding_);
+            refreshDock();
         }
         break;
     case kHold:
@@ -2260,6 +2278,10 @@ void MainWindow::sendGuided(double lat, double lon) {
     sendOrbit();
     map_->ping(lat, lon, kCyan);
     dock_->setPending(kGuide, true);
+    // one target per tap on Fly To: the button goes off, the panel stays to adjust the circle
+    hold_panel_hidden_ = false;
+    setGuide(false);
+    refreshDock();
 }
 
 double MainWindow::defaultRadius() const {
@@ -2328,9 +2350,9 @@ void MainWindow::adjustOrbit(float d_alt, float d_radius, bool flip) {
 }
 
 void MainWindow::refreshOrbitPanel() {
-    // Hold: always while holding; Fly To: while its button is on (the circle
-    // keeps flying when it's off)
-    const bool show = orbit_ && (guiding_ || (orbit_->hold && !hold_panel_hidden_)) && !planning_ &&
+    // Hold and a Fly To target: shown until hidden (Hold / Fly To pressed again);
+    // also while Fly To is waiting for a target
+    const bool show = orbit_ && (guiding_ || !hold_panel_hidden_) && !planning_ &&
                       s_.custom_mode == plane::GUIDED && isAirborne(s_);
     orbit_panel_->setCoordButton(show && !orbit_->hold);
     if (show) {
@@ -2693,6 +2715,47 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* e) {
         return !(pad_ && pad_->isOpen());
     }
     return QWidget::eventFilter(obj, e);
+}
+
+void MainWindow::autoSafetyOnLanded() {
+    // Back on the ground and disarmed (ArduPlane disarms a few seconds after
+    // touchdown): safety ON, so the motors can't start by accident. Only after
+    // the disarm: while armed it would cut every output, the pusher too.
+    const bool disarmed_now = was_armed_ && !s_.armed && s_.has_heartbeat;
+    was_armed_ = s_.armed;
+    if (disarmed_now && !isAirborne(s_) && safetyState(s_) == SafetyState::Live) {
+        client_->runSequence("safety", {link::makeSetSafety(true)});
+        fx_->toast(QStringLiteral("On the ground: safety ON, motors cut"), kAmber, QStringLiteral("Safety"));
+    }
+}
+
+std::optional<double> MainWindow::commandedAltRel() const {
+    // what the GCS asked for (height above home), not the autopilot's slewing
+    // target, so the bar's "→" stays put during a climb
+    if (!s_.armed) {
+        return std::nullopt;
+    }
+    if (takeoff_handoff_ || climb_out_) {
+        return settings_.takeoff_alt;
+    }
+    if (s_.custom_mode == plane::GUIDED && orbit_) {
+        return orbit_->alt;
+    }
+    if (s_.custom_mode == plane::AUTO && s_.mission_known && s_.mission_current >= 1 &&
+        s_.mission_current < static_cast<int>(s_.mission.size())) {
+        const MissionItem& it = s_.mission[s_.mission_current];
+        switch (it.command) {
+        case mav::kCmdNavWaypoint:
+        case mav::kCmdNavLoiterUnlim:
+        case mav::kCmdNavLoiterTurns:
+        case mav::kCmdNavLoiterTime:
+        case mav::kCmdNavLoiterToAlt:
+            return it.z;
+        default:
+            break;
+        }
+    }
+    return std::nullopt;
 }
 
 }  // namespace gcs::ui

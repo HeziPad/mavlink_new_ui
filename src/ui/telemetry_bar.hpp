@@ -2,6 +2,7 @@
 
 #include "anim.hpp"
 #include "core/flight_status.hpp"
+#include "core/display_round.hpp"
 #include "core/health.hpp"
 
 #include <optional>
@@ -13,10 +14,12 @@
 
 namespace gcs::ui {
 
-// Floating glass strip of segmented telemetry chips. Numbers ease towards new
-// values; mode / VTOL chips flash on change. SYSTEMS summarises the
-// advisories (tap: the window opens the alerts panel). LIFT ROTORS shows whether
-// the VTOL motors are idle, in expected use, or assisting in cruise.
+// Floating glass strip of the essentials, left to right: LINK (bars only),
+// BATTERY, TIME LEFT, FLIGHT, ETA, ALT, SPEED (in words), SYSTEMS, settings.
+// Numbers ease towards new values; the flight chip flashes on a change.
+// SYSTEMS summarises the advisories (tap: the window opens the alerts panel).
+// Altitudes are shown to the nearest 10 (display unit) and only move on once
+// clearly past a boundary (core/display_round).
 class TelemetryBar : public QWidget {
     Q_OBJECT
 
@@ -34,11 +37,14 @@ public:
     void setSystemsOpen(bool open);
     void setFlightStatus(const FlightStatus& f);
     void setNavTarget(const NavTarget& t) { nav_ = t; }  // the ETA chip
-    void setSpeedTarget(const QString& t) { speed_target_ = t; }  // "LOITER 16 m/s", "" = default
+    // the SPEED chip: what is commanded (speed::Target) and the operator's
+    // speed mode (speed::Mode: ECO / NORMAL / FAST)
+    void setSpeed(int target, int mode, bool airborne);
     // the altitude chip's other references (ASL comes from the state):
-    // AGL (from the rangefinder when `agl_rangefinder`, else terrain) and
-    // AFL (above the landing point's ground); nullopt = unknown
-    void setAltitudes(std::optional<double> agl, bool agl_rangefinder, std::optional<double> afl);
+    // AGL (rangefinder or terrain) and AFL (above the landing point's ground); nullopt = unknown
+    void setAltitudes(std::optional<double> agl, std::optional<double> afl);
+    // what the GCS asked the aircraft to fly at (height above home); nullopt = nothing
+    void setCommandedAlt(std::optional<double> alt_rel) { cmd_alt_ = alt_rel; }
     void setAltRef(int ref) { alt_ref_ = ref; }
     // Battery time left (core/endurance): flying time before it must head
     // back, estimated at `at`; the chip counts down from there. level:
@@ -50,16 +56,12 @@ public:
 signals:
     void settingsRequested();
     void altRefChanged(int ref);  // tapped: 0 ASL, 1 AGL, 2 AFL
-    void speedTapped();           // the AS · GS chip: the airspeed panel
+    void speedTapped();           // the SPEED chip: the airspeed panel
     void systemsTapped();
-    // SAFETY held for kSafetyHold: toggle it (`make_safe` = engage)
-    void safetyToggleRequested(bool make_safe);
-    void safetyBlocked(const QString& reason);
 
 protected:
     void paintEvent(QPaintEvent* e) override;
     void mousePressEvent(QMouseEvent* e) override;
-    void mouseReleaseEvent(QMouseEvent* e) override;
 
 private:
     VehicleState s_;
@@ -70,28 +72,26 @@ private:
     uint64_t rate_msgs_ = 0;
     Clock::time_point rate_t_{};
 
-    Tween alt_, as_, gs_, batt_;
+    Tween batt_;
     Pulse mode_flash_;  // the flight chip, on a change of state
     FlightStatus flight_;
     NavTarget nav_;
     int alt_ref_ = 0;
     std::optional<double> agl_, afl_;
-    bool agl_rangefinder_ = false;
+    std::optional<double> cmd_alt_;
+    // to the nearest 10 in the display unit, moving on 2 past the boundary
+    display::StickyRound alt_shown_{10.0, 2.0}, cmd_shown_{10.0, 2.0};
+    int alt_shown_ref_ = -1;  // the reference + unit the sticky values belong to
     QRectF alt_rect_;
     QRectF spd_rect_;
-    QString speed_target_;
+    int speed_target_ = 0;  // speed::Target
+    int speed_mode_ = 1;    // speed::Mode
+    bool speed_airborne_ = false;
+    double spd_flash_ = 0.0;  // a tap on the chip
     double time_ = 0.0;
 
     QRectF sys_rect_;
     QRectF gear_rect_;
-    QRectF safety_rect_;
-    static constexpr double kSafetyHold = 1.0;  // s, both directions
-    bool safety_down_ = false;
-    double safety_hold_ = 0.0;     // s held
-    double safety_flash_ = 0.0;
-    double safety_pending_ = 0.0;  // s left waiting for the state to change
-    SafetyState safety_sent_from_ = SafetyState::Unknown;
-    QString safetyLockReason() const;
     double gear_spin_ = 0.0;
     bool sys_open_ = false;
     int adv_bad_ = 0;   // Warning + Critical

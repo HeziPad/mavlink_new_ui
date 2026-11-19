@@ -263,6 +263,7 @@ private:
     bool trail_on_ = true;
     int trail_secs_ = 120;
     double ball_open_ = 1.0;  // 0 collapsed .. 1 open, animated
+    Tween as_, gs_;
 
     AngleTween heading_;
 

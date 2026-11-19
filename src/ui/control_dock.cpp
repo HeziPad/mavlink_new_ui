@@ -511,6 +511,22 @@ void drawDockIcon(QPainter& p, DockIcon icon, const QRectF& r, const QColor& c) 
         p.drawLine(QPointF(16, 20), QPointF(21, 20));
         break;
     }
+    case DockIcon::Safety: {
+        // a closed padlock: safety on, motors cut
+        p.setBrush(alpha(c, 0.2));
+        p.drawRoundedRect(QRectF(6, 13, 18, 14), 2, 2);
+        p.setBrush(Qt::NoBrush);
+        QPainterPath shackle;
+        shackle.moveTo(10, 13);
+        shackle.lineTo(10, 9);
+        shackle.arcTo(QRectF(10, 4, 10, 10), 180, -180);
+        shackle.lineTo(20, 13);
+        p.drawPath(shackle);
+        p.setBrush(c);
+        p.drawEllipse(QPointF(15, 19), 1.8, 1.8);
+        p.drawLine(QPointF(15, 19), QPointF(15, 23));
+        break;
+    }
     case DockIcon::Hold: {
         p.drawEllipse(QPointF(15, 15), 12, 12);
         p.setBrush(c);

@@ -143,6 +143,12 @@ private:
     std::optional<speed::Target> speed_sent_;
     uint32_t speed_mode_seen_ = 0xffffffff;
     QString speed_label_;
+    // safety on the Launch button: a sent "safety off" waits for the state (ms)
+    qint64 safety_pending_until_ms_ = 0;
+    bool was_armed_ = false;
+    void autoSafetyOnLanded();
+    // the altitude the GCS commanded (above home), for the bar's "→"
+    std::optional<double> commandedAltRel() const;
     int wp_hold_seq_ = -1;          // the waypoint hold being flown
     qint64 wp_hold_since_ms_ = -1;  // when its circle was reached
     bool wp_hold_cut_ = false;      // its end (SET_MISSION_CURRENT) was sent

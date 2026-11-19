@@ -2,6 +2,7 @@
 
 #include "core/endurance.hpp"
 #include "core/geo.hpp"
+#include "core/speed_mode.hpp"
 
 #include "theme.hpp"
 #include "units.hpp"
@@ -19,19 +20,6 @@ using namespace theme;
 
 
 namespace {
-
-const char* fixName(int fix) {
-    switch (fix) {
-    case 0:
-    case 1: return "NO FIX";
-    case 2: return "2D";
-    case 3: return "3D";
-    case 4: return "DGPS";
-    case 5: return "RTK FL";
-    case 6: return "RTK";
-    default: return "?";
-    }
-}
 
 QColor batteryColor(int pct) {
     if (pct < 0) {
@@ -62,7 +50,6 @@ void chip(QPainter& p, const QRectF& r, const QString& label, const QString& val
 
 TelemetryBar::TelemetryBar(QWidget* parent) : QWidget(parent) {
     (void)parent;
-    alt_.rate = as_.rate = gs_.rate = 9.0;
     batt_.rate = 4.0;
 }
 
@@ -81,13 +68,6 @@ void TelemetryBar::setState(const VehicleState& s, Clock::time_point now) {
         rate_t_ = now;
     }
 
-    if (s.has_position) {
-        alt_.set(s.alt_rel);
-    }
-    if (s.has_vfr_hud) {
-        as_.set(s.airspeed);
-        gs_.set(s.groundspeed);
-    }
     if (s.battery_pct >= 0) {
         batt_.set(s.battery_pct);
     }
@@ -119,10 +99,15 @@ void TelemetryBar::setFlightStatus(const FlightStatus& f) {
     flight_ = f;
 }
 
-void TelemetryBar::setAltitudes(std::optional<double> agl, bool agl_rangefinder, std::optional<double> afl) {
+void TelemetryBar::setAltitudes(std::optional<double> agl, std::optional<double> afl) {
     agl_ = agl;
-    agl_rangefinder_ = agl_rangefinder;
     afl_ = afl;
+}
+
+void TelemetryBar::setSpeed(int target, int mode, bool airborne) {
+    speed_target_ = target;
+    speed_mode_ = mode;
+    speed_airborne_ = airborne;
 }
 
 void TelemetryBar::setSystemsOpen(bool open) {
@@ -133,33 +118,14 @@ void TelemetryBar::setSystemsOpen(bool open) {
 void TelemetryBar::tick(double dt) {
     time_ += dt;
     bool moving = false;
-    moving |= alt_.step(dt);
-    moving |= as_.step(dt);
-    moving |= gs_.step(dt);
     moving |= batt_.step(dt);
     moving |= mode_flash_.step(dt);
-    if (safety_down_) {
-        safety_hold_ += dt;
-        if (safety_hold_ >= kSafetyHold) {
-            safety_down_ = false;
-            safety_hold_ = 0.0;
-            safety_flash_ = 1.0;
-            safety_pending_ = 3.0;
-            safety_sent_from_ = safetyState(s_);
-            emit safetyToggleRequested(safety_sent_from_ == SafetyState::Live);
-        }
-        moving = true;
-    }
-    if (safety_pending_ > 0.0) {
-        safety_pending_ = safetyState(s_) != safety_sent_from_ ? 0.0 : std::max(0.0, safety_pending_ - dt);
-        moving = true;
-    }
-    if (safety_flash_ > 0.0) {
-        safety_flash_ = std::max(0.0, safety_flash_ - dt * 2.0);
-        moving = true;
-    }
     if (gear_spin_ > 0.0) {
         gear_spin_ = std::max(0.0, gear_spin_ - dt * 2.5);
+        moving = true;
+    }
+    if (spd_flash_ > 0.0) {
+        spd_flash_ = std::max(0.0, spd_flash_ - dt * 3.0);
         moving = true;
     }
     if (moving || !alive_) {
@@ -167,41 +133,9 @@ void TelemetryBar::tick(double dt) {
     }
 }
 
-QString TelemetryBar::safetyLockReason() const {
-    if (!alive_) {
-        return QStringLiteral("No vehicle link");
-    }
-    if (safetyState(s_) == SafetyState::Unknown) {
-        return QStringLiteral("The vehicle doesn't report a safety switch");
-    }
-    if (s_.armed) {
-        return QStringLiteral("Can't change safety while armed: it would cut the pusher and servos too");
-    }
-    return {};
-}
-
-void TelemetryBar::mouseReleaseEvent(QMouseEvent*) {
-    if (safety_down_ && safety_hold_ < kSafetyHold) {
-        // released early: nothing happens (a hint, like the dock's hold buttons)
-        emit safetyBlocked(QStringLiteral("Hold SAFETY for 1 s to change it"));
-    }
-    safety_down_ = false;
-    safety_hold_ = 0.0;
-    update();
-}
-
 void TelemetryBar::mousePressEvent(QMouseEvent* e) {
-    if (safety_rect_.contains(e->position())) {
-        const QString reason = safetyLockReason();
-        if (!reason.isEmpty()) {
-            emit safetyBlocked(reason);
-            return;
-        }
-        safety_down_ = true;
-        safety_hold_ = 0.0;
-        return;
-    }
     if (spd_rect_.contains(e->position())) {
+        spd_flash_ = 1.0;
         emit speedTapped();
         return;
     }
@@ -223,9 +157,15 @@ void TelemetryBar::mousePressEvent(QMouseEvent* e) {
 
 namespace {
 // chip widths at scale 1
-constexpr double kLink = 104, kFlight = 250, kEta = 112, kArm = 100, kSafe = 104, kAlt = 200, kSpd = 120, kBat = 156,
-                 kGps = 92, kSys = 108, kGear = 60;
-constexpr double kChipsTotal = kLink + kFlight + kEta + kArm + kSafe + kAlt + kSpd + kBat + kGps + kSys + kGear;
+constexpr double kLink = 64, kBat = 128, kTime = 104, kFlight = 230, kEta = 112, kAlt = 172, kSpd = 152, kSys = 108,
+                 kGear = 60;
+constexpr double kChipsTotal = kLink + kBat + kTime + kFlight + kEta + kAlt + kSpd + kSys + kGear;
+
+// "0:23", "1:05": hours and minutes (rounded down)
+QString hmText(double seconds) {
+    const long m = seconds <= 0.0 ? 0 : static_cast<long>(seconds / 60.0);
+    return QStringLiteral("%1:%2").arg(m / 60).arg(m % 60, 2, 10, QLatin1Char('0'));
+}
 constexpr double kStripPad = 14;
 constexpr double kStripH = 46;
 constexpr double kBarH = 52;  // strip + 2 px above + room for the glow below
@@ -270,44 +210,93 @@ void TelemetryBar::paintEvent(QPaintEvent*) {
         return r;
     };
 
-    // ---- link --------------------------------------------------------------
+    // ---- link: bars only ------------------------------------------------------
     {
         const QRectF r = next(kLink);
-        QString text;
-        QColor c;
+        const bool error = !s_.error.empty();
+        const bool waiting = !error && !s_.has_heartbeat;
+        const bool lost = error || (!waiting && hb_age_ >= 10.0);
         int bars = 0;
-        if (!s_.error.empty()) {
-            text = QStringLiteral("ERROR");
-            c = kRed;
-        } else if (!s_.has_heartbeat) {
-            text = QStringLiteral("WAIT");
-            c = kMuted;
-        } else if (hb_age_ < 3.0) {
-            text = QStringLiteral("LIVE");
-            c = kGreen;
-            bars = msg_rate_ > 20 ? 4 : (msg_rate_ > 5 ? 3 : 2);
-        } else if (hb_age_ < 10.0) {
-            text = QStringLiteral("STALE");
-            c = kAmber;
-            bars = 1;
-        } else {
-            text = QStringLiteral("LOST");
-            c = kRed;
+        QColor c = kMuted;
+        if (!waiting && !lost) {
+            if (hb_age_ < 3.0) {
+                bars = msg_rate_ > 20 ? 4 : (msg_rate_ > 5 ? 3 : 2);
+                c = bars >= 3 ? kGreen : kAmber;
+            } else {
+                bars = 1;  // stale
+                c = kAmber;
+            }
         }
-        if (!alive_ && s_.has_heartbeat && !reducedMotion()) {
-            c = alpha(c, 0.55 + 0.45 * std::abs(std::sin(time_ * 4.0)));
-        }
-        // signal bars
-        const double bx = r.left() + 12, by = r.top() + 33;
+        const double bx = r.center().x() - 14, by = r.top() + 35;
         for (int i = 0; i < 4; ++i) {
-            const double bh = 6 + i * 4;
-            const QRectF b(bx + i * 6, by - bh, 4, bh);
-            p.fillRect(b, i < bars ? c : alpha(kMuted, 0.25));
+            const double bh = 7 + i * 5;
+            const QRectF b(bx + i * 7.5, by - bh, 5, bh);
+            QColor bc = i < bars ? c : alpha(kMuted, lost ? 0.18 : 0.28);
+            if (waiting && !reducedMotion()) {
+                // looking for the vehicle: a slow sweep along the bars
+                const double ph = std::fmod(time_ * 1.2, 1.6) * 4.0 - i;
+                bc = alpha(kMuted, 0.25 + 0.45 * std::max(0.0, 1.0 - std::abs(ph - 1.0)));
+            }
+            p.fillRect(b, bc);
         }
-        drawText(p, QRectF(r.left() + 40, r.top() + 6, r.width() - 44, 13), Qt::AlignLeft | Qt::AlignVCenter,
-                 QStringLiteral("Link"), labelFont(9.5), kMuted);
-        drawText(p, QRectF(r.left() + 40, r.top() + 19, r.width() - 44, 24),
-                 Qt::AlignLeft | Qt::AlignVCenter, text, monoFont(14, true), c);
+        if (lost) {
+            // link lost: a red cross over the bars
+            const double pulse = reducedMotion() ? 1.0 : 0.55 + 0.45 * std::abs(std::sin(time_ * 4.0));
+            const QPointF xc(bx + 13, by - 11);
+            p.setPen(QPen(alpha(kRed, pulse), 3.0, Qt::SolidLine, Qt::RoundCap));
+            p.drawLine(xc + QPointF(-9, -9), xc + QPointF(9, 9));
+            p.drawLine(xc + QPointF(-9, 9), xc + QPointF(9, -9));
+        }
+    }
+
+    // ---- battery: gauge and percent ---------------------------------------------------
+    {
+        const QRectF r = next(kBat);
+        batt_rect_ = p.transform().mapRect(r);
+        const int pct = s_.battery_pct >= 0 ? static_cast<int>(std::lround(batt_.value)) : -1;
+        const QColor c = batteryColor(pct);
+        const int segs = 5;
+        const double gx = r.left() + 12, gh = 18, gy = r.center().y() - gh / 2.0, gw = 58;
+        // a battery outline with a nub, five cells inside
+        p.setPen(QPen(alpha(c == kMuted ? kMuted : c, 0.8), 1.4));
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(QRectF(gx - 3, gy - 3, gw + 6, gh + 6));
+        p.fillRect(QRectF(gx + gw + 3, gy + gh / 2.0 - 4, 3, 8), alpha(c == kMuted ? kMuted : c, 0.8));
+        const double sw = (gw - (segs - 1) * 2) / segs;
+        const int lit = pct < 0 ? 0 : static_cast<int>(std::ceil(pct / 20.0));
+        for (int i = 0; i < segs; ++i) {
+            p.fillRect(QRectF(gx + i * (sw + 2), gy, sw, gh), i < lit ? c : alpha(kMuted, 0.18));
+        }
+        drawText(p, QRectF(gx + gw + 8, r.top(), r.right() - (gx + gw + 8) - 6, r.height()),
+                 Qt::AlignRight | Qt::AlignVCenter, pct < 0 ? QStringLiteral("—") : QStringLiteral("%1%").arg(pct),
+                 monoFont(14, true), c);
+    }
+
+    // ---- time left (battery, core/endurance) -------------------------------------------
+    {
+        const QRectF r = next(kTime);
+        if (endurance_valid_ && isAirborne(s_)) {
+            // the flying time left before it must head back (it already keeps
+            // the return, the landing and the reserve)
+            const double left = endurance_s_ - std::chrono::duration<double>(now_ - endurance_at_).count();
+            const bool land_now = endurance_level_ >= 2 || left <= 0.0;
+            const QColor tc = land_now ? kRed : (endurance_level_ == 1 ? kAmber : kText);
+            p.save();
+            if (land_now && !reducedMotion()) {
+                p.setOpacity(0.55 + 0.45 * std::abs(std::sin(time_ * 3.0)));
+            }
+            if (land_now) {
+                drawText(p, QRectF(r.left(), r.top() + 6, r.width(), 13), Qt::AlignHCenter | Qt::AlignVCenter,
+                         QStringLiteral("Time left"), labelFont(9.5), kMuted);
+                drawText(p, QRectF(r.left(), r.top() + 19, r.width(), 24), Qt::AlignHCenter | Qt::AlignVCenter,
+                         QStringLiteral("LAND NOW"), labelFont(12.5), tc);
+            } else {
+                chip(p, r, QStringLiteral("Time left"), hmText(left), tc);
+            }
+            p.restore();
+        } else {
+            chip(p, r, QStringLiteral("Time left"), QStringLiteral("—"), kMuted);
+        }
     }
 
     // ---- flight: one plain state instead of mode + VTOL + lift rotors -------------
@@ -329,14 +318,8 @@ void TelemetryBar::paintEvent(QPaintEvent*) {
         if (f > 0) {
             rr.translate(0, -3.0 * f);
         }
-        // small print: the autopilot's own mode name, for whoever needs it
-        const QString mode = s_.has_heartbeat ? QString::fromStdString(s_.mode_name) : QString();
-        QString small = mode.isEmpty() ? QStringLiteral("Flight") : QStringLiteral("Flight · %1").arg(mode);
-        if (!speed_target_.isEmpty()) {
-            small += QStringLiteral(" · ") + speed_target_;
-        }
-        drawText(p, QRectF(rr.left() + 12, rr.top() + 6, rr.width() - 44, 13), Qt::AlignLeft | Qt::AlignVCenter, small,
-                 labelFont(9.5), kMuted);
+        drawText(p, QRectF(rr.left() + 12, rr.top() + 6, rr.width() - 44, 13), Qt::AlignLeft | Qt::AlignVCenter,
+                 QStringLiteral("Flight mode"), labelFont(9.5), kMuted);
         // the state, shrunk to fit
         const QString label = QString::fromStdString(flight_.label);
         QFont vf = monoFont(15, true);
@@ -375,91 +358,37 @@ void TelemetryBar::paintEvent(QPaintEvent*) {
              nav_.valid ? (nav_.arrived ? kGreen : kCyan) : kMuted);
     }
 
-    // ---- armed -------------------------------------------------------------
-    {
-        const QRectF r = next(kArm);
-        if (!s_.has_heartbeat) {
-            chip(p, r, QStringLiteral("State"), QStringLiteral("—"), kMuted);
-        } else if (s_.armed) {
-            const QRectF box = r.adjusted(10, 12, -10, -10);
-            p.fillRect(box, alpha(kRed, 0.18));
-            p.setPen(QPen(kRed, 1));
-            p.drawRect(box);
-            drawText(p, box, Qt::AlignCenter, QStringLiteral("ARMED"), labelFont(12.5), kRed);
-        } else {
-            chip(p, r, QStringLiteral("State"), QStringLiteral("DISARMED"), kGreen);
-        }
-    }
-
-    // ---- safety switch (hold 1 s to toggle) ------------------------------------
-    {
-        const QRectF r = next(kSafe);
-        safety_rect_ = p.transform().mapRect(r);
-        const SafetyState st = safetyState(s_);
-        QString text = QStringLiteral("—");
-        QColor c = kMuted;
-        if (alive_ && st == SafetyState::Safe) {
-            text = QStringLiteral("ON");  // safety on: motors cut
-            c = kAmber;
-        } else if (alive_ && st == SafetyState::Live) {
-            text = QStringLiteral("OFF");  // safety off: motors live
-            c = kRed;
-        }
-        if (safety_pending_ > 0.0) {
-            text = QStringLiteral("…");
-        }
-        const QRectF box = r.adjusted(8, 5, -8, -5);
-        p.setPen(QPen(alpha(c, 0.6 + 0.4 * safety_flash_), 1));
-        p.setBrush(alpha(c, 0.08 + 0.2 * safety_flash_));
-        p.drawRect(box);
-        // charge bar while held
-        if (safety_down_) {
-            const double f = std::clamp(safety_hold_ / kSafetyHold, 0.0, 1.0);
-            p.setPen(Qt::NoPen);
-            p.setBrush(alpha(c == kMuted ? kCyan : (st == SafetyState::Live ? kAmber : kRed), 0.45));
-            p.drawRect(QRectF(box.left(), box.bottom() - 4, box.width() * f, 4));
-        }
-        drawText(p, QRectF(box.left(), box.top() + 1, box.width(), 13), Qt::AlignHCenter | Qt::AlignVCenter,
-                 QStringLiteral("Safety"), labelFont(9.5), kMuted);
-        // padlock: closed when safe
-        const QPointF lc(box.left() + 18, box.top() + 25);
-        p.setPen(QPen(c, 1.6));
-        p.setBrush(Qt::NoBrush);
-        p.drawRect(QRectF(lc.x() - 6, lc.y() - 2, 12, 9));
-        QPainterPath shackle;
-        const bool closed = st != SafetyState::Live;
-        shackle.moveTo(lc.x() - 4, lc.y() - 2);
-        shackle.lineTo(lc.x() - 4, lc.y() - 6);
-        shackle.arcTo(QRectF(lc.x() - 4, lc.y() - 10, 8, 8), 180, -180);
-        shackle.lineTo(lc.x() + 4, closed ? lc.y() - 2 : lc.y() - 5);
-        p.drawPath(shackle);
-        drawText(p, QRectF(box.left() + 28, box.top() + 14, box.width() - 30, 22), Qt::AlignLeft | Qt::AlignVCenter,
-                 text, labelFont(13), c);
-    }
-
     // ---- altitude: tap to switch the reference (ASL / AGL / AFL) --------------
     {
         const QRectF r = next(kAlt);
         alt_rect_ = p.transform().mapRect(r);
         static const char* kRefs[] = {"ASL", "AGL", "AFL"};
-        QString label = QStringLiteral("Alt %1 %2").arg(QLatin1String(kRefs[std::clamp(alt_ref_, 0, 2)]), units::altUnitLabel());
+        const int ref = std::clamp(alt_ref_, 0, 2);
+        const QString label = QStringLiteral("Alt %1 %2").arg(QLatin1String(kRefs[ref]), units::altUnitLabel());
         std::optional<double> value;
         if (s_.has_position) {
-            if (alt_ref_ == 0) {
-                value = s_.alt_amsl;
-            } else if (alt_ref_ == 1) {
-                value = agl_;
-                if (agl_ && !agl_rangefinder_) {
-                    label += QStringLiteral(" · terrain");  // not measured: from the elevation map
+            value = ref == 0 ? std::optional<double>(s_.alt_amsl) : (ref == 1 ? agl_ : afl_);
+        }
+        // a new reference or unit starts the sticky rounding afresh
+        const int key = ref * 2 + (units::feet() ? 1 : 0);
+        if (key != alt_shown_ref_) {
+            alt_shown_ref_ = key;
+            alt_shown_.reset();
+            cmd_shown_.reset();
+        }
+        QString v = QStringLiteral("—");
+        if (value) {
+            const double shown = alt_shown_.update(units::altToDisplay(*value));
+            v = QString::number(std::lround(shown));
+            // what the GCS commanded, in the same reference, when it differs
+            if (cmd_alt_ && s_.armed) {
+                const double cmd = cmd_shown_.update(units::altToDisplay(*cmd_alt_ + (*value - s_.alt_rel)));
+                if (std::lround(cmd) != std::lround(shown)) {
+                    v += QStringLiteral("→%1").arg(std::lround(cmd));
                 }
             } else {
-                value = afl_;
+                cmd_shown_.reset();
             }
-        }
-        QString v = value ? units::altText(*value, false) : QStringLiteral("—");
-        // commanded altitude when the autopilot is navigating to one (same reference)
-        if (value && s_.has_nav && s_.armed && std::abs(s_.nav_alt_error) >= 1.5) {
-            v += QStringLiteral("→%1").arg(units::altText(*value + s_.nav_alt_error, false));
         }
         chip(p, r, label, v, kText);
         // the chip is a button: a small cycle mark, bottom right
@@ -467,67 +396,44 @@ void TelemetryBar::paintEvent(QPaintEvent*) {
         p.drawArc(QRectF(r.right() - 18, r.bottom() - 18, 10, 10), 30 * 16, 300 * 16);
     }
 
-    // ---- speeds: whole numbers ----------------------------------------------------------
+    // ---- speed: what is commanded, in words, and the speed mode ------------------------
     {
         const QRectF r = next(kSpd);
         spd_rect_ = p.transform().mapRect(r);
-        const QString v = s_.has_vfr_hud ? QStringLiteral("%1·%2").arg(units::speedText(as_.value, 0, false),
-                                                                        units::speedText(gs_.value, 0, false))
-                                         : QStringLiteral("—");
-        chip(p, r, QStringLiteral("AS · GS %1").arg(units::speedUnitLabel()), v, kText);
-    }
-
-    // ---- battery -----------------------------------------------------------
-    {
-        const QRectF r = next(kBat);
-        const int pct = s_.battery_pct >= 0 ? static_cast<int>(std::lround(batt_.value)) : -1;
-        const QColor c = batteryColor(pct);
-        drawText(p, QRectF(r.left() + 10, r.top() + 6, r.width() - 20, 13), Qt::AlignLeft | Qt::AlignVCenter,
-                 QStringLiteral("Batt"), labelFont(9.5), kMuted);
-        batt_rect_ = p.transform().mapRect(r);
-        if (endurance_valid_ && isAirborne(s_)) {
-            // in flight: the flying time left before it must head back (it
-            // already keeps the return, the landing and the reserve)
-            const double left = endurance_s_ - std::chrono::duration<double>(now_ - endurance_at_).count();
-            const bool land_now = endurance_level_ >= 2 || left <= 0.0;
-            const QColor tc = land_now ? kRed : (endurance_level_ == 1 ? kAmber : kText);
-            const QString t = land_now ? QStringLiteral("LAND NOW")
-                                       : QStringLiteral("%1 left").arg(QString::fromStdString(endurance::clockText(left)));
-            p.save();
-            if (land_now && !reducedMotion()) {
-                p.setOpacity(0.55 + 0.45 * std::abs(std::sin(time_ * 3.0)));
-            }
-            drawText(p, QRectF(r.left() + 10, r.top() + 5, r.width() - 20, 15), Qt::AlignRight | Qt::AlignVCenter, t,
-                     monoFont(12, true), tc);
-            p.restore();
-        } else {
-            QString right = s_.has_battery ? QStringLiteral("%1V").arg(s_.battery_v, 0, 'f', 1) : QStringLiteral("—");
-            drawText(p, QRectF(r.left() + 10, r.top() + 5, r.width() - 20, 15), Qt::AlignRight | Qt::AlignVCenter,
-                     right, monoFont(12), kText);
+        const int mode = std::clamp(speed_mode_, 0, 2);
+        static const char* kModes[] = {"ECO", "NORMAL", "FAST"};
+        const double sf = spd_flash_;
+        if (sf > 0.0) {
+            p.fillRect(r.adjusted(2, 4, -2, -4), alpha(kCyan, 0.18 * sf));
         }
-        // segmented gauge
-        const int segs = 10;
-        const double gx = r.left() + 10, gy = r.top() + 25, gw = r.width() - 58, gh = 11;
-        const double sw = (gw - (segs - 1) * 2) / segs;
-        const int lit = pct < 0 ? 0 : static_cast<int>(std::ceil(pct / 10.0));
-        for (int i = 0; i < segs; ++i) {
-            const QRectF seg(gx + i * (sw + 2), gy, sw, gh);
-            p.fillRect(seg, i < lit ? c : alpha(kMuted, 0.18));
+        // three chevrons (one lit per step of the mode) and its name, centred as one
+        const QString mname = QString::fromLatin1(kModes[mode]);
+        const QFont mf = labelFont(9.5);
+        const double chev_w = 2 * 6 + 4, gap = 6;
+        const double group = chev_w + gap + QFontMetricsF(mf).horizontalAdvance(mname);
+        const double cy = r.top() + 12.5;
+        double cx = r.center().x() - group / 2.0;
+        p.setBrush(Qt::NoBrush);
+        for (int i = 0; i < 3; ++i) {
+            p.setPen(QPen(i <= mode ? kCyan : alpha(kMuted, 0.35), 1.8, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            p.drawPolyline(QPolygonF({QPointF(cx, cy - 4), QPointF(cx + 4, cy), QPointF(cx, cy + 4)}));
+            cx += 6;
         }
-        drawText(p, QRectF(gx + gw + 4, gy - 4, 44, gh + 8), Qt::AlignRight | Qt::AlignVCenter,
-                 pct < 0 ? QStringLiteral("—%") : QStringLiteral("%1%").arg(pct), monoFont(13, true), c);
-    }
-
-    // ---- GPS ---------------------------------------------------------------
-    {
-        const QRectF r = next(kGps);
-        if (!s_.has_gps) {
-            chip(p, r, QStringLiteral("GPS"), QStringLiteral("—"), kMuted);
-        } else {
-            const QColor c = gpsHealthy(s_) ? kGreen : (s_.gps_fix >= 2 ? kAmber : kRed);
-            chip(p, r, QStringLiteral("GPS"),
-                 QStringLiteral("%1·%2").arg(QLatin1String(fixName(s_.gps_fix))).arg(s_.gps_sats), c);
+        drawText(p, QRectF(cx - 6 + 4 + gap, r.top() + 6, group, 13), Qt::AlignLeft | Qt::AlignVCenter, mname, mf, kCyan);
+        // the chip opens the speed mode: the same quiet mark as the ALT chip's, a caret
+        p.setPen(QPen(alpha(kCyan, 0.6), 1.2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        p.drawPolyline(QPolygonF({QPointF(r.right() - 17, r.bottom() - 14), QPointF(r.right() - 13, r.bottom() - 10),
+                                  QPointF(r.right() - 9, r.bottom() - 14)}));
+        QString word = QStringLiteral("—");
+        QColor wc = kMuted;
+        if (speed_airborne_) {
+            const auto t = static_cast<speed::Target>(speed_target_);
+            word = t == speed::Target::Default ? QStringLiteral("CRUISE")
+                                                : QString::fromLatin1(speed::targetName(t));
+            wc = t == speed::Target::Max ? kAmber : kText;
         }
+        drawText(p, QRectF(r.left(), r.top() + 19, r.width(), 24), Qt::AlignHCenter | Qt::AlignVCenter, word,
+                 monoFont(15, true), wc);
     }
 
     // ---- systems -----------------------------------------------------------
