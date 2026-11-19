@@ -116,4 +116,14 @@ TerrainHit rayToTerrain(double lat, double lon, double alt_amsl, double yaw_deg,
                         const std::function<std::optional<double>(double, double)>& ground, double fallback_ground,
                         double max_range = 3000.0, double step = 15.0);
 
+// ---- measuring on the picture ---------------------------------------------------------
+// Angle (deg) a span of `px` pixels subtends, centred on the boresight of a
+// picture `picture_w` pixels wide with horizontal field of view `hfov_deg`
+// (pinhole camera, square pixels).
+double pixelAngleDeg(double px, double picture_w, double hfov_deg);
+// The inverse: how many pixels an angle spans on that picture.
+double anglePixels(double angle_deg, double picture_w, double hfov_deg);
+// Size of something subtending `angle_deg` at `range` m, facing the camera.
+double sizeAtRange(double angle_deg, double range);
+
 }  // namespace gcs::geo

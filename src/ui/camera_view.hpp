@@ -1,10 +1,14 @@
 #pragma once
 
 #include "anim.hpp"
+#include "core/hud_config.hpp"
 #include "core/vehicle_state.hpp"
 #include "view_host.hpp"
 
 #include <QImage>
+#include <QRectF>
+
+#include <array>
 #include <QPixmap>
 
 namespace gcs::ui {
@@ -32,6 +36,20 @@ public:
     HudRef hudReference() const { return ref_; }
     void setWindNorthUp(bool on) { wind_north_up_ = on; update(); }
     bool windNorthUp() const { return wind_north_up_; }
+
+    // What the HUD draws (HudPanel edits it; box folds and the measuring
+    // brackets are changed here too and reported by hudConfigChanged).
+    void setHudConfig(const hud::Config& c);
+    const hud::Config& hudConfig() const { return cfg_; }
+    // the HUD colour swatches (hud::Config::color)
+    static QColor swatch(int index);
+    // a crosshair style centred on c, scaled by k (also the HUD panel's previews)
+    static void drawReticle(QPainter& p, const QPointF& c, hud::Crosshair style, const QColor& color,
+                            double line_factor, double k, const QRectF& bounds);
+    // the HUD chip in widget pixels (empty in PiP), for MainWindow's outside-tap test
+    QRectF hudChipRect() const { return QRectF(hud_chip_.topLeft() * hit_k_, hud_chip_.size() * hit_k_); }
+    // the chip lights while the HUD panel is open
+    void setHudPanelOpen(bool open) { hud_panel_open_ = open; update(); }
 
     QString pipTag() const override;
     QColor pipTagColor() const override;
@@ -65,6 +83,8 @@ signals:
     void groundClicked(double px, double py, double width, double height);
     void hudReferenceChanged(int ref);  // HudRef
     void windNorthUpChanged(bool on);
+    void hudConfigChanged();      // a box folded / unfolded, the brackets resized
+    void hudPanelRequested();     // the HUD chip
 
 protected:
     void paintEvent(QPaintEvent* e) override;
@@ -74,10 +94,49 @@ public:
 
 protected:
     void mousePressEvent(QMouseEvent* e) override;
+    void mouseMoveEvent(QMouseEvent* e) override;
+    void mouseReleaseEvent(QMouseEvent* e) override;
+    void wheelEvent(QWheelEvent* e) override;
+    bool event(QEvent* e) override;
     void compactChanged() override { setGuideMode(guide_); }
 
 private:
     void paintLosTarget(QPainter& p);
+    // ---- configurable HUD -----------------------------------------------------------
+    hud::Config cfg_ = hud::defaultConfig();
+    QColor hudColor() const { return swatch(cfg_.color); }
+    double lw(double w) const { return w * cfg_.lineFactor(); }  // a HUD pen width
+    bool shows(hud::Element e) const { return cfg_.shows(e); }
+    // the rulers follow the body only while some ruler is shown
+    double bodyBlend() const;
+    // the picture on screen, physical px: the letterboxed video when live
+    QRectF pictureRect() const;
+    void paintCrosshair(QPainter& p, const QPointF& c, double alpha_k);
+    void paintMeasure(QPainter& p, const QPointF& c);
+    void paintHudChip(QPainter& p);
+    void paintVideoTag(QPainter& p);
+    QRectF hud_chip_;
+    bool hud_panel_open_ = false;
+    // side boxes fold to one line: 0 folded .. 1 open, animated
+    std::array<double, hud::kBoxes> box_open_{};
+    std::array<QRectF, hud::kBoxes> box_hit_{};
+    void paintBoxFrame(QPainter& p, const QRectF& box, const QString& title, const QColor& title_color,
+                       hud::Box which);
+    bool boxOpen(hud::Box b) const { return box_open_[static_cast<size_t>(b)] > 0.5; }
+    // measuring brackets: the shown size eases toward cfg_.measure_*
+    double measure_w_shown_ = 4.0, measure_h_shown_ = 2.5;
+    enum class MeasureDrag { None, Width, Height, Both };
+    MeasureDrag measure_drag_ = MeasureDrag::None;
+    double measure_glow_ = 0.0;
+    bool pinching_ = false;
+    double pinch_start_dist_ = 0.0, pinch_w0_ = 0.0, pinch_h0_ = 0.0;
+    MeasureDrag measureHandleAt(const QPointF& logical) const;
+    QSizeF measureHalfPx() const;  // half width / height of the brackets, logical px
+    void scaleMeasure(double factor);
+    // one path for mouse and a single finger (physical px)
+    void pointerPress(const QPointF& pos);
+    void pointerMove(const QPointF& pos);
+    void pointerRelease();
     QString flight_label_;
     LosTarget los_target_;
     double focal() const;

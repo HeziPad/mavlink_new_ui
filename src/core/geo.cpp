@@ -265,4 +265,27 @@ TerrainHit rayToTerrain(double lat, double lon, double alt_amsl, double yaw_deg,
     return r;
 }
 
+// ---- measuring on the picture ---------------------------------------------------------
+
+namespace {
+double focalPx(double picture_w, double hfov_deg) {
+    const double half = std::clamp(hfov_deg, 1.0, 179.0) * 0.5 * kDegToRad;
+    return (std::max(1.0, picture_w) * 0.5) / std::tan(half);
+}
+}  // namespace
+
+double pixelAngleDeg(double px, double picture_w, double hfov_deg) {
+    return 2.0 * std::atan(std::abs(px) * 0.5 / focalPx(picture_w, hfov_deg)) * kRadToDeg;
+}
+
+double anglePixels(double angle_deg, double picture_w, double hfov_deg) {
+    const double half = std::clamp(std::abs(angle_deg), 0.0, 179.0) * 0.5 * kDegToRad;
+    return 2.0 * focalPx(picture_w, hfov_deg) * std::tan(half);
+}
+
+double sizeAtRange(double angle_deg, double range) {
+    const double half = std::clamp(std::abs(angle_deg), 0.0, 179.0) * 0.5 * kDegToRad;
+    return 2.0 * std::max(0.0, range) * std::tan(half);
+}
+
 }  // namespace gcs::geo

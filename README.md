@@ -525,6 +525,44 @@ override the file for one run.
 
 ## Camera view
 
+The video comes first. By default (**STANDARD**) it shows only a crosshair, the
+heading tape, a slim status line and the **CAMERA TARGET** box. The AIRCRAFT,
+LOS and WIND boxes are folded to one line each, and there is no ladder, roll
+arc, tapes, vignette or scanlines.
+
+**HUD panel.** Tap **HUD ▾** (top left, under the bar) to open the HUD LOADOUT
+panel on the right. Every change shows live on the video behind it, and is
+remembered:
+
+- **Presets:** CLEAN (crosshair only), STANDARD, FULL (everything). Any change
+  of your own reads CUSTOM. A preset keeps your crosshair, line width and colour.
+- **Show on the video:** pitch ladder, roll arc, heading, speed and altitude
+  tapes, flight-path marker, status line, the target / aircraft / camera LOS /
+  wind boxes, the ruler-reference switch, and SENSOR FX (vignette + scanlines).
+- **Crosshair:** cross, dot, ring, scope (duplex), box, fine (full-width lines),
+  measure, or none.
+- **Line width** (thin / normal / bold) and **colour** (green, cyan, amber,
+  white, red, magenta). Warnings stay amber and red whatever the colour.
+
+**Folding boxes.** Tap any box in the left column to fold it to a one-line
+summary (e.g. `ACFT R+2° P−1° 003°`, `TARGET 820 m`), and tap again to open it.
+On the open WIND box, the header folds it and the gauge switches north-up.
+
+**Measuring.** The **MEASURE** crosshair is four corner brackets around the
+centre. To fit them to a target:
+
+- drag a corner (both sides) or an edge (one side);
+- pinch with two fingers, use a trackpad pinch, or turn the mouse wheel.
+
+Under the brackets it reads the target's size at the range under the
+crosshair, e.g. `W 4.2 m × H 2.1 m @ 820 m`. It is approximate:
+
+- It assumes the target faces the camera.
+- It uses the camera field of view from the settings, so that must match the lens.
+- The range comes from the terrain map under the crosshair. With no terrain
+  data it uses flat ground at home level and shows `≈` in amber.
+- Above the horizon or beyond 3 km there is no range, and it shows the angles instead.
+
 The horizon, elevation ladder, roll scale and heading tape follow either the
 camera's **line of sight (LOS)** or the **aircraft body**. Tap the **HUD ·
 LOS / HUD · BODY** chip under the AIRCRAFT box to switch.
@@ -543,8 +581,9 @@ gimbal reports.
 
 Two readouts sit beside it:
 
-The left column holds, top to bottom:
+The left column holds, top to bottom (each can be hidden or folded):
 
+- **CAMERA TARGET:** where the crosshair meets the ground, its height and the slant range.
 - **AIRCRAFT:** roll, pitch and heading, with a small attitude ball.
 - **GIMBAL · LOS** (or FIXED MOUNT): pan and tilt **relative to the aircraft**,
   with the earth-frame azimuth and elevation underneath.

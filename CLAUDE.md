@@ -102,6 +102,10 @@ Settings → DISPLAY → TEXT SIZE scales the UI by `theme::uiScale()` (1 / 1.25
 - Stylesheet panels (`PlanStrip`, `OrbitPanel`, `WaypointPanel`, `SpeedPanel`, `EntryPad`) keep their sheet as a Small `kSheet` and `applyScale()` does `setStyleSheet(scaleCss(kSheet))` + `scaleWidgetTree(this)` (layout margins / spacing / spacers and min / max sizes, remembered at Small on first call). Build children with Small numbers; size from fonts after `ensurePolished()`, then invalidate + activate the layout before resizing (a stale hint overlaps the row).
 - `MainWindow::applyTextSize` re-applies it live; the bar's height comes from `TelemetryBar::heightFor`, everything below the bar from `barBottom()`.
 
+## Camera HUD
+
+What the video overlay draws is a `core/hud_config` `hud::Config`: which elements are shown, the crosshair, line width, colour, which side boxes are folded, and the measuring brackets as angles. It is stored as `camera/hud` (`hud::encode`, millidegrees, no locale-dependent decimals). `HudPanel` edits it live. `CameraView` draws from it, and reports box folds and bracket drags with `hudConfigChanged`. Every HUD pen goes through `lw()` and every HUD colour through `hudColor()`. Amber and red stay semantic. The measuring maths is `geo::pixelAngleDeg` / `anglePixels` / `sizeAtRange` on the picture's own width (`pictureRect()`, the letterboxed video), and the range is `LosTarget.slant`.
+
 ## UI motion
 
 Telemetry arrives at 10–25 Hz. Don't draw the latest sample through a fast exponential tween: it arrives in about 60 ms and then sits still, which looks like a staircase. `MainWindow::frame` pulls every frame and calls `predictAttitude` / `predictPosition` (last sample + rate × age, capped), then views apply light smoothing on top.

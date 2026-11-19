@@ -31,6 +31,7 @@ class MavlinkClient;
 namespace gcs::ui {
 
 class AlertsPanel;
+class HudPanel;
 class ElevationCache;
 class VectorMap;
 class OfflineDownloader;
@@ -77,6 +78,7 @@ struct AppSettings {
     int speed_mode = 0;          // speed::Mode: ECO / NORMAL / FAST
     int hud_reference = 0;       // CameraView::HudRef
     bool wind_north_up = false;  // camera HUD wind gauge
+    QString hud;                 // camera HUD: hud::encode (empty: the default)
     bool ball_collapsed = false; // map attitude ball
     bool trail_on = true;
     int trail_secs = 120;        // 0 = all
@@ -227,6 +229,9 @@ private:
     FxOverlay* fx_ = nullptr;
     SettingsScreen* settings_screen_ = nullptr;
     AlertsPanel* alerts_ = nullptr;
+    HudPanel* hud_panel_ = nullptr;  // HUD LOADOUT over the video
+    void showHudPanel(bool on);
+    void saveHudConfig();
     std::unique_ptr<PreflightRunner> pf_;
     PreflightScreen* preflight_ = nullptr;
     bool flew_ = false;  // airborne since the last preflight (offers the turnaround)

@@ -1,6 +1,7 @@
 #include "main_window.hpp"
 
 #include "alerts_panel.hpp"
+#include "hud_panel.hpp"
 #include "camera_view.hpp"
 #include "control_dock.hpp"
 #include "core/geo.hpp"
@@ -74,6 +75,7 @@ AppSettings AppSettings::load() {
     s.speed_mode = std::clamp(q.value(QStringLiteral("flight/speed_mode"), s.speed_mode).toInt(), 0, 2);
     s.hud_reference = q.value(QStringLiteral("camera/hud_reference"), s.hud_reference).toInt();
     s.wind_north_up = q.value(QStringLiteral("camera/wind_north_up"), s.wind_north_up).toBool();
+    s.hud = q.value(QStringLiteral("camera/hud"), s.hud).toString();
     s.ball_collapsed = q.value(QStringLiteral("map/ball_collapsed"), s.ball_collapsed).toBool();
     s.trail_on = q.value(QStringLiteral("map/trail_on"), s.trail_on).toBool();
     s.trail_secs = q.value(QStringLiteral("map/trail_secs"), s.trail_secs).toInt();
@@ -123,6 +125,7 @@ void AppSettings::save() const {
     q.setValue(QStringLiteral("flight/speed_mode"), speed_mode);
     q.setValue(QStringLiteral("camera/hud_reference"), hud_reference);
     q.setValue(QStringLiteral("camera/wind_north_up"), wind_north_up);
+    q.setValue(QStringLiteral("camera/hud"), hud);
     q.setValue(QStringLiteral("map/ball_collapsed"), ball_collapsed);
     q.setValue(QStringLiteral("map/trail_on"), trail_on);
     q.setValue(QStringLiteral("map/trail_secs"), trail_secs);
@@ -174,6 +177,7 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
     camera_->setCamera(settings_.camera_hfov, settings_.camera_tilt);
     camera_->setHudReference(settings_.hud_reference == 1 ? CameraView::HudRef::Body : CameraView::HudRef::Los);
     camera_->setWindNorthUp(settings_.wind_north_up);
+    camera_->setHudConfig(hud::decode(settings_.hud.toStdString()));  // empty: STANDARD
 
     host_ = new ViewHost(map_, camera_, this);
     strip_ = new PlanStrip(this);
@@ -187,6 +191,7 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
     fx_ = new FxOverlay(this);
     fx_->setTopInset(barBottom());
     alerts_ = new AlertsPanel(this);
+    hud_panel_ = new HudPanel(this);
     pf_ = std::make_unique<PreflightRunner>(client_.get());
     preflight_ = new PreflightScreen(this, pf_.get());
     pf_->onToast = [this](const QString& t, bool good) { fx_->toast(t, good ? kGreen : kRed, QStringLiteral("Preflight")); };
@@ -407,6 +412,22 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
         settings_.save();
     });
     connect(camera_, &CameraView::groundClicked, this, &MainWindow::onCameraClick);
+    // the HUD: the panel edits it live; box folds and the brackets change it on the video
+    connect(camera_, &CameraView::hudPanelRequested, this, [this] { showHudPanel(!hud_panel_->isVisible()); });
+    connect(camera_, &CameraView::hudConfigChanged, this, [this] {
+        hud_panel_->setConfig(camera_->hudConfig());
+        saveHudConfig();
+    });
+    connect(hud_panel_, &HudPanel::configChanged, this, [this] {
+        camera_->setHudConfig(hud_panel_->config());
+        saveHudConfig();
+    });
+    connect(hud_panel_, &HudPanel::closeRequested, this, [this] { showHudPanel(false); });
+    connect(host_, &ViewHost::swapped, this, [this] {
+        if (host_->mainView() != camera_) {
+            showHudPanel(false);  // it edits the video: only while the video is the main view
+        }
+    });
     connect(camera_, &CameraView::windNorthUpChanged, this, [this](bool on) {
         settings_.wind_north_up = on;
         settings_.save();
@@ -632,6 +653,11 @@ void MainWindow::layoutOverlays() {
     }
     if (alerts_->isVisible()) {
         alerts_->place(alertsArea());
+        fx_->setRightInset(alerts_->width() + 8.0);  // its width follows the text size
+    }
+    if (hud_panel_->isVisible()) {
+        hud_panel_->place(alertsArea());
+        fx_->setRightInset(hud_panel_->width() + 8.0);
     }
     strip_->raise();
     panel_->raise();
@@ -639,6 +665,7 @@ void MainWindow::layoutOverlays() {
     bar_->raise();
     dock_->raise();
     alerts_->raise();
+    hud_panel_->raise();
     fx_->raise();
     if (settings_screen_->isVisible()) {
         settings_screen_->raise();
@@ -682,6 +709,7 @@ void MainWindow::frame() {
         updateLinkStatus();
     }
     alerts_->tick(dt);
+    hud_panel_->tick(dt);
     pf_->update(s_, Clock::now(), video_->frameAge());
     preflight_->tick(dt);
     if (preflight_->isOpen() && isAirborne(s_)) {
@@ -912,11 +940,36 @@ void MainWindow::showAlerts(bool on) {
         fx_->setRightInset(0.0);
         return;
     }
+    if (hud_panel_->isVisible()) {
+        hud_panel_->hide();  // one panel on the right at a time
+        camera_->setHudPanelOpen(false);
+    }
     alerts_->setAdvisories(advisories_, linkAlive(s_, Clock::now()));
     alerts_->place(alertsArea());
     alerts_->show();
     alerts_->raise();
     fx_->setRightInset(alerts_->width() + 8.0);
+}
+
+void MainWindow::showHudPanel(bool on) {
+    if (on) {
+        showAlerts(false);
+        speed_panel_->hide();
+        hud_panel_->setConfig(camera_->hudConfig());
+        hud_panel_->place(alertsArea());
+        hud_panel_->show();
+        hud_panel_->raise();
+        fx_->setRightInset(hud_panel_->width() + 8.0);
+    } else if (hud_panel_->isVisible()) {
+        hud_panel_->hide();
+        fx_->setRightInset(0.0);
+    }
+    camera_->setHudPanelOpen(on);
+}
+
+void MainWindow::saveHudConfig() {
+    settings_.hud = QString::fromStdString(hud::encode(camera_->hudConfig()));
+    settings_.save();
 }
 
 void MainWindow::openPreflight() {
@@ -2608,6 +2661,15 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* e) {
             if (!speed_panel_->geometry().contains(local) && !bar_->geometry().contains(local)) {
                 speed_panel_->hide();
                 return !dock_->geometry().contains(local);  // the dock still does what it says
+            }
+        }
+        // the HUD panel: a tap outside closes it, except on the HUD chip (it toggles)
+        if (hud_panel_->isVisible()) {
+            const QPoint local = mapFromGlobal(global).toPoint();
+            const QRectF chip = camera_->hudChipRect().translated(camera_->mapTo(this, QPoint(0, 0)));
+            if (!hud_panel_->geometry().contains(local) && !chip.contains(local) && !bar_->geometry().contains(local)) {
+                showHudPanel(false);
+                return !dock_->geometry().contains(local);
             }
         }
         // the SYSTEMS panel has no close button: a tap outside it closes it (the
