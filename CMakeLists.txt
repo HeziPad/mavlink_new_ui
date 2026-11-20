@@ -69,6 +69,7 @@ add_library(gcs_core STATIC
     src/core/pmtiles.cpp
     src/core/preflight.cpp
     src/core/speed_mode.cpp
+    src/core/descent_speed.cpp
     src/core/tiles.cpp
     src/core/vehicle_state.cpp
     src/payload/adapter.cpp
@@ -166,7 +167,7 @@ endif()
 
 # ---- tests ----------------------------------------------------------------------
 enable_testing()
-foreach(name geo altitude coords display_round endurance flight_status hud_config mission_builder mission_transfer command_sender lift_rotors health orbit_trim preflight offline_map transport)
+foreach(name geo altitude coords display_round speed_mode descent_speed endurance flight_status hud_config mission_builder mission_transfer command_sender lift_rotors health orbit_trim preflight offline_map transport)
     add_executable(test_${name} tests/test_${name}.cpp)
     target_link_libraries(test_${name} PRIVATE gcs_core)
     gcs_warnings(test_${name})

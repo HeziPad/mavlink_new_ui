@@ -280,7 +280,9 @@ or ft): 323 shows 320, 328 shows 330, and a value hovering at 325 doesn't
 flicker (it moves on 2 past the boundary).
 
 The **SPEED** chip has no numbers: it shows the speed the GCS commands in words
-(**LOITER**, **CRUISE**, **MAX**) and the speed mode above it (**ECO**, **NORMAL**,
+(**LOITER**, **CRUISE** or **MAX**, whichever is nearest to the commanded speed;
+the speed panel says exactly what and why: CLIMB, DESCENT, CRUISE+ / CRUISE−,
+WIND) and the speed mode above it (**ECO**, **NORMAL**,
 **FAST**, as one to three chevrons). The numbers are on the map, in the **SPEED**
 box under WIND (air and ground speed). The ATTITUDE, WIND and SPEED boxes fold
 together: tap any of them (folded, SPEED shows the airspeed alone). The SPEED
@@ -713,14 +715,36 @@ constant). The critical alert doesn't wait for the smoothing.
 **Airspeed.** Tap the SPEED chip to see the aircraft's three airspeeds,
 read from its own parameters and never changed by the GCS: **LOITER**
 (`AIRSPEED_MIN`), **CRUISE** (`AIRSPEED_CRUISE`) and **MAX** (`AIRSPEED_MAX`).
-The one choice there is the **SPEED MODE**, which picks the speed per
-situation (sent with `DO_CHANGE_SPEED`):
+The one choice there is the **SPEED MODE**: what matters more, battery or
+time. The GCS picks the speed (sent with `DO_CHANGE_SPEED`) in two layers.
 
-| Mode | Circling | Between points | Long descents (> 15 m) | Landing |
-|---|---|---|---|---|
-| ECO (default) | LOITER | CRUISE | MAX | CRUISE |
-| NORMAL | CRUISE | CRUISE | CRUISE | CRUISE |
-| FAST | CRUISE | MAX | MAX | CRUISE |
+In **every mode** the aircraft flies each phase the efficient way:
+
+- **Climbing** (the goal more than 15 m above): **CLIMB**, the LOITER speed.
+  Slow, so the motor's power goes into height.
+- **Steep descents** (more than 15 m above the goal, on a circle or sinking
+  faster than half `TECS_SINK_MAX`): **DESCENT**; FAST takes **MAX** when it
+  isn't circling. Along a long leg ArduPlane glides down gently toward the
+  target (a glide slope), and that is flown like level flight. ArduPlane never sinks faster
+  than `TECS_SINK_MAX`, so a faster airspeed doesn't bring it down sooner: it
+  only makes TECS add throttle to hold the sink back (SITL, 4.6 m/s down at
+  every speed: 7 mAh per 100 m at 20 m/s, 110 at 35 m/s). DESCENT is the
+  slowest speed that already sinks at `TECS_SINK_MAX` with the throttle at
+  idle. The GCS learns it on each steady descent (idle and sinking slower than
+  the limit: +1 m/s; throttle on at the limit: −1 m/s), starting at CRUISE, and
+  remembers it. MAX gives the same sink rate, only more ground covered.
+- **Landing:** **CRUISE**, the speed the back-transition distance is
+  computed for.
+- **Never slower than the wind + 5 m/s** (**WIND**), or the aircraft would
+  crawl, or drift backwards, into it.
+
+The mode only chooses **level flight**:
+
+| Mode | Circling | Between points |
+|---|---|---|
+| ECO (default) | LOITER (longest endurance) | CRUISE + ½ headwind (**CRUISE+** / **CRUISE−**): least battery per km in wind, kept within LOITER..MAX |
+| NORMAL | CRUISE | CRUISE |
+| FAST | CRUISE (a circle at MAX needs more bank than allowed) | MAX |
 
 ArduPlane raises its minimum speed in banked turns by itself (TECS load
 factor). LOITER is also kept 2 m/s above `Q_ASSIST_SPEED`, or the lift rotors

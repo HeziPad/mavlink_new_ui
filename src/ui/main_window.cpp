@@ -1349,10 +1349,12 @@ void MainWindow::refreshSpeedPanel() {
                                                                               s_.q_assist_speed)
                                                                 : s_.airspeed_min,
                             s_.q_assist_speed);
+    speed_panel_->setDescent(descent_ready_ ? descent_.speed() : 0.0, descent_.learned());
 }
 
 void MainWindow::updateSpeedTarget(qint64 now_ms) {
-    // which airspeed to ask for, from what the aircraft is doing (2 Hz)
+    // which airspeed to ask for, from what the aircraft is doing (2 Hz);
+    // the rules are core/speed_mode
     if (now_ms - speed_eval_ms_ < 500) {
         return;
     }
@@ -1362,13 +1364,16 @@ void MainWindow::updateSpeedTarget(qint64 now_ms) {
         return;  // parameters not read yet: leave the autopilot alone
     }
     Situation sit = Situation::None;
+    double course = -1.0;  // to where it is going, degrees; < 0 unknown
     if (s_.armed && isAirborne(s_) && !climb_out_ && !takeoff_handoff_) {
-        const bool landing = isLandingInMission(s_);
-        if (landing) {
+        std::optional<double> goal;  // the altitude it is going to
+        if (isLandingInMission(s_)) {
             sit = Situation::Landing;
         } else if (s_.custom_mode == plane::GUIDED && orbit_) {
             const double d = geo::distance(s_.lat, s_.lon, orbit_->lat, orbit_->lon);
             sit = d < orbit_->radius * 1.5 + 30.0 ? Situation::Circling : Situation::EnRoute;
+            course = geo::bearing(s_.lat, s_.lon, orbit_->lat, orbit_->lon);
+            goal = orbit_->alt;
         } else if (s_.custom_mode == plane::AUTO && s_.mission_known && s_.mission_current >= 1 &&
                    s_.mission_current < static_cast<int>(s_.mission.size())) {
             const MissionItem& it = s_.mission[s_.mission_current];
@@ -1377,53 +1382,92 @@ void MainWindow::updateSpeedTarget(qint64 now_ms) {
             const double r = std::abs(it.param3) > 1.0f ? std::abs(it.param3) : defaultRadius();
             sit = loiter && geo::distance(s_.lat, s_.lon, it.lat(), it.lon()) < r * 1.5 + 30.0 ? Situation::Circling
                                                                                                  : Situation::EnRoute;
-        }
-        // descending: well above where it is going (ArduPlane slews its own
-        // altitude target, so NAV_CONTROLLER_OUTPUT's error stays small)
-        if (sit == Situation::EnRoute && s_.has_position) {
-            std::optional<double> goal;
-            if (s_.custom_mode == plane::GUIDED && orbit_) {
-                goal = orbit_->alt;
-            } else if (s_.custom_mode == plane::AUTO && s_.mission_current >= 1 &&
-                       s_.mission_current < static_cast<int>(s_.mission.size())) {
-                goal = s_.mission[s_.mission_current].z;
+            if (it.x != 0 || it.y != 0) {
+                course = geo::bearing(s_.lat, s_.lon, it.lat(), it.lon());
+                goal = it.z;
             }
-            if (goal && s_.alt_rel - *goal > kDescentForMax) {
-                sit = Situation::Descending;
+        }
+        // well below / above where it is going (ArduPlane slews its own
+        // altitude target, so NAV_CONTROLLER_OUTPUT's error stays small).
+        // A descent counts only when it is steep: on a circle, or sinking
+        // faster than half TECS_SINK_MAX. Along a long leg ArduPlane glides
+        // down gently (a glide slope to the target): that is level flight.
+        if (goal && s_.has_position && sit != Situation::Landing) {
+            const double sink_max = s_.sink_max > 0.0 ? s_.sink_max : 5.0;
+            if (*goal - s_.alt_rel > kClimbForSlow) {
+                sit = Situation::Climbing;
+            } else if (s_.alt_rel - *goal > kDescentForMax) {
+                if (sit == Situation::Circling) {
+                    sit = Situation::DescendingCircle;
+                } else if (sit == Situation::EnRoute && -s_.climb > 0.5 * sink_max) {
+                    sit = Situation::Descending;
+                }
             }
         }
     }
-    const Target want = target(static_cast<Mode>(settings_.speed_mode), sit);
+    Speeds v;
+    v.loiter = loiterSpeed(s_.airspeed_min, s_.airspeed_cruise, s_.q_assist_speed);
+    v.climb = climbSpeed(v.loiter, s_.airspeed_cruise);
+    v.cruise = s_.airspeed_cruise;
+    v.max = s_.airspeed_max;
+    // the best descent speed: learned on each steady descent, starting at CRUISE
+    if (!descent_ready_) {
+        const double saved = QSettings().value(QStringLiteral("speed/descent"), 0.0).toDouble();
+        descent_.reset(saved > 0.0 ? saved : v.cruise, v.loiter, v.max);
+        descent_ready_ = true;
+    }
+    descent_.setLimits(v.loiter, v.max);
+    if ((sit == Situation::Descending || sit == Situation::DescendingCircle) && speed_sent_ &&
+        speed_sent_->target == Target::Descent) {
+        const double sink_max = s_.sink_max > 0.0 ? s_.sink_max : 5.0;  // ArduPlane's default
+        const double idle = s_.thr_min_pct > -100.0 ? std::max(0.0, s_.thr_min_pct) : 0.0;
+        if (descent_.sample(0.5, speed_sent_->airspeed, s_.airspeed, -s_.climb, s_.throttle_pct, sink_max, idle)) {
+            QSettings().setValue(QStringLiteral("speed/descent"), descent_.speed());
+        }
+    } else {
+        descent_.interrupt();
+    }
+    v.descent = descent_.speed();
+    const double wind = s_.has_wind ? s_.wind_speed : 0.0;
+    const double head = s_.has_wind && course >= 0.0 ? headwind(s_.wind_from_deg, s_.wind_speed, course) : 0.0;
+    const Command want = command(static_cast<Mode>(settings_.speed_mode), sit, v, head, wind);
     if (s_.custom_mode != speed_mode_seen_) {
         speed_mode_seen_ = s_.custom_mode;
         speed_sent_.reset();  // a mode change may reset ArduPlane's target: send again
     }
-    if (!speed_want_ || *speed_want_ != want) {
+    if (!speed_want_ || speed_want_->target != want.target) {
         speed_want_ = want;
         speed_want_ms_ = now_ms;
     }
-    // hold a new target for 3 s before sending (no flapping); landing at once
+    speed_want_->airspeed = want.airspeed;  // the wind-adjusted value follows; the 3 s is for a new kind
+    // hold a new kind of target for 3 s before sending (no flapping); landing at once
     const bool settled = now_ms - speed_want_ms_ >= 3000 || sit == Situation::Landing;
-    if (!settled || (speed_sent_ && *speed_sent_ == want)) {
+    const bool same = speed_sent_ && speed_sent_->target == want.target &&
+                      std::abs(speed_sent_->airspeed - want.airspeed) < kResendDelta;
+    if (!settled || same) {
         return;
     }
-    float v = -2.0f;  // AIRSPEED_CRUISE (ArduPilot's default)
-    const double loiter = loiterSpeed(s_.airspeed_min, s_.airspeed_cruise, s_.q_assist_speed);
-    if (want == Target::Loiter) {
-        v = static_cast<float>(loiter);
-    } else if (want == Target::Max) {
-        v = static_cast<float>(s_.airspeed_max);
-    }
-    if (want == Target::Default && (!speed_sent_ || *speed_sent_ == Target::Default || *speed_sent_ == Target::Cruise)) {
-        speed_sent_ = want;  // nothing of ours to undo
+    if (want.target == Target::Default) {
+        if (!speed_sent_ || speed_sent_->target == Target::Default ||
+            (speed_sent_->target == Target::Cruise && std::abs(speed_sent_->airspeed - v.cruise) < 0.05)) {
+            speed_sent_ = want;  // nothing of ours to undo
+            speed_chip_ = Target::Default;
+            speed_label_.clear();
+            return;
+        }
+        client_->runSequence("speed", {link::makeChangeSpeed(-2.0f)});  // back to AIRSPEED_CRUISE
+        speed_sent_ = want;
+        speed_chip_ = Target::Default;
         speed_label_.clear();
-        return;
+    } else {
+        // plain CRUISE as -2 (ArduPilot's own AIRSPEED_CRUISE), anything else in m/s
+        const bool plain = want.target == Target::Cruise && std::abs(want.airspeed - v.cruise) < 0.05;
+        client_->runSequence("speed", {link::makeChangeSpeed(plain ? -2.0f : static_cast<float>(want.airspeed))});
+        speed_sent_ = want;
+        speed_chip_ = chipTarget(want, v);
+        speed_label_ = QStringLiteral("%1 %2").arg(QString::fromUtf8(targetName(want.target)),
+                                                  units::speedText(want.airspeed));
     }
-    client_->runSequence("speed", {link::makeChangeSpeed(v)});
-    speed_sent_ = want;
-    const double shown = want == Target::Loiter ? loiter : want == Target::Max ? s_.airspeed_max : s_.airspeed_cruise;
-    speed_label_ = want == Target::Default ? QString()
-                                           : QStringLiteral("%1 %2").arg(QLatin1String(targetName(want)), units::speedText(shown));
     if (speed_panel_->isVisible()) {
         refreshSpeedPanel();
     }
@@ -1509,7 +1553,7 @@ void MainWindow::pullState() {
     updateHeights(clock_.elapsed());
     updateSpeedTarget(clock_.elapsed());
     autoSafetyOnLanded();
-    bar_->setSpeed(speed_sent_ ? static_cast<int>(*speed_sent_) : 0, settings_.speed_mode, isAirborne(s_));
+    bar_->setSpeed(static_cast<int>(speed_chip_), settings_.speed_mode, isAirborne(s_));
     bar_->setCommandedAlt(commandedAltRel());
     bar_->setState(s_, now);
     map_->setState(s_);

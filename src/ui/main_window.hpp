@@ -3,6 +3,7 @@
 #include "core/altitude.hpp"
 #include "core/coords.hpp"
 #include "core/endurance.hpp"
+#include "core/descent_speed.hpp"
 #include "core/speed_mode.hpp"
 #include "core/flight_status.hpp"
 #include "core/health.hpp"
@@ -144,8 +145,11 @@ private:
     SpeedPanel* speed_panel_ = nullptr;
     qint64 speed_eval_ms_ = -1000000;
     qint64 speed_want_ms_ = 0;
-    std::optional<speed::Target> speed_want_;
-    std::optional<speed::Target> speed_sent_;
+    std::optional<speed::Command> speed_want_;
+    std::optional<speed::Command> speed_sent_;
+    speed::Target speed_chip_ = speed::Target::Default;  // LOITER / CRUISE / MAX for the bar
+    speed::DescentTuner descent_;      // the best descent speed, learned (QSettings speed/descent)
+    bool descent_ready_ = false;       // started from the saved value / AIRSPEED_CRUISE
     uint32_t speed_mode_seen_ = 0xffffffff;
     QString speed_label_;
     // safety on the Launch button: a sent "safety off" waits for the state (ms)
