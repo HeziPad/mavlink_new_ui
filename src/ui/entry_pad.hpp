@@ -18,13 +18,14 @@ namespace gcs::ui {
 
 // Touch-first modal for typed input: coordinates (in the format chosen in
 // Settings: decimal / DMS / UTM), altitudes (ASL / AGL / AFL, checked against
-// the ground at the point), hold times, and the link settings (IP addresses,
-// port numbers). Each number has its own box with a
-// visible cursor; tap a box (or a place in it) to move there. Letters are
-// never typed: hemispheres are toggle buttons. Full-window, dims what's
-// behind. A physical keyboard types into the focused box (digits, '.',
-// Backspace / Delete, arrows, Tab = next box, Enter = OK); it is the only
-// place the keyboard is used. Results come back through the open*() callback.
+// the ground at the point), hold times, the link settings (IP addresses,
+// port numbers) and names (a plan's name, on an on-screen keyboard). Each
+// number has its own box with a visible cursor; tap a box (or a place in it)
+// to move there. Hemispheres are toggle buttons, not letters. Full-window,
+// dims what's behind. A physical keyboard types into the focused box (digits,
+// '.', any character in a name, Backspace / Delete, arrows, Tab = next box,
+// Enter = OK); it is the only place the keyboard is used. Results come back
+// through the open*() callback.
 class EntryPad : public QWidget {
     Q_OBJECT
 
@@ -67,6 +68,13 @@ public:
     void openNumber(const QString& title, const QString& name, int value, int min, int max,
                     const std::vector<std::pair<QString, int>>& chips, std::function<void(int)> done);
 
+    // A name (one line, up to `max_len` characters), typed on an on-screen
+    // keyboard. `note` (optional) returns a line shown under the box for the
+    // current text, e.g. "replaces the saved plan". OK needs a non-blank name;
+    // `done` receives it trimmed.
+    void openText(const QString& title, const QString& initial, int max_len,
+                  std::function<QString(const QString&)> note, std::function<void(const QString&)> done);
+
     bool isOpen() const { return isVisible(); }
     void close();
     void applyScale();  // text size changed (theme::uiScale)
@@ -85,7 +93,7 @@ protected:
     bool eventFilter(QObject* obj, QEvent* e) override;
 
 private:
-    enum class Kind { Coordinate, Altitude, Duration, Address, Number };
+    enum class Kind { Coordinate, Altitude, Duration, Address, Number, Text };
     // one number: its box, and the length at which typing moves on to the next box (0 = never)
     struct Box {
         QLineEdit* edit = nullptr;
@@ -118,6 +126,9 @@ private:
     void refreshAltitude(QString& preview, bool& ok);
     void refreshAddress(QString& preview, bool& ok);
     void refreshNumber(QString& preview, bool& ok);
+    void refreshText(QString& preview, bool& ok);
+    void buildTextKeys(QWidget* host);
+    void setShift(bool on);
     void accept();
     void layoutCard();
     altitude::Grounds grounds() const;
@@ -135,6 +146,8 @@ private:
     std::function<void(double)> dur_done_;
     std::function<void(const QString&, int)> addr_done_;
     std::function<void(int)> num_done_;
+    std::function<void(const QString&)> text_done_;
+    std::function<QString(const QString&)> text_note_;
     int min_int_ = 0, max_int_ = 0;
     std::optional<std::pair<QString, int>> address_;  // a valid address
     std::optional<int> number_;                       // a valid number
@@ -155,6 +168,11 @@ private:
     std::vector<QPushButton*> ref_buttons_;
     QWidget* ref_row_ = nullptr;
     QWidget* nudge_keys_ = nullptr;  // -10 / +10 (altitude)
+    QWidget* num_keys_ = nullptr;    // digits and cursor keys (numbers)
+    QWidget* text_keys_ = nullptr;   // the letter keyboard (names)
+    std::vector<QPushButton*> letter_keys_;
+    QPushButton* shift_ = nullptr;
+    bool shift_on_ = false;
     QWidget* presets_ = nullptr;     // quick chips (duration)
     QPushButton* dot_key_ = nullptr;
     QPushButton* ok_ = nullptr;

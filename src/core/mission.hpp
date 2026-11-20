@@ -59,6 +59,12 @@ struct UserWaypoint {
     int hold_turns = 0;           // derived, own radius only
     bool loiter_ccw = false;
     bool holds() const { return hold_s > 0.0f || (loiter_radius > 0.0f && hold_turns > 0); }
+    // what the operator set (hold_turns is derived, not compared)
+    bool operator==(const UserWaypoint& o) const {
+        return lat == o.lat && lon == o.lon && alt_rel == o.alt_rel && hold_s == o.hold_s &&
+               loiter_radius == o.loiter_radius && loiter_ccw == o.loiter_ccw;
+    }
+    bool operator!=(const UserWaypoint& o) const { return !(*this == o); }
 };
 
 // How the waypoints are flown.
@@ -82,6 +88,11 @@ struct MissionPlan {
     std::optional<UserWaypoint> land;
 
     bool empty() const { return wps.empty() && !land; }
+    bool operator==(const MissionPlan& o) const {
+        return wps == o.wps && pattern == o.pattern && hold_radius == o.hold_radius && hold_ccw == o.hold_ccw &&
+               land == o.land;
+    }
+    bool operator!=(const MissionPlan& o) const { return !(*this == o); }
 };
 
 int32_t toE7(double deg);
@@ -157,11 +168,17 @@ LandingApproach computeLandingApproach(const UserWaypoint& land, const ApproachI
 // final loiter), so it is never reached by sequence; the GCS jumps to it with DO_SET_MISSION_CURRENT. Being preceded
 // by a LOITER_TO_ALT (not a NAV_WAYPOINT) the land item also stays clear of
 // ArduPlane's "VTOL land too short" arming check.
+// With no route (no plan loaded) it is HOME, VTOL_TAKEOFF, then the landing
+// sequence straight away: Land and the failsafes still land at L (home when
+// none). Nothing makes AUTO fly it except Land / RTL.
 // `approach` is required when plan.land is set (otherwise the land is left out).
-// Returns an empty vector when the plan has no waypoints.
+// Returns an empty vector when the plan has neither waypoints nor a landing.
 std::vector<MissionItem> buildLoopMission(double home_lat, double home_lon, double home_alt_amsl,
                                           const MissionPlan& plan, float takeoff_alt = 40.0f,
                                           const LandingApproach* approach = nullptr);
+
+// The same mission, item 0 (home, rewritten by the vehicle) aside.
+bool sameMission(const std::vector<MissionItem>& a, const std::vector<MissionItem>& b);
 
 // Inverse of buildLoopMission for display / editing, pattern included (a
 // mirrored back-and-forth route is folded back to its n points). Also accepts

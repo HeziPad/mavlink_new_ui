@@ -747,8 +747,9 @@ void MapView::setElevation(ElevationCache* elev) {
 }
 
 void MapView::paintNavBox(QPainter& p, double right, double bottom) {
-    // bottom-right: where the aircraft is, where it is going and when it
-    // gets there, and (mouse only) what is under the cursor
+    // bottom-right: where the aircraft is and its height above the ground,
+    // and (mouse only) what is under the cursor. Where it is going is the
+    // telemetry bar's (FLIGHT MODE, ETA).
     if (compact_) {
         return;
     }
@@ -763,14 +764,6 @@ void MapView::paintNavBox(QPainter& p, double right, double bottom) {
         if (!nav_.aircraft_ground.isEmpty()) {
             lines.push_back({nav_.aircraft_ground, kGreen, false});
         }
-    }
-    if (nav_.target.valid) {
-        // distance only: the ETA is on the telemetry bar's ETA chip
-        lines.push_back({QStringLiteral("→ %1  %2")
-                             .arg(QString::fromStdString(nav_.target.name),
-                                  nav_.target.arrived ? QStringLiteral("holding")
-                                                      : units::distanceText(nav_.target.dist_m)),
-                         kCyan, true});
     }
     const bool hover = hover_pos_ && !touch_input_ && !pressing_ && rect().contains(hover_pos_->toPoint());
     if (hover) {
@@ -1513,7 +1506,7 @@ void MapView::paintOrbit(QPainter& p) {
         p.setPen(ring);
         p.setBrush(alpha(col, 0.05));
         p.drawEllipse(c, rpx, rpx);
-        // the circle actually flown while the radius trim is still closing in
+        // the circle actually flown while the radius trim is still closing in (no label)
         if (orbit_->flown > 0.0 && !orbit_->trimmed && !compact_) {
             const double fpx = orbit_->flown / metersPerPixel();
             QPen flown(alpha(kMuted, 0.6), 1.0, Qt::DotLine);
@@ -1522,9 +1515,6 @@ void MapView::paintOrbit(QPainter& p) {
             if (circleVisible(c, fpx, QRectF(rect()).adjusted(-40, -40, 40, 40))) {
                 p.drawEllipse(c, fpx, fpx);
             }
-            drawText(p, QRectF(c.x() - sc(80), c.y() + fpx + 2, sc(160), sc(14)), Qt::AlignCenter,
-                     QStringLiteral("flown %1 · trimming").arg(formatDistance(orbit_->flown)), labelFont(sc(9)),
-                     alpha(kMuted, 0.9));
         }
         if (!compact_) {
             // direction chevrons at N / E / S / W

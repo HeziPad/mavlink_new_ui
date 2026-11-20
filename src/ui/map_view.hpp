@@ -51,7 +51,7 @@ public:
     void setDefaultLoiterRadius(double m) { default_loiter_radius_ = m; }
     // the nav box (bottom right): the ground under the aircraft, and where it is going
     struct NavInfo {
-        QString aircraft_ground;  // "GROUND 512 m MSL · AGL 80 m (rangefinder)"
+        QString aircraft_ground;  // "AGL  80 m" (empty: unknown)
         NavTarget target;
     };
     void setNav(NavInfo nav) { nav_ = std::move(nav); }

@@ -142,7 +142,7 @@ std::vector<MissionItem> buildLoopMission(double home_lat, double home_lon, doub
                                           const LandingApproach* approach) {
     std::vector<MissionItem> items;
     const auto& wps = plan.wps;
-    if (wps.empty()) {
+    if (wps.empty() && !(plan.land && approach)) {
         return items;
     }
     items.reserve(wps.size() + 4);
@@ -180,7 +180,9 @@ std::vector<MissionItem> buildLoopMission(double home_lat, double home_lon, doub
         it.param4 = 0.0f;  // leave on the line to the next item
         return it;
     };
-    if (wps.size() == 1) {
+    if (wps.empty()) {
+        // no route: a landing-only mission (Land and failsafes land at L / home)
+    } else if (wps.size() == 1) {
         // a one-point "loop" would re-reach the same waypoint every cycle;
         // circle it on the wing instead
         items.push_back(hold(wps[0]));
@@ -230,6 +232,22 @@ std::vector<MissionItem> buildLoopMission(double home_lat, double home_lon, doub
         items[i].seq = static_cast<uint16_t>(i);
     }
     return items;
+}
+
+bool sameMission(const std::vector<MissionItem>& a, const std::vector<MissionItem>& b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (size_t i = 1; i < a.size(); ++i) {  // item 0 is home: the vehicle rewrites it
+        const MissionItem& x = a[i];
+        const MissionItem& y = b[i];
+        if (x.command != y.command || x.frame != y.frame || x.x != y.x || x.y != y.y || x.z != y.z ||
+            x.param1 != y.param1 || x.param2 != y.param2 || x.param3 != y.param3 || x.param4 != y.param4 ||
+            x.autocontinue != y.autocontinue) {
+            return false;
+        }
+    }
+    return true;
 }
 
 MissionPlan extractPlan(const std::vector<MissionItem>& items) {

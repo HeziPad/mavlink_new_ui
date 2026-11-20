@@ -31,6 +31,8 @@ const char* const kSheet = R"(
         QLabel { background: transparent; color: #e6f1f8; }
         QLabel#planTitle { color: #ffb547; font: bold 13px "DejaVu Sans"; padding-right: 6px; }
         QLabel#planInfo { font: 13px "DejaVu Sans Mono"; }
+        QLabel#planName { font: bold 15px "DejaVu Sans"; }
+        QPushButton#planLib { border-color: rgba(255, 181, 71, 0.7); color: #ffb547; }
         QLabel#planWarn { color: #ffb547; font: 12px "DejaVu Sans Mono"; }
         QLabel#planHint { color: #7d93a6; font: 11px "DejaVu Sans"; }
         QPushButton {
@@ -54,10 +56,23 @@ PlanStrip::PlanStrip(QWidget* parent) : QWidget(parent) {
     outer->setContentsMargins(20, 8, 16, 8);
     outer->setSpacing(2);
 
-    auto* row = new QHBoxLayout;
-    row->setSpacing(8);
+    // which plan: its name, and the library
+    auto* name_row = new QHBoxLayout;
+    name_row->setSpacing(8);
     auto* title = new QLabel(QStringLiteral("PLAN"));
     title->setObjectName(QStringLiteral("planTitle"));
+    name_ = new QLabel;
+    name_->setObjectName(QStringLiteral("planName"));
+    library_ = new QPushButton(QStringLiteral("☰ PLANS"));
+    library_->setObjectName(QStringLiteral("planLib"));
+    name_row->addWidget(title);
+    name_row->addWidget(name_, 1);
+    name_row->addWidget(library_);
+    outer->addLayout(name_row);
+    outer->addSpacing(4);
+
+    auto* row = new QHBoxLayout;
+    row->setSpacing(8);
     info_ = new QLabel;
     info_->setObjectName(QStringLiteral("planInfo"));
     wp_tool_ = new QPushButton(QStringLiteral("+ WAYPOINT"));
@@ -66,7 +81,7 @@ PlanStrip::PlanStrip(QWidget* parent) : QWidget(parent) {
     undo_ = new QPushButton(QStringLiteral("UNDO"));
     clear_ = new QPushButton(QStringLiteral("CLEAR"));
     cancel_ = new QPushButton(QStringLiteral("CANCEL"));
-    for (auto* b : {wp_tool_, land_tool_, coord_, undo_, clear_, cancel_}) {
+    for (auto* b : {wp_tool_, land_tool_, coord_, undo_, clear_, cancel_, library_}) {
         b->setFocusPolicy(Qt::NoFocus);
         b->setCursor(Qt::PointingHandCursor);
         b->setMinimumHeight(48);  // finger-sized
@@ -77,7 +92,6 @@ PlanStrip::PlanStrip(QWidget* parent) : QWidget(parent) {
     land_tool_->setCheckable(true);
     wp_tool_->setChecked(true);
     cancel_->setObjectName(QStringLiteral("planCancel"));
-    row->addWidget(title);
     row->addWidget(wp_tool_);
     row->addWidget(land_tool_);
     row->addWidget(coord_);
@@ -126,6 +140,7 @@ PlanStrip::PlanStrip(QWidget* parent) : QWidget(parent) {
     connect(land_tool_, &QPushButton::clicked, this, [this] { emit landingToolToggled(true); });
     connect(coord_, &QPushButton::clicked, this, [this] { emit addByCoordRequested(land_tool_->isChecked()); });
     connect(undo_, &QPushButton::clicked, this, &PlanStrip::undoRequested);
+    connect(library_, &QPushButton::clicked, this, &PlanStrip::libraryRequested);
     connect(clear_, &QPushButton::clicked, this, &PlanStrip::clearRequested);
     connect(cancel_, &QPushButton::clicked, this, &PlanStrip::cancelRequested);
     connect(loop_, &QPushButton::clicked, this, [this] { emit patternChanged(Pattern::Loop); });
@@ -133,6 +148,23 @@ PlanStrip::PlanStrip(QWidget* parent) : QWidget(parent) {
     connect(one_way_, &QPushButton::clicked, this, [this] { emit patternChanged(Pattern::OneWay); });
     applyScale();
     setInfo(0, 0, 0, false, false, Pattern::Loop);
+    setName(QString(), false, false, true);
+}
+
+void PlanStrip::setName(const QString& name, bool saved, bool edited, bool empty) {
+    QString text;
+    QString color = QStringLiteral("#e6f1f8");
+    if (name.isEmpty()) {
+        text = empty ? QStringLiteral("No plan · flown by hand, lands at home") : QStringLiteral("New plan · not saved");
+        color = empty ? QStringLiteral("#7d93a6") : QStringLiteral("#ffb547");
+    } else {
+        // the name isolated (FSI .. PDI): a Hebrew / Arabic name doesn't turn the line right-to-left
+        text = QChar(0x2068) + name + QChar(0x2069) + (!saved ? QStringLiteral("  · not saved") : edited ? QStringLiteral("  · edited, not saved") : QString());
+        color = !saved || edited ? QStringLiteral("#ffb547") : QStringLiteral("#e6f1f8");
+    }
+    name_->setText(text);
+    name_->setStyleSheet(QStringLiteral("color: %1;").arg(color));
+    fit();
 }
 
 void PlanStrip::applyScale() {

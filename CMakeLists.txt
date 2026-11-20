@@ -111,6 +111,8 @@ add_executable(mavlink_gcs_ui
     src/ui/map_view.cpp
     src/ui/offline_downloader.cpp
     src/ui/offline_store.cpp
+    src/ui/plan_library.cpp
+    src/ui/plan_library_panel.cpp
     src/ui/plan_strip.cpp
     src/ui/pmtiles_extract.cpp
     src/ui/preflight_art.cpp
@@ -182,6 +184,12 @@ if(NOT MSVC)
     target_compile_options(test_payload PRIVATE -Wno-address-of-packed-member -Wno-pedantic)
 endif()
 add_test(NAME payload COMMAND test_payload)
+
+# saved plans: the plan files (QtCore only)
+add_executable(test_plan_library tests/test_plan_library.cpp src/ui/plan_library.cpp)
+target_link_libraries(test_plan_library PRIVATE gcs_core Qt6::Core)
+gcs_warnings(test_plan_library)
+add_test(NAME plan_library COMMAND test_plan_library)
 
 # ---- install & packages -----------------------------------------------------------
 # Linux: binary + desktop entry + icons. Windows / macOS: a self-contained

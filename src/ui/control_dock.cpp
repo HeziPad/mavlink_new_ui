@@ -470,16 +470,6 @@ void drawDockIcon(QPainter& p, DockIcon icon, const QRectF& r, const QColor& c) 
         p.drawPath(plane);
         break;
     }
-    case DockIcon::Takeoff: {
-        for (QPointF pt : {QPointF(7, 21), QPointF(23, 21)}) {
-            p.drawEllipse(pt, 4.5, 2.2);
-        }
-        p.drawLine(QPointF(7, 21), QPointF(23, 21));
-        p.drawLine(QPointF(15, 17), QPointF(15, 3));
-        p.drawPolyline(QPolygonF({{9, 9}, {15, 3}, {21, 9}}));
-        p.drawLine(QPointF(4, 27), QPointF(26, 27));
-        break;
-    }
     case DockIcon::Auto: {
         p.drawPolyline(QPolygonF({{3, 25}, {10, 12}, {17, 20}}));
         QPainterPath tri;

@@ -12,6 +12,7 @@
 #include "link/mavlink_client.hpp"
 #include "payload/adapter.hpp"
 #include "map_view.hpp"
+#include "plan_library.hpp"
 #include "settings_screen.hpp"
 
 #include <QElapsedTimer>
@@ -43,6 +44,7 @@ class FxOverlay;
 class OrbitPanel;
 class PayloadPanel;
 class PlanStrip;
+class PlanLibraryPanel;
 class PreflightRunner;
 class PreflightScreen;
 class SettingsScreen;
@@ -196,6 +198,26 @@ private:
     void refreshApproachForWind(qint64 now_ms);
     void onCameraClick(double px, double py, double w, double h);
     void launchOrAuto();
+    void launchNow();  // the GUIDED takeoff sequence (the mission on board is ours)
+
+    // ---- plans ----
+    // The GCS only uses a mission it put on the vehicle (or adopted): any
+    // other one (left over from an earlier session) is masked out of s_ every
+    // frame, so the map, Land, failsafe checks and preflight see "no plan".
+    bool vehicleMissionOurs() const;
+    // uploads the no-plan mission (takeoff + landing at home)
+    void uploadNoPlanMission();
+    bool landsAtHome(const MissionPlan& plan) const;  // L missing or at home
+    bool editorEdited() const;
+    void refreshPlanName();     // strip + library panel
+    void showLibrary(bool on);
+    void savePlan(bool ask_name);
+    void saveEditorAs(const QString& id, const QString& name);
+    void openSavedPlan(const QString& id);
+    void renameSavedPlan(const QString& id);
+    void deleteSavedPlan(const QString& id);
+    void clearEditorToNoPlan();
+    QString defaultPlanName() const;
     // the seq Resume Plan / a new plan rejoins at: the nearest route point,
     // keeping the direction of flight; -1 if the mission has no route
     int rejoinSeq(const std::vector<MissionItem>& items) const;
@@ -233,6 +255,19 @@ private:
     TelemetryBar* bar_ = nullptr;
     ControlDock* dock_ = nullptr;
     PlanStrip* strip_ = nullptr;
+    PlanLibraryPanel* library_panel_ = nullptr;
+    PlanLibrary library_;
+    // the plan in the editor: its saved name / file (empty = not saved) and
+    // the saved copy, to tell an edit
+    QString editor_name_, editor_id_;
+    std::optional<MissionPlan> editor_saved_;
+    // the plan on the vehicle (set by a Sync; "Vehicle plan" when adopted)
+    QString active_name_, active_id_;
+    std::vector<MissionItem> last_uploaded_;  // what this GCS put on board (or adopted)
+    std::vector<MissionItem> raw_mission_;    // the vehicle's mission, before masking
+    bool sync_upload_ = false;          // the upload in flight is a Sync from the editor
+    bool launch_pending_ = false;       // Launch: the no-plan mission goes up first
+    bool adopt_on_download_ = false;    // long press on Plan: take what the vehicle has
     WaypointPanel* panel_ = nullptr;
     OrbitPanel* orbit_panel_ = nullptr;
     FxOverlay* fx_ = nullptr;

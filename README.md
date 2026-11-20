@@ -188,8 +188,8 @@ and shows `NO VIDEO`.
 
 | Key | Button | What it does |
 |-----|--------|--------------|
-| 1 | **Plan / Sync ↑** | First press: edit the mission on the map. Second press: upload it; if the aircraft is flying the plan (AUTO), it switches to the new plan right away at its nearest waypoint. **Hold**: re-download the vehicle's mission |
-| 2 | **Takeoff / Launch / Resume Plan** | On the ground (**hold 1 s** to confirm): GUIDED + arm + vertical takeoff. At the takeoff altitude it flies a **straight climb-out leg** (300 m, into the wind when there is some, else straight ahead) for the transition, and only once it is wing-borne does it turn to the plan (AUTO from WP1), or Hold when there is no mission. While the safety switch is ON it reads **Safety Off** (padlock): the first hold turns the safety off (motors live), and the button then becomes Takeoff / Launch for the second hold. Airborne: **Resume Plan** goes back to the planned loop on the wing (AUTO), also mid-landing (aborts it). If the vehicle's current item isn't a loop waypoint (still the VTOL takeoff after a Hold during the climb, or the landing), it is reset to the loop first, so AUTO never re-runs a rotor takeoff. While flying the loop it reads **On Plan** |
+| 1 | **Plan / Sync ↑** | First press: edit the plan on the map (☰ **PLANS** opens the saved plans). Second press: upload it; if the aircraft is flying the plan (AUTO), it switches to the new plan right away at its nearest waypoint. Syncing an empty plan leaves only the landing at home on board. **Hold**: load the vehicle's own mission (as "Vehicle plan") |
+| 2 | **Takeoff / Resume Plan** | On the ground (**Takeoff**, **hold 1 s** to confirm): GUIDED + arm + vertical takeoff. At the takeoff altitude it flies a **straight climb-out leg** (300 m, into the wind when there is some, else straight ahead) for the transition, and only once it is wing-borne does it turn to the plan (AUTO from WP1), or Hold when there is no mission. While the safety switch is ON it reads **Safety Off** (padlock): the first hold turns the safety off (motors live), and the button then becomes Takeoff for the second hold. Airborne: **Resume Plan** goes back to the planned loop on the wing (AUTO), also mid-landing (aborts it). If the vehicle's current item isn't a loop waypoint (still the VTOL takeoff after a Hold during the climb, or the landing), it is reset to the loop first, so AUTO never re-runs a rotor takeoff. While flying the loop it reads **On Plan** |
 | 3 | **Fly To** | One target per press: press it, then tap the map (or the ground in the camera view) to circle there on the wing (GUIDED). The button then goes off, so a new target needs a new press |
 | 4 | **Hold** | Instant. Circle where the aircraft is, on the wing (GUIDED). During a landing this is a go-around |
 | 5 | **Land** | **Hold 1 s**. Circle down beside the landing point **L** on the wing, leave into the wind, back-transition and land vertically. Without an L it lands at home the same way |
@@ -286,10 +286,10 @@ box under WIND (air and ground speed). The ATTITUDE, WIND and SPEED boxes fold
 together: tap any of them (folded, SPEED shows the airspeed alone). The SPEED
 chip carries a small ▾, like the ALT chip's cycle mark: tap it for the speed mode.
 
-The map's **nav box** (bottom right) shows the aircraft's coordinates and the
-ground below it, the target it is flying to (WPn, APPROACH, L, HOLD, FLY TO,
-END HOLD, CLIMB-OUT) with its distance (the ETA is on the ETA chip), and, under a mouse cursor, the
-cursor's coordinates, ground height, distance and ETA. The camera view shows
+The map's **nav box** (bottom right) shows only the aircraft's coordinates and
+its height above the ground (AGL; where it is going is on the FLIGHT MODE and
+ETA chips), and, under a mouse cursor, the cursor's coordinates, ground height,
+distance and ETA. The camera view shows
 the **CAMERA TARGET** (top of the left column, above AIRCRAFT): where the line of sight meets the
 terrain, its ground height and the slant range (≈ when no terrain tile is
 there and flat ground at home level is used).
@@ -313,7 +313,7 @@ Ground height comes from SRTM elevation data (AWS Terrain Tiles, about ±10 m).
 It measures the surface, so it includes roofs and tree tops.
 
 **Safety switch** (`MAV_CMD_DO_SET_SAFETY_SWITCH_STATE`): it is only needed
-for takeoff, so it lives on the **Takeoff / Launch** button. While safety is ON
+for takeoff, so it lives on the **Takeoff** button. While safety is ON
 (motor outputs cut) the button reads **Safety Off**: hold it 1 s and the motors
 go live, then hold it again to take off. **After every landing the GCS turns
 safety back ON** as soon as the vehicle disarms on the ground (never while
@@ -339,6 +339,27 @@ in wing-borne flight. ASSIST means the rotors spun up in wing-borne flight to pr
 armed in cruise: disarming would stop the pusher too. The GCS reads
 `Q_GUIDED_MODE` at connect and shows an alert if it is 1, because Fly To would
 then end in a rotor hover.
+
+**Plans:** the GCS starts with **no plan**, whatever mission an earlier
+session left on the vehicle (that one isn't shown, flown or landed at; hold
+**Plan** to load it). If the GCS starts while the vehicle is armed, it takes
+the mission on board as **Vehicle plan**, so you see what it flies.
+
+- **Flying with no plan:** Launch takes off, flies the climb-out and Holds;
+  from there it is Fly To and Hold. Before the takeoff the GCS puts a
+  mission on board that is only the takeoff and a **landing at home**, so
+  **Land** and every failsafe RTL (`RTL_AUTOLAND` = 2) land at home.
+- **No landing point:** a plan without an **L** lands at home too, the same
+  way (Land and failsafes).
+- **Saved plans:** the plan strip shows the plan's name (**· edited, not
+  saved** after a change) and a **☰ PLANS** button. The PLANS panel lists the
+  saved plans (waypoints, route length, L or home, when saved): tap one, then
+  **OPEN**, **RENAME** or **DELETE**. **SAVE** / **SAVE AS…** store what is
+  in the editor (a name is typed on an on-screen keyboard; a taken name asks
+  before replacing that plan), **NO PLAN** empties the editor. Opening a plan
+  only puts it in the editor: **Sync ↑** sends it to the vehicle. Plans are
+  files on this computer (`plans/` in the app's data folder, one JSON file
+  each); they aren't on the vehicle.
 
 **Planning:** **ROUTE** in the plan strip picks how the waypoints are flown,
 until you press Hold or Land:

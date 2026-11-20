@@ -208,6 +208,38 @@ void testMissionElsewhere() {
     }
 }
 
+void testNoPlan() {
+    // no plan loaded: the GCS shows an empty mission until Launch puts the
+    // landing at home on board
+    VehicleState s = live();
+    s.has_home = true;
+    s.home_lat = 32.33;
+    s.home_lon = 34.86;
+    s.mission_known = true;
+    CHECK(st("mis.synced", s) == Status::Pass);
+    CHECK(st("mis.landing", s) == Status::Pass);
+    CHECK(st("mis.range", s) == Status::NotApplicable);
+    CHECK(st("mis.alts", s) == Status::NotApplicable);
+
+    MissionPlan plan;
+    plan.land = UserWaypoint{32.33, 34.86, 30.0f};
+    ApproachInputs in;
+    in.from_lat = 32.33;
+    in.from_lon = 34.86;
+    const LandingApproach appr = computeLandingApproach(*plan.land, in);
+    s.mission = buildLoopMission(32.33, 34.86, 50.0, plan, 40.0f, &appr);
+    CHECK(st("mis.synced", s) == Status::Pass);
+    CHECK(st("mis.landing", s) == Status::Pass);
+    const auto e = evaluate("mis.landing", s, lipo6s(), T0);
+    CHECK(e && e->detail.find("home") != std::string::npos);
+
+    // a route without a landing still fails
+    MissionPlan route;
+    route.wps = {{32.331, 34.861, 80.0f}, {32.332, 34.862, 80.0f}};
+    s.mission = buildLoopMission(32.33, 34.86, 50.0, route, 40.0f);
+    CHECK(st("mis.landing", s) == Status::Fail);
+}
+
 void testFinal() {
     VehicleState s = live();
     s.custom_mode = plane::AUTO;
@@ -310,6 +342,7 @@ static void testWeathervane() {
 int main() {
     testWeathervane();
     testMissionElsewhere();
+    testNoPlan();
     testCatalogue();
     testFrames();
     testPower();
