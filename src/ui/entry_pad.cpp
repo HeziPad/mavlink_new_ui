@@ -43,6 +43,7 @@ const char* const kSheet = R"(
             padding: 4px 8px; selection-background-color: rgba(63, 224, 255, 0.45);
         }
         QLineEdit[active="true"] { border: 2px solid #3fe0ff; background: rgba(63, 224, 255, 0.10); }
+        QLineEdit#padText { font: bold 24px "DejaVu Sans"; }
         QPushButton {
             background: rgba(63, 224, 255, 0.06); color: #e6f1f8;
             border: 1px solid rgba(63, 224, 255, 0.45); padding: 0 10px;
@@ -171,7 +172,9 @@ void EntryPad::build() {
     v->addWidget(preview_);
 
     // keys: digits, and moving the cursor
-    auto* keys = new QHBoxLayout;
+    num_keys_ = new QWidget;
+    auto* keys = new QHBoxLayout(num_keys_);
+    keys->setContentsMargins(0, 0, 0, 0);
     keys->setSpacing(10);
     auto* digits = new QGridLayout;
     digits->setSpacing(6);
@@ -263,7 +266,12 @@ void EntryPad::build() {
     ng->addStretch(1);
     keys->addWidget(nudge_keys_);
     keys->addStretch(1);
-    v->addLayout(keys);
+    v->addWidget(num_keys_);
+
+    // keys: a letter keyboard (names)
+    text_keys_ = new QWidget;
+    buildTextKeys(text_keys_);
+    v->addWidget(text_keys_);
 
     auto* actions = new QHBoxLayout;
     actions->setSpacing(10);
@@ -289,6 +297,67 @@ void EntryPad::build() {
     });
 
     applyScale();
+}
+
+void EntryPad::buildTextKeys(QWidget* host) {
+    auto* g = new QGridLayout(host);
+    g->setContentsMargins(0, 0, 0, 0);
+    g->setSpacing(6);
+    const char* rows[4] = {"1234567890", "qwertyuiop", "asdfghjkl-", "zxcvbnm_"};
+    for (int r = 0; r < 4; ++r) {
+        const QString row = QString::fromLatin1(rows[r]);
+        const int col0 = r == 3 ? 1 : 0;  // the last row starts after SHIFT
+        for (int c = 0; c < row.size(); ++c) {
+            const QString t = row.mid(c, 1);
+            auto* b = key(t);
+            connect(b, &QPushButton::clicked, this, [this, b] {
+                typeText(b->text());
+                if (shift_on_) {
+                    setShift(false);  // one capital, as on a phone
+                }
+            });
+            if (t.at(0).isLetter()) {
+                letter_keys_.push_back(b);
+            }
+            g->addWidget(b, r, col0 + c);
+        }
+    }
+    shift_ = key(QStringLiteral("⇧"), QStringLiteral("padSel"));
+    shift_->setCheckable(true);
+    connect(shift_, &QPushButton::clicked, this, [this] { setShift(!shift_on_); });
+    g->addWidget(shift_, 3, 0);
+    auto* bs = key(QStringLiteral("⌫"));
+    bs->setAutoRepeat(true);
+    connect(bs, &QPushButton::clicked, this, [this] {
+        if (active_) {
+            active_->backspace();
+            refresh();
+        }
+    });
+    g->addWidget(bs, 3, 9);
+    auto* left = key(QStringLiteral("◀"));
+    auto* space = key(QStringLiteral("SPACE"));
+    auto* right = key(QStringLiteral("▶"));
+    left->setAutoRepeat(true);
+    right->setAutoRepeat(true);
+    connect(left, &QPushButton::clicked, this, [this] {
+        if (active_) active_->cursorBackward(false);
+    });
+    connect(right, &QPushButton::clicked, this, [this] {
+        if (active_) active_->cursorForward(false);
+    });
+    connect(space, &QPushButton::clicked, this, [this] { typeText(QStringLiteral(" ")); });
+    g->addWidget(left, 4, 0, 1, 2);
+    g->addWidget(space, 4, 2, 1, 6);
+    g->addWidget(right, 4, 8, 1, 2);
+}
+
+void EntryPad::setShift(bool on) {
+    shift_on_ = on;
+    shift_->setChecked(on);
+    for (auto* b : letter_keys_) {
+        b->setText(on ? b->text().toUpper() : b->text().toLower());
+    }
 }
 
 void EntryPad::applyScale() {
@@ -520,6 +589,8 @@ void EntryPad::showFor(Kind kind) {
     kind_ = kind;
     ref_row_->setVisible(kind == Kind::Altitude);
     nudge_keys_->setVisible(kind == Kind::Altitude);
+    num_keys_->setVisible(kind != Kind::Text);
+    text_keys_->setVisible(kind == Kind::Text);
     presets_->setVisible((kind == Kind::Duration || kind == Kind::Address || kind == Kind::Number) &&
                          presets_->layout()->count() > 0);
     scaleWidgetTree(this);  // this entry's fields and chips were just built at Small sizes
@@ -788,6 +859,50 @@ void EntryPad::openNumber(const QString& title, const QString& name, int value, 
     showFor(Kind::Number);
 }
 
+void EntryPad::openText(const QString& title, const QString& initial, int max_len,
+                        std::function<QString(const QString&)> note, std::function<void(const QString&)> done) {
+    coord_done_ = nullptr;
+    alt_done_ = nullptr;
+    dur_done_ = nullptr;
+    addr_done_ = nullptr;
+    num_done_ = nullptr;
+    text_done_ = std::move(done);
+    text_note_ = std::move(note);
+    title_->setText(title);
+    setPresets({});
+    clearBoxes();
+    QWidget* r = newRow();
+    auto* e = new QLineEdit(r);
+    e->setStyle(thickCursor());
+    e->setObjectName(QStringLiteral("padText"));
+    e->setMaxLength(std::max(1, max_len));
+    e->setFocusPolicy(Qt::StrongFocus);
+    e->setContextMenuPolicy(Qt::NoContextMenu);
+    e->setProperty("decimals", 0);
+    e->setProperty("active", false);
+    e->setMinimumHeight(56);
+    e->setMinimumWidth(10 * kKey + 9 * 6);  // as wide as the keyboard
+    e->installEventFilter(this);
+    connect(e, &QLineEdit::textChanged, this, [this] { refresh(); });
+    connect(e, &QLineEdit::returnPressed, this, &EntryPad::accept);
+    static_cast<QHBoxLayout*>(r->layout())->addWidget(e);
+    boxes_.push_back({e, 0});
+    e->setText(initial);
+    setShift(initial.isEmpty());
+    showFor(Kind::Text);
+    e->selectAll();  // typing replaces the suggestion; ◀ ▶ keep it
+}
+
+void EntryPad::refreshText(QString& preview, bool& ok) {
+    const QString t = boxText(0).simplified();
+    ok = !t.isEmpty();
+    if (!ok) {
+        preview = QStringLiteral("type a name");
+        return;
+    }
+    preview = text_note_ ? text_note_(t) : QString();
+}
+
 void EntryPad::close() {
     poll_->stop();
     hide();
@@ -796,6 +911,8 @@ void EntryPad::close() {
     dur_done_ = nullptr;
     addr_done_ = nullptr;
     num_done_ = nullptr;
+    text_done_ = nullptr;
+    text_note_ = nullptr;
     emit closed();
 }
 
@@ -828,6 +945,8 @@ void EntryPad::refresh() {
         refreshAddress(preview, ok);
     } else if (kind_ == Kind::Number) {
         refreshNumber(preview, ok);
+    } else if (kind_ == Kind::Text) {
+        refreshText(preview, ok);
     } else {
         refreshAltitude(preview, ok);
     }
@@ -1040,6 +1159,11 @@ void EntryPad::accept() {
         const int v = *number_;
         close();
         done(v);
+    } else if (kind_ == Kind::Text && text_done_) {
+        auto done = text_done_;
+        const QString t = boxText(0).simplified();
+        close();
+        done(t);
     } else if (kind_ == Kind::Altitude && rel_ && alt_done_) {
         auto done = alt_done_;
         const double rel = *rel_;
@@ -1085,7 +1209,9 @@ void EntryPad::keyPressEvent(QKeyEvent* e) {
         return;
     }
     const QString t = e->text();
-    if (!t.isEmpty() && (t.at(0).isDigit() || t.at(0) == QLatin1Char('.'))) {
+    if (kind_ == Kind::Text && !t.isEmpty() && t.at(0).isPrint()) {
+        typeText(t);
+    } else if (!t.isEmpty() && (t.at(0).isDigit() || t.at(0) == QLatin1Char('.'))) {
         typeText(t);
     }
 }

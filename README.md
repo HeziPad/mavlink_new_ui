@@ -188,8 +188,8 @@ and shows `NO VIDEO`.
 
 | Key | Button | What it does |
 |-----|--------|--------------|
-| 1 | **Plan / Sync ↑** | First press: edit the mission on the map. Second press: upload it; if the aircraft is flying the plan (AUTO), it switches to the new plan right away at its nearest waypoint. **Hold**: re-download the vehicle's mission |
-| 2 | **Takeoff / Launch / Resume Plan** | On the ground (**hold 1 s** to confirm): GUIDED + arm + vertical takeoff. At the takeoff altitude it flies a **straight climb-out leg** (300 m, into the wind when there is some, else straight ahead) for the transition, and only once it is wing-borne does it turn to the plan (AUTO from WP1), or Hold when there is no mission. While the safety switch is ON it reads **Safety Off** (padlock): the first hold turns the safety off (motors live), and the button then becomes Takeoff / Launch for the second hold. Airborne: **Resume Plan** goes back to the planned loop on the wing (AUTO), also mid-landing (aborts it). If the vehicle's current item isn't a loop waypoint (still the VTOL takeoff after a Hold during the climb, or the landing), it is reset to the loop first, so AUTO never re-runs a rotor takeoff. While flying the loop it reads **On Plan** |
+| 1 | **Plan / Sync ↑** | First press: edit the plan on the map (☰ **PLANS** opens the saved plans). Second press: upload it; if the aircraft is flying the plan (AUTO), it switches to the new plan right away at its nearest waypoint. Syncing an empty plan leaves only the landing at home on board. **Hold**: load the vehicle's own mission (as "Vehicle plan") |
+| 2 | **Takeoff / Resume Plan** | On the ground (**Takeoff**, **hold 1 s** to confirm): GUIDED + arm + vertical takeoff. At the takeoff altitude it flies a **straight climb-out leg** (300 m, into the wind when there is some, else straight ahead) for the transition, and only once it is wing-borne does it turn to the plan (AUTO from WP1), or Hold when there is no mission. While the safety switch is ON it reads **Safety Off** (padlock): the first hold turns the safety off (motors live), and the button then becomes Takeoff for the second hold. Airborne: **Resume Plan** goes back to the planned loop on the wing (AUTO), also mid-landing (aborts it). If the vehicle's current item isn't a loop waypoint (still the VTOL takeoff after a Hold during the climb, or the landing), it is reset to the loop first, so AUTO never re-runs a rotor takeoff. While flying the loop it reads **On Plan** |
 | 3 | **Fly To** | One target per press: press it, then tap the map (or the ground in the camera view) to circle there on the wing (GUIDED). The button then goes off, so a new target needs a new press |
 | 4 | **Hold** | Instant. Circle where the aircraft is, on the wing (GUIDED). During a landing this is a go-around |
 | 5 | **Land** | **Hold 1 s**. Circle down beside the landing point **L** on the wing, leave into the wind, back-transition and land vertically. Without an L it lands at home the same way |
@@ -280,16 +280,24 @@ or ft): 323 shows 320, 328 shows 330, and a value hovering at 325 doesn't
 flicker (it moves on 2 past the boundary).
 
 The **SPEED** chip has no numbers: it shows the speed the GCS commands in words
-(**LOITER**, **CRUISE**, **MAX**) and the speed mode above it (**ECO**, **NORMAL**,
+(**LOITER**, **CRUISE** or **MAX**, whichever is nearest to the commanded speed;
+the speed panel says exactly what and why: CLIMB, DESCENT, CRUISE+ / CRUISE−,
+WIND) and the speed mode above it (**ECO**, **NORMAL**,
 **FAST**, as one to three chevrons). The numbers are on the map, in the **SPEED**
 box under WIND (air and ground speed). The ATTITUDE, WIND and SPEED boxes fold
 together: tap any of them (folded, SPEED shows the airspeed alone). The SPEED
 chip carries a small ▾, like the ALT chip's cycle mark: tap it for the speed mode.
 
-The map's **nav box** (bottom right) shows the aircraft's coordinates and the
-ground below it, the target it is flying to (WPn, APPROACH, L, HOLD, FLY TO,
-END HOLD, CLIMB-OUT) with its distance (the ETA is on the ETA chip), and, under a mouse cursor, the
-cursor's coordinates, ground height, distance and ETA. The camera view shows
+**Green on the map is where the aircraft is going now**, one target at a time:
+the current waypoint in AUTO, the Hold / Fly To circle, or L and its approach
+while landing. The route dims while the aircraft isn't flying it (Hold, Fly To,
+landing). Home is
+white, the route and an idle L cyan, the plan being edited amber.
+
+The map's **nav box** (bottom right) shows only the aircraft's coordinates and
+its height above the ground (AGL; where it is going is on the FLIGHT MODE and
+ETA chips), and, under a mouse cursor, the cursor's coordinates, ground height,
+distance and ETA. The camera view shows
 the **CAMERA TARGET** (top of the left column, above AIRCRAFT): where the line of sight meets the
 terrain, its ground height and the slant range (≈ when no terrain tile is
 there and flat ground at home level is used).
@@ -313,7 +321,7 @@ Ground height comes from SRTM elevation data (AWS Terrain Tiles, about ±10 m).
 It measures the surface, so it includes roofs and tree tops.
 
 **Safety switch** (`MAV_CMD_DO_SET_SAFETY_SWITCH_STATE`): it is only needed
-for takeoff, so it lives on the **Takeoff / Launch** button. While safety is ON
+for takeoff, so it lives on the **Takeoff** button. While safety is ON
 (motor outputs cut) the button reads **Safety Off**: hold it 1 s and the motors
 go live, then hold it again to take off. **After every landing the GCS turns
 safety back ON** as soon as the vehicle disarms on the ground (never while
@@ -339,6 +347,27 @@ in wing-borne flight. ASSIST means the rotors spun up in wing-borne flight to pr
 armed in cruise: disarming would stop the pusher too. The GCS reads
 `Q_GUIDED_MODE` at connect and shows an alert if it is 1, because Fly To would
 then end in a rotor hover.
+
+**Plans:** the GCS starts with **no plan**, whatever mission an earlier
+session left on the vehicle (that one isn't shown, flown or landed at; hold
+**Plan** to load it). If the GCS starts while the vehicle is armed, it takes
+the mission on board as **Vehicle plan**, so you see what it flies.
+
+- **Flying with no plan:** Launch takes off, flies the climb-out and Holds;
+  from there it is Fly To and Hold. Before the takeoff the GCS puts a
+  mission on board that is only the takeoff and a **landing at home**, so
+  **Land** and every failsafe RTL (`RTL_AUTOLAND` = 2) land at home.
+- **No landing point:** a plan without an **L** lands at home too, the same
+  way (Land and failsafes).
+- **Saved plans:** the plan strip shows the plan's name (**· edited, not
+  saved** after a change) and a **☰ PLANS** button. The PLANS panel lists the
+  saved plans (waypoints, route length, L or home, when saved): tap one, then
+  **OPEN**, **RENAME** or **DELETE**. **SAVE** / **SAVE AS…** store what is
+  in the editor (a name is typed on an on-screen keyboard; a taken name asks
+  before replacing that plan), **NO PLAN** empties the editor. Opening a plan
+  only puts it in the editor: **Sync ↑** sends it to the vehicle. Plans are
+  files on this computer (`plans/` in the app's data folder, one JSON file
+  each); they aren't on the vehicle.
 
 **Planning:** **ROUTE** in the plan strip picks how the waypoints are flown,
 until you press Hold or Land:
@@ -692,14 +721,36 @@ constant). The critical alert doesn't wait for the smoothing.
 **Airspeed.** Tap the SPEED chip to see the aircraft's three airspeeds,
 read from its own parameters and never changed by the GCS: **LOITER**
 (`AIRSPEED_MIN`), **CRUISE** (`AIRSPEED_CRUISE`) and **MAX** (`AIRSPEED_MAX`).
-The one choice there is the **SPEED MODE**, which picks the speed per
-situation (sent with `DO_CHANGE_SPEED`):
+The one choice there is the **SPEED MODE**: what matters more, battery or
+time. The GCS picks the speed (sent with `DO_CHANGE_SPEED`) in two layers.
 
-| Mode | Circling | Between points | Long descents (> 15 m) | Landing |
-|---|---|---|---|---|
-| ECO (default) | LOITER | CRUISE | MAX | CRUISE |
-| NORMAL | CRUISE | CRUISE | CRUISE | CRUISE |
-| FAST | CRUISE | MAX | MAX | CRUISE |
+In **every mode** the aircraft flies each phase the efficient way:
+
+- **Climbing** (the goal more than 15 m above): **CLIMB**, the LOITER speed.
+  Slow, so the motor's power goes into height.
+- **Steep descents** (more than 15 m above the goal, on a circle or sinking
+  faster than half `TECS_SINK_MAX`): **DESCENT**; FAST takes **MAX** when it
+  isn't circling. Along a long leg ArduPlane glides down gently toward the
+  target (a glide slope), and that is flown like level flight. ArduPlane never sinks faster
+  than `TECS_SINK_MAX`, so a faster airspeed doesn't bring it down sooner: it
+  only makes TECS add throttle to hold the sink back (SITL, 4.6 m/s down at
+  every speed: 7 mAh per 100 m at 20 m/s, 110 at 35 m/s). DESCENT is the
+  slowest speed that already sinks at `TECS_SINK_MAX` with the throttle at
+  idle. The GCS learns it on each steady descent (idle and sinking slower than
+  the limit: +1 m/s; throttle on at the limit: −1 m/s), starting at CRUISE, and
+  remembers it. MAX gives the same sink rate, only more ground covered.
+- **Landing:** **CRUISE**, the speed the back-transition distance is
+  computed for.
+- **Never slower than the wind + 5 m/s** (**WIND**), or the aircraft would
+  crawl, or drift backwards, into it.
+
+The mode only chooses **level flight**:
+
+| Mode | Circling | Between points |
+|---|---|---|
+| ECO (default) | LOITER (longest endurance) | CRUISE + ½ headwind (**CRUISE+** / **CRUISE−**): least battery per km in wind, kept within LOITER..MAX |
+| NORMAL | CRUISE | CRUISE |
+| FAST | CRUISE (a circle at MAX needs more bank than allowed) | MAX |
 
 ArduPlane raises its minimum speed in banked turns by itself (TECS load
 factor). LOITER is also kept 2 m/s above `Q_ASSIST_SPEED`, or the lift rotors

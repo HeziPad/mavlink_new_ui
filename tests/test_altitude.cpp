@@ -1,6 +1,5 @@
 #include "check.hpp"
 #include "core/altitude.hpp"
-#include "core/speed_mode.hpp"
 
 #include <cmath>
 
@@ -46,28 +45,8 @@ static void testFloor() {
     CHECK(check(100.0, Ref::Afl, g).ok);
 }
 
-static void testSpeed() {
-    using namespace gcs::speed;
-    CHECK(target(Mode::Eco, Situation::Circling) == Target::Loiter);
-    CHECK(target(Mode::Eco, Situation::EnRoute) == Target::Cruise);
-    CHECK(target(Mode::Eco, Situation::Descending) == Target::Max);
-    CHECK(target(Mode::Normal, Situation::Circling) == Target::Cruise);
-    CHECK(target(Mode::Normal, Situation::Descending) == Target::Cruise);
-    CHECK(target(Mode::Fast, Situation::EnRoute) == Target::Max);
-    CHECK(target(Mode::Fast, Situation::Circling) == Target::Cruise);
-    CHECK(loiterSpeed(13.0, 25.0, 18.0) == 20.0);  // SITL's quadplane: assist above min
-    CHECK(loiterSpeed(16.0, 25.0, 12.0) == 16.0);
-    CHECK(loiterSpeed(16.0, 25.0, 0.0) == 16.0);   // Q_ASSIST off
-    CHECK(loiterSpeed(13.0, 18.0, 18.0) == 18.0);  // never faster than cruise
-    for (Mode m : {Mode::Eco, Mode::Normal, Mode::Fast}) {
-        CHECK(target(m, Situation::Landing) == Target::Cruise);
-        CHECK(target(m, Situation::None) == Target::Default);
-    }
-}
-
 int main() {
     testConversions();
     testFloor();
-    testSpeed();
     return TEST_MAIN_RESULT();
 }

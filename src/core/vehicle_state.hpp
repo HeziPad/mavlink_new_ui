@@ -168,6 +168,8 @@ struct VehicleState {
     double airspeed_max = -1.0;             // AIRSPEED_MAX (m/s)
     double q_assist_speed = -1.0;           // Q_ASSIST_SPEED (m/s): below it the lift rotors help
     double trans_decel = -1.0;              // Q_TRANS_DECEL (m/s^2)
+    double sink_max = -1.0;                 // TECS_SINK_MAX (m/s): ArduPlane never sinks faster
+    double thr_min_pct = -1000.0;           // THR_MIN (%): idle throttle; -1000 unknown
     double loiter_radius = -1.0;            // WP_LOITER_RAD (m)
     double batt_capacity_mah = -1.0;        // BATT_CAPACITY (mAh), -1 unknown
     std::array<int, 16> servo_function{};   // SERVOn_FUNCTION, 0 until read

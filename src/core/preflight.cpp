@@ -541,11 +541,18 @@ std::optional<Eval> evaluate(const std::string& id, const VehicleState& s, const
         }
         const MissionPlan plan = extractPlan(s.mission);
         if (id == "mis.synced") {
-            return plan.wps.empty() ? ev(Status::Fail, "no waypoints on the vehicle: Plan → Sync")
-                                    : ev(Status::Pass, std::to_string(plan.wps.size()) + " waypoints on the vehicle");
+            if (plan.wps.empty()) {
+                return ev(Status::Pass, plan.land ? "no plan: flown by hand (Fly To / Hold), lands at home"
+                                                  : "no plan: flown by hand (Fly To / Hold); Launch puts a "
+                                                    "landing at home on board");
+            }
+            return ev(Status::Pass, std::to_string(plan.wps.size()) + " waypoints on the vehicle");
         }
         if (id == "mis.landing") {
             if (!plan.land) {
+                if (s.mission.size() <= 1) {
+                    return ev(Status::Pass, "no plan: Launch puts a landing at home on board");
+                }
                 return ev(Status::Fail, "no landing in the mission: Plan → Sync adds one (at home if there's no L)");
             }
             const bool marker = std::any_of(s.mission.begin(), s.mission.end(),
@@ -576,8 +583,11 @@ std::optional<Eval> evaluate(const std::string& id, const VehicleState& s, const
             return ev(Status::Pass, d);
         }
         if (id == "mis.range") {
-            if (!s.has_home || plan.wps.empty()) {
-                return ev(Status::Waiting, "needs home and waypoints");
+            if (plan.wps.empty()) {
+                return ev(Status::NotApplicable, "no waypoints");
+            }
+            if (!s.has_home) {
+                return ev(Status::Waiting, "needs home");
             }
             double far = 0.0;
             for (const auto& w : plan.wps) {

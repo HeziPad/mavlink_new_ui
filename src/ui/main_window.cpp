@@ -17,6 +17,7 @@
 #include "core/altitude.hpp"
 #include "offline_downloader.hpp"
 #include "offline_store.hpp"
+#include "plan_library_panel.hpp"
 #include "plan_strip.hpp"
 #include "vector_map.hpp"
 #include "preflight_runner.hpp"
@@ -33,6 +34,7 @@
 #include <QApplication>
 #include <QDir>
 #include <QCloseEvent>
+#include <QDateTime>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QTouchEvent>
@@ -206,6 +208,7 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
     host_ = new ViewHost(map_, camera_, this);
     strip_ = new PlanStrip(this);
     strip_->hide();
+    library_panel_ = new PlanLibraryPanel(this);
     panel_ = new WaypointPanel(this);
     panel_->hide();
     orbit_panel_ = new OrbitPanel(this);
@@ -640,6 +643,13 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
         exitPlan();
         fx_->toast(QStringLiteral("Plan discarded"), kMuted);
     });
+    connect(strip_, &PlanStrip::libraryRequested, this, [this] { showLibrary(!library_panel_->isVisible()); });
+    connect(library_panel_, &PlanLibraryPanel::openRequested, this, &MainWindow::openSavedPlan);
+    connect(library_panel_, &PlanLibraryPanel::renameRequested, this, &MainWindow::renameSavedPlan);
+    connect(library_panel_, &PlanLibraryPanel::deleteRequested, this, &MainWindow::deleteSavedPlan);
+    connect(library_panel_, &PlanLibraryPanel::saveRequested, this, [this] { savePlan(false); });
+    connect(library_panel_, &PlanLibraryPanel::saveAsRequested, this, [this] { savePlan(true); });
+    connect(library_panel_, &PlanLibraryPanel::noPlanRequested, this, &MainWindow::clearEditorToNoPlan);
 
     qApp->installEventFilter(this);
 
@@ -707,7 +717,11 @@ void MainWindow::layoutOverlays() {
         payload_panel_->place(alertsArea());
         fx_->setRightInset(payload_panel_->width() + 8.0);
     }
+    if (library_panel_->isVisible()) {
+        refreshPlanName();  // re-placed under the strip
+    }
     strip_->raise();
+    library_panel_->raise();
     panel_->raise();
     orbit_panel_->raise();
     bar_->raise();
@@ -1163,15 +1177,9 @@ void MainWindow::updateHeights(qint64 now_ms) {
     nav_ms_ = now_ms;
     MapView::NavInfo nav;
     if (s_.has_position) {
-        QStringList ground;
-        if (terrain_here_) {
-            ground << QStringLiteral("GROUND %1 MSL").arg(units::altText(*terrain_here_));
-        }
         if (agl) {
-            ground << QStringLiteral("AGL %1 (%2)").arg(units::altText(*agl), rf ? QStringLiteral("rangefinder")
-                                                                                : QStringLiteral("terrain"));
+            nav.aircraft_ground = QStringLiteral("AGL  %1").arg(units::altText(*agl));
         }
-        nav.aircraft_ground = ground.join(QStringLiteral("  ·  "));
     }
     if (climb_out_) {
         nav.target = pointTarget(s_, "CLIMB-OUT", climb_out_lat_, climb_out_lon_);
@@ -1341,10 +1349,12 @@ void MainWindow::refreshSpeedPanel() {
                                                                               s_.q_assist_speed)
                                                                 : s_.airspeed_min,
                             s_.q_assist_speed);
+    speed_panel_->setDescent(descent_ready_ ? descent_.speed() : 0.0, descent_.learned());
 }
 
 void MainWindow::updateSpeedTarget(qint64 now_ms) {
-    // which airspeed to ask for, from what the aircraft is doing (2 Hz)
+    // which airspeed to ask for, from what the aircraft is doing (2 Hz);
+    // the rules are core/speed_mode
     if (now_ms - speed_eval_ms_ < 500) {
         return;
     }
@@ -1354,13 +1364,16 @@ void MainWindow::updateSpeedTarget(qint64 now_ms) {
         return;  // parameters not read yet: leave the autopilot alone
     }
     Situation sit = Situation::None;
+    double course = -1.0;  // to where it is going, degrees; < 0 unknown
     if (s_.armed && isAirborne(s_) && !climb_out_ && !takeoff_handoff_) {
-        const bool landing = isLandingInMission(s_);
-        if (landing) {
+        std::optional<double> goal;  // the altitude it is going to
+        if (isLandingInMission(s_)) {
             sit = Situation::Landing;
         } else if (s_.custom_mode == plane::GUIDED && orbit_) {
             const double d = geo::distance(s_.lat, s_.lon, orbit_->lat, orbit_->lon);
             sit = d < orbit_->radius * 1.5 + 30.0 ? Situation::Circling : Situation::EnRoute;
+            course = geo::bearing(s_.lat, s_.lon, orbit_->lat, orbit_->lon);
+            goal = orbit_->alt;
         } else if (s_.custom_mode == plane::AUTO && s_.mission_known && s_.mission_current >= 1 &&
                    s_.mission_current < static_cast<int>(s_.mission.size())) {
             const MissionItem& it = s_.mission[s_.mission_current];
@@ -1369,53 +1382,92 @@ void MainWindow::updateSpeedTarget(qint64 now_ms) {
             const double r = std::abs(it.param3) > 1.0f ? std::abs(it.param3) : defaultRadius();
             sit = loiter && geo::distance(s_.lat, s_.lon, it.lat(), it.lon()) < r * 1.5 + 30.0 ? Situation::Circling
                                                                                                  : Situation::EnRoute;
-        }
-        // descending: well above where it is going (ArduPlane slews its own
-        // altitude target, so NAV_CONTROLLER_OUTPUT's error stays small)
-        if (sit == Situation::EnRoute && s_.has_position) {
-            std::optional<double> goal;
-            if (s_.custom_mode == plane::GUIDED && orbit_) {
-                goal = orbit_->alt;
-            } else if (s_.custom_mode == plane::AUTO && s_.mission_current >= 1 &&
-                       s_.mission_current < static_cast<int>(s_.mission.size())) {
-                goal = s_.mission[s_.mission_current].z;
+            if (it.x != 0 || it.y != 0) {
+                course = geo::bearing(s_.lat, s_.lon, it.lat(), it.lon());
+                goal = it.z;
             }
-            if (goal && s_.alt_rel - *goal > kDescentForMax) {
-                sit = Situation::Descending;
+        }
+        // well below / above where it is going (ArduPlane slews its own
+        // altitude target, so NAV_CONTROLLER_OUTPUT's error stays small).
+        // A descent counts only when it is steep: on a circle, or sinking
+        // faster than half TECS_SINK_MAX. Along a long leg ArduPlane glides
+        // down gently (a glide slope to the target): that is level flight.
+        if (goal && s_.has_position && sit != Situation::Landing) {
+            const double sink_max = s_.sink_max > 0.0 ? s_.sink_max : 5.0;
+            if (*goal - s_.alt_rel > kClimbForSlow) {
+                sit = Situation::Climbing;
+            } else if (s_.alt_rel - *goal > kDescentForMax) {
+                if (sit == Situation::Circling) {
+                    sit = Situation::DescendingCircle;
+                } else if (sit == Situation::EnRoute && -s_.climb > 0.5 * sink_max) {
+                    sit = Situation::Descending;
+                }
             }
         }
     }
-    const Target want = target(static_cast<Mode>(settings_.speed_mode), sit);
+    Speeds v;
+    v.loiter = loiterSpeed(s_.airspeed_min, s_.airspeed_cruise, s_.q_assist_speed);
+    v.climb = climbSpeed(v.loiter, s_.airspeed_cruise);
+    v.cruise = s_.airspeed_cruise;
+    v.max = s_.airspeed_max;
+    // the best descent speed: learned on each steady descent, starting at CRUISE
+    if (!descent_ready_) {
+        const double saved = QSettings().value(QStringLiteral("speed/descent"), 0.0).toDouble();
+        descent_.reset(saved > 0.0 ? saved : v.cruise, v.loiter, v.max);
+        descent_ready_ = true;
+    }
+    descent_.setLimits(v.loiter, v.max);
+    if ((sit == Situation::Descending || sit == Situation::DescendingCircle) && speed_sent_ &&
+        speed_sent_->target == Target::Descent) {
+        const double sink_max = s_.sink_max > 0.0 ? s_.sink_max : 5.0;  // ArduPlane's default
+        const double idle = s_.thr_min_pct > -100.0 ? std::max(0.0, s_.thr_min_pct) : 0.0;
+        if (descent_.sample(0.5, speed_sent_->airspeed, s_.airspeed, -s_.climb, s_.throttle_pct, sink_max, idle)) {
+            QSettings().setValue(QStringLiteral("speed/descent"), descent_.speed());
+        }
+    } else {
+        descent_.interrupt();
+    }
+    v.descent = descent_.speed();
+    const double wind = s_.has_wind ? s_.wind_speed : 0.0;
+    const double head = s_.has_wind && course >= 0.0 ? headwind(s_.wind_from_deg, s_.wind_speed, course) : 0.0;
+    const Command want = command(static_cast<Mode>(settings_.speed_mode), sit, v, head, wind);
     if (s_.custom_mode != speed_mode_seen_) {
         speed_mode_seen_ = s_.custom_mode;
         speed_sent_.reset();  // a mode change may reset ArduPlane's target: send again
     }
-    if (!speed_want_ || *speed_want_ != want) {
+    if (!speed_want_ || speed_want_->target != want.target) {
         speed_want_ = want;
         speed_want_ms_ = now_ms;
     }
-    // hold a new target for 3 s before sending (no flapping); landing at once
+    speed_want_->airspeed = want.airspeed;  // the wind-adjusted value follows; the 3 s is for a new kind
+    // hold a new kind of target for 3 s before sending (no flapping); landing at once
     const bool settled = now_ms - speed_want_ms_ >= 3000 || sit == Situation::Landing;
-    if (!settled || (speed_sent_ && *speed_sent_ == want)) {
+    const bool same = speed_sent_ && speed_sent_->target == want.target &&
+                      std::abs(speed_sent_->airspeed - want.airspeed) < kResendDelta;
+    if (!settled || same) {
         return;
     }
-    float v = -2.0f;  // AIRSPEED_CRUISE (ArduPilot's default)
-    const double loiter = loiterSpeed(s_.airspeed_min, s_.airspeed_cruise, s_.q_assist_speed);
-    if (want == Target::Loiter) {
-        v = static_cast<float>(loiter);
-    } else if (want == Target::Max) {
-        v = static_cast<float>(s_.airspeed_max);
-    }
-    if (want == Target::Default && (!speed_sent_ || *speed_sent_ == Target::Default || *speed_sent_ == Target::Cruise)) {
-        speed_sent_ = want;  // nothing of ours to undo
+    if (want.target == Target::Default) {
+        if (!speed_sent_ || speed_sent_->target == Target::Default ||
+            (speed_sent_->target == Target::Cruise && std::abs(speed_sent_->airspeed - v.cruise) < 0.05)) {
+            speed_sent_ = want;  // nothing of ours to undo
+            speed_chip_ = Target::Default;
+            speed_label_.clear();
+            return;
+        }
+        client_->runSequence("speed", {link::makeChangeSpeed(-2.0f)});  // back to AIRSPEED_CRUISE
+        speed_sent_ = want;
+        speed_chip_ = Target::Default;
         speed_label_.clear();
-        return;
+    } else {
+        // plain CRUISE as -2 (ArduPilot's own AIRSPEED_CRUISE), anything else in m/s
+        const bool plain = want.target == Target::Cruise && std::abs(want.airspeed - v.cruise) < 0.05;
+        client_->runSequence("speed", {link::makeChangeSpeed(plain ? -2.0f : static_cast<float>(want.airspeed))});
+        speed_sent_ = want;
+        speed_chip_ = chipTarget(want, v);
+        speed_label_ = QStringLiteral("%1 %2").arg(QString::fromUtf8(targetName(want.target)),
+                                                  units::speedText(want.airspeed));
     }
-    client_->runSequence("speed", {link::makeChangeSpeed(v)});
-    speed_sent_ = want;
-    const double shown = want == Target::Loiter ? loiter : want == Target::Max ? s_.airspeed_max : s_.airspeed_cruise;
-    speed_label_ = want == Target::Default ? QString()
-                                           : QStringLiteral("%1 %2").arg(QLatin1String(targetName(want)), units::speedText(shown));
     if (speed_panel_->isVisible()) {
         refreshSpeedPanel();
     }
@@ -1440,9 +1492,15 @@ void MainWindow::applyCoordFormat(int fmt) {
 
 void MainWindow::pullState() {
     s_ = client_->snapshot();
+    raw_mission_ = s_.mission;
     const auto now = Clock::now();
     for (const auto& ev : client_->pollEvents()) {
         handleEvent(ev);
+    }
+    if (!vehicleMissionOurs()) {
+        // a mission this GCS didn't put there (an earlier session's, another
+        // tool's): not shown, not flown to, not landed at
+        s_.mission.clear();
     }
     updatePayload();
 
@@ -1495,7 +1553,7 @@ void MainWindow::pullState() {
     updateHeights(clock_.elapsed());
     updateSpeedTarget(clock_.elapsed());
     autoSafetyOnLanded();
-    bar_->setSpeed(speed_sent_ ? static_cast<int>(*speed_sent_) : 0, settings_.speed_mode, isAirborne(s_));
+    bar_->setSpeed(static_cast<int>(speed_chip_), settings_.speed_mode, isAirborne(s_));
     bar_->setCommandedAlt(commandedAltRel());
     bar_->setState(s_, now);
     map_->setState(s_);
@@ -1819,6 +1877,14 @@ void MainWindow::handleEvent(const link::LinkEvent& ev) {
     case T::MissionUploaded:
         uploading_ = false;
         dock_->setProgress(kPlan, -1.0);
+        last_uploaded_ = ev.items;  // ours now
+        raw_mission_ = ev.items;
+        if (launch_pending_) {
+            // the no-plan mission (landing at home) is on board: take off
+            launch_pending_ = false;
+            launchNow();
+            break;
+        }
         if (approach_refresh_) {
             approach_refresh_ = false;
             if (const auto appr = extractApproach(ev.items)) {
@@ -1866,20 +1932,59 @@ void MainWindow::handleEvent(const link::LinkEvent& ev) {
             }
         }
         dock_->flash(kPlan, true);
-        fx_->toast(QStringLiteral("Mission synced · %1 items").arg(ev.items.size()), kGreen, QStringLiteral("Plan"));
+        if (sync_upload_) {
+            sync_upload_ = false;
+            const bool none = extractPlan(ev.items).wps.empty();  // an emptied editor: no plan
+            active_name_ = none ? QString() : editor_name_;
+            active_id_ = none ? QString() : editor_id_;
+        }
+        fx_->toast(extractPlan(ev.items).wps.empty()
+                       ? QStringLiteral("No plan on the vehicle · Land and failsafes land at home")
+                       : QStringLiteral("%1 synced · %2 items")
+                             .arg(active_name_.isEmpty() ? QStringLiteral("Plan") : QStringLiteral("“%1”").arg(active_name_))
+                             .arg(ev.items.size()),
+                   kGreen, QStringLiteral("Plan"));
         if (planning_) {
             exitPlan();
         }
         break;
-    case T::MissionDownloaded:
+    case T::MissionDownloaded: {
         dock_->setProgress(kPlan, -1.0);
-        if (ev.items.size() > 1) {
-            fx_->toast(QStringLiteral("Vehicle mission loaded · %1 items").arg(ev.items.size()), kCyan,
+        const bool asked = adopt_on_download_;
+        adopt_on_download_ = false;
+        if (ev.items.size() <= 1) {
+            if (asked) {
+                fx_->toast(QStringLiteral("The vehicle has no mission"), kMuted, QStringLiteral("Plan"));
+            }
+            break;
+        }
+        if (sameMission(ev.items, last_uploaded_)) {
+            break;  // what this GCS put there
+        }
+        if (asked || s_.armed || isAirborne(s_)) {
+            // asked for, or already flying it (the GCS restarted mid-flight): show what it flies
+            last_uploaded_ = ev.items;
+            raw_mission_ = ev.items;
+            active_name_ = QStringLiteral("Vehicle plan");
+            active_id_.clear();
+            fx_->toast(QStringLiteral("Vehicle plan loaded · %1 items (not saved)").arg(ev.items.size()), kCyan,
+                       QStringLiteral("Plan"));
+        } else {
+            fx_->toast(QStringLiteral("The vehicle holds an older mission: not loaded. Hold Plan to load it"), kMuted,
                        QStringLiteral("Plan"));
         }
         break;
+    }
     case T::MissionFailed:
         rejoin_after_upload_ = false;
+        sync_upload_ = false;
+        adopt_on_download_ = false;
+        if (launch_pending_) {
+            launch_pending_ = false;
+            dock_->setPending(kLaunch, false);
+            fx_->toast(QStringLiteral("Launch stopped: the landing-at-home mission didn't upload (%1)").arg(text), kRed,
+                       QStringLiteral("Launch"));
+        }
         if (end_hold_upload_) {
             end_hold_upload_ = false;  // quiet: the edit is still pending and is sent again
             end_hold_dirty_ = true;
@@ -1958,16 +2063,15 @@ void MainWindow::refreshDock() {
             spec.label = uploading_ ? QStringLiteral("Syncing") : QStringLiteral("Sync ↑");
             spec.icon = DockIcon::Upload;
             spec.active = true;
-            spec.hint = QStringLiteral("Upload the plan to the vehicle");
+            spec.hint = map_->plan().wps.empty()
+                            ? QStringLiteral("No route: upload just the landing at home (fly by hand)")
+                            : QStringLiteral("Upload the plan to the vehicle");
             if (!alive) {
                 spec.enabled = false;
                 spec.reason = no_link;
             } else if (!s_.has_home) {
                 spec.enabled = false;
                 spec.reason = QStringLiteral("Vehicle has no home position yet");
-            } else if (map_->plan().wps.empty()) {
-                spec.enabled = false;
-                spec.reason = QStringLiteral("Tap the map to add waypoints");
             } else if (uploading_ || s_.mission_transfer_active) {
                 spec.enabled = false;
                 spec.reason = QStringLiteral("Mission transfer in progress");
@@ -1976,7 +2080,10 @@ void MainWindow::refreshDock() {
             spec.label = QStringLiteral("Plan");
             spec.icon = DockIcon::Plan;
             spec.long_press = true;
-            spec.hint = QStringLiteral("Edit the mission · hold to re-download it from the vehicle");
+            spec.hint = (active_name_.isEmpty() || !vehicleMissionOurs() || extractPlan(raw_mission_).wps.empty()
+                             ? QStringLiteral("No plan loaded · lands at home")
+                             : QStringLiteral("On the vehicle: %1").arg(active_name_)) +
+                        QStringLiteral("\nTap: plans · hold: load the vehicle's mission");
         }
         dock_->setSlot(kPlan, spec);
     }
@@ -1987,9 +2094,8 @@ void MainWindow::refreshDock() {
         spec.accent = kGreen;
         if (!airborne) {
             const bool mission = hasFlyableMission(s_);
-            spec.label = mission ? QStringLiteral("Launch")
-                                 : QStringLiteral("Takeoff %1").arg(units::altText(settings_.takeoff_alt).remove(QLatin1Char(' ')));
-            spec.icon = mission ? DockIcon::Launch : DockIcon::Takeoff;
+            spec.label = QStringLiteral("Takeoff");
+            spec.icon = DockIcon::Launch;
             spec.hold_to_confirm = true;
             spec.hint = mission ? QStringLiteral("Hold: vertical takeoff, straight transition, then the plan")
                                 : QStringLiteral("Hold: vertical takeoff, straight transition, then Hold");
@@ -2127,16 +2233,16 @@ void MainWindow::refreshDock() {
         spec.accent = kGreen;
         spec.hold_to_confirm = true;
         spec.active = land_pending_ || (seq >= 0 && s_.custom_mode == plane::AUTO && s_.mission_current >= seq);
-        const bool has_l = s_.mission_known && extractPlan(s_.mission).land.has_value();
+        const bool has_l = !landsAtHome(s_.mission_known ? extractPlan(s_.mission) : MissionPlan{});
         spec.hint = has_l ? QStringLiteral("Hold: circle down beside L on the wing, leave into the wind, land vertically")
                           : QStringLiteral("Hold: no landing point, so it lands at home: circle down on the wing, "
                                            "leave into the wind, land vertically");
         if (!alive) {
             spec.enabled = false;
             spec.reason = no_link;
-        } else if (!s_.mission_known || extractPlan(s_.mission).wps.empty() || !s_.has_home) {
+        } else if (!s_.has_home) {
             spec.enabled = false;
-            spec.reason = QStringLiteral("No mission on the vehicle (Plan → upload)");
+            spec.reason = QStringLiteral("Vehicle has no home position yet");
         } else if (!airborne) {
             spec.enabled = false;
             spec.reason = QStringLiteral("Not flying");
@@ -2210,6 +2316,7 @@ void MainWindow::onLongPressed(int slot) {
         fx_->toast(QStringLiteral("No vehicle link"), kMuted, QStringLiteral("Locked"));
         return;
     }
+    adopt_on_download_ = true;
     client_->downloadMission();
     dock_->setProgress(kPlan, 0.0);
     fx_->toast(QStringLiteral("Downloading mission from vehicle"), kCyan, QStringLiteral("Plan"));
@@ -2220,8 +2327,18 @@ void MainWindow::onLongPressed(int slot) {
 void MainWindow::enterPlan() {
     setGuide(false);
     planning_ = true;
+    // the plan on the vehicle (masked to nothing when it isn't ours), named as synced
     MissionPlan plan = s_.mission_known ? extractPlan(s_.mission) : MissionPlan{};
     fillHoldTimes(plan);  // an own-radius hold comes back as turns: the time as set
+    if (plan.wps.empty() && plan.land && landsAtHome(plan)) {
+        plan.land.reset();  // the no-plan mission: its landing is home's, not a planned L
+    }
+    editor_name_ = active_name_;
+    editor_id_ = active_id_;
+    editor_saved_ = active_id_.isEmpty() ? std::nullopt : library_.load(active_id_);
+    if (!editor_saved_) {
+        editor_id_.clear();  // deleted meanwhile
+    }
     map_->setPlan(plan);
     map_->setMode(MapView::Mode::Plan);
     if (host_->mainView() != map_) {
@@ -2235,6 +2352,7 @@ void MainWindow::enterPlan() {
 
 void MainWindow::exitPlan() {
     planning_ = false;
+    showLibrary(false);
     map_->setMode(guiding_ ? MapView::Mode::Guide : MapView::Mode::Normal);
     strip_->hide();
     fx_->setTopInset(barBottom());
@@ -2247,6 +2365,7 @@ void MainWindow::refreshPlanStrip() {
     const double route = routeLength(plan);
     strip_->setInfo(static_cast<int>(plan.wps.size()), route, route / std::max(1.0, settings_.cruise_speed),
                     plan.land.has_value(), map_->canUndo(), plan.pattern);
+    refreshPlanName();
     strip_->move((width() - strip_->width()) / 2, barBottom() + 6);
     // keep toasts / alerts clear of the strip's buttons
     fx_->setTopInset(strip_->isVisible() ? strip_->geometry().bottom() + 4 : barBottom());
@@ -2310,6 +2429,239 @@ MissionPlan MainWindow::withLanding(MissionPlan plan) const {
     return plan;
 }
 
+bool MainWindow::landsAtHome(const MissionPlan& plan) const {
+    return !plan.land || (s_.has_home && geo::distance(plan.land->lat, plan.land->lon, s_.home_lat, s_.home_lon) < 30.0);
+}
+
+bool MainWindow::vehicleMissionOurs() const {
+    return s_.mission_known && raw_mission_.size() > 1 && sameMission(raw_mission_, last_uploaded_);
+}
+
+void MainWindow::uploadNoPlanMission() {
+    const MissionPlan plan = withLanding(MissionPlan{});
+    if (!plan.land) {
+        return;
+    }
+    const LandingApproach appr = approachFor(plan, isAirborne(s_) ? s_.lat : s_.home_lat,
+                                             isAirborne(s_) ? s_.lon : s_.home_lon);
+    auto items = buildLoopMission(s_.home_lat, s_.home_lon, s_.home_alt_amsl, plan, settings_.takeoff_alt, &appr);
+    uploading_ = true;
+    approach_wind_ = s_.has_wind ? std::optional<double>(s_.wind_from_deg) : std::nullopt;
+    dock_->setProgress(kPlan, 0.0);
+    client_->uploadMission(std::move(items));
+    active_name_.clear();
+    active_id_.clear();
+    fx_->toast(QStringLiteral("No plan: putting a landing at home on board first"), kAmber, QStringLiteral("Plan"));
+}
+
+// ---- the plan library -------------------------------------------------------------
+
+namespace {
+// The same plan as far as the operator is concerned: a plan read back from
+// the vehicle has its points in 1e-7 degrees and float altitudes.
+bool nearlySamePlan(const MissionPlan& p, const MissionPlan& q) {
+    auto near = [](const UserWaypoint& a, const UserWaypoint& b) {
+        return std::abs(a.lat - b.lat) < 2e-7 && std::abs(a.lon - b.lon) < 2e-7 &&
+               std::abs(a.alt_rel - b.alt_rel) < 0.05f && std::abs(a.hold_s - b.hold_s) < 0.5f &&
+               std::abs(a.loiter_radius - b.loiter_radius) < 0.5f && a.loiter_ccw == b.loiter_ccw;
+    };
+    if (p.wps.size() != q.wps.size() || p.land.has_value() != q.land.has_value() ||
+        (p.wps.size() > 1 && p.pattern != q.pattern) || std::abs(p.hold_radius - q.hold_radius) > 0.5f ||
+        p.hold_ccw != q.hold_ccw) {
+        return false;
+    }
+    for (size_t i = 0; i < p.wps.size(); ++i) {
+        if (!near(p.wps[i], q.wps[i])) {
+            return false;
+        }
+    }
+    return !p.land || near(*p.land, *q.land);
+}
+}  // namespace
+
+bool MainWindow::editorEdited() const {
+    return editor_saved_ ? !nearlySamePlan(map_->plan(), *editor_saved_) : !map_->plan().empty();
+}
+
+void MainWindow::refreshPlanName() {
+    const bool empty = map_->plan().empty();
+    const bool edited = editor_id_.isEmpty() ? !empty || !editor_name_.isEmpty() : editorEdited();
+    strip_->setName(editor_name_, !editor_id_.isEmpty(), edited && !(empty && editor_name_.isEmpty()), empty);
+    if (library_panel_->isVisible()) {
+        PlanLibraryPanel::EditorInfo info;
+        info.name = editor_name_;
+        info.id = editor_id_;
+        info.empty = empty;
+        info.edited = edited;
+        library_panel_->setEntries(library_.list(), info);
+        library_panel_->place(QRect(0, strip_->geometry().bottom() + 8, width() - 8,
+                                    dock_->geometry().top() - 8 - (strip_->geometry().bottom() + 8)));
+        fx_->setRightInset(library_panel_->width() + 16.0);  // toasts beside it, not over it
+    }
+}
+
+void MainWindow::showLibrary(bool on) {
+    if (!on || !planning_) {
+        if (library_panel_->isVisible()) {
+            library_panel_->hide();
+            fx_->setRightInset(0.0);
+        }
+        return;
+    }
+    map_->select(MapView::kNone);  // the point panel would sit under the list
+    library_panel_->show();
+    library_panel_->raise();
+    refreshPlanName();
+    if (pad_) {
+        pad_->raise();
+    }
+}
+
+QString MainWindow::defaultPlanName() const {
+    return QStringLiteral("Plan %1").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm")));
+}
+
+void MainWindow::savePlan(bool ask_name) {
+    if (map_->plan().empty()) {
+        return;
+    }
+    if (!ask_name && !editor_id_.isEmpty()) {
+        saveEditorAs(editor_id_, editor_name_);
+        return;
+    }
+    const QString initial = editor_name_.isEmpty() ? defaultPlanName() : editor_name_;
+    pad_->openText(
+        QStringLiteral("SAVE PLAN AS · NAME"), initial, PlanLibrary::kMaxName,
+        [this](const QString& name) {
+            const QString id = library_.findByName(name);
+            if (!id.isEmpty() && id != editor_id_) {
+                return QStringLiteral("<span style='color:#ffb547'>replaces the saved plan “%1”</span>")
+                    .arg(library_.entry(id) ? library_.entry(id)->name.toHtmlEscaped() : name.toHtmlEscaped());
+            }
+            return QStringLiteral("saved on this computer");
+        },
+        [this](const QString& name) {
+            const QString id = library_.findByName(name);
+            if (!id.isEmpty() && id != editor_id_) {
+                library_panel_->ask(QStringLiteral("Replace “%1”?").arg(name),
+                                    QStringLiteral("A saved plan has this name. Its route is replaced by this one."),
+                                    QStringLiteral("REPLACE"), kAmber, [this, id, name] { saveEditorAs(id, name); });
+                showLibrary(true);
+                return;
+            }
+            saveEditorAs(id, name);  // id: this plan's own file under the same name, else a new one
+        });
+}
+
+void MainWindow::saveEditorAs(const QString& id, const QString& name) {
+    const MissionPlan plan = map_->plan();
+    const QString saved = library_.save(id, name, plan);
+    if (saved.isEmpty()) {
+        fx_->toast(QStringLiteral("Couldn't save the plan in %1").arg(QDir::toNativeSeparators(library_.folder())), kRed,
+                   QStringLiteral("Plan"));
+        return;
+    }
+    // is this what the vehicle flies? then the vehicle's plan has this name now
+    MissionPlan on_board = vehicleMissionOurs() ? extractPlan(raw_mission_) : MissionPlan{};
+    fillHoldTimes(on_board);
+    if (!plan.land && landsAtHome(on_board)) {
+        on_board.land.reset();  // the landing at home that every upload adds
+    }
+    const QString old_id = editor_id_;
+    editor_id_ = saved;
+    editor_name_ = PlanLibrary::cleanName(name);
+    editor_saved_ = plan;
+    if (!on_board.wps.empty() && nearlySamePlan(plan, on_board)) {
+        active_id_ = editor_id_;
+        active_name_ = editor_name_;
+    } else if (!old_id.isEmpty() && active_id_ == old_id && old_id == saved) {
+        active_name_ = editor_name_;
+    }
+    refreshPlanName();
+    fx_->toast(QStringLiteral("Saved “%1”").arg(editor_name_), kGreen, QStringLiteral("Plan"));
+}
+
+void MainWindow::openSavedPlan(const QString& id) {
+    const auto plan = library_.load(id);
+    const auto entry = library_.entry(id);
+    if (!plan || !entry) {
+        fx_->toast(QStringLiteral("Couldn't read that plan"), kRed, QStringLiteral("Plan"));
+        refreshPlanName();
+        return;
+    }
+    editor_id_ = id;
+    editor_name_ = entry->name;
+    editor_saved_ = *plan;
+    map_->setPlan(*plan);
+    showLibrary(false);
+    fx_->toast(QStringLiteral("Opened “%1” · Sync sends it to the vehicle").arg(entry->name), kCyan,
+               QStringLiteral("Plan"));
+}
+
+void MainWindow::renameSavedPlan(const QString& id) {
+    const auto entry = library_.entry(id);
+    if (!entry) {
+        return;
+    }
+    pad_->openText(
+        QStringLiteral("RENAME PLAN"), entry->name, PlanLibrary::kMaxName,
+        [this, id](const QString& name) {
+            const QString other = library_.findByName(name);
+            return !other.isEmpty() && other != id
+                       ? QStringLiteral("<span style='color:#ff4d5e'>another plan has this name</span>")
+                       : QString();
+        },
+        [this, id](const QString& name) {
+            const QString other = library_.findByName(name);
+            if (!other.isEmpty() && other != id) {
+                fx_->toast(QStringLiteral("Another plan is called “%1”").arg(name), kRed, QStringLiteral("Plan"));
+                return;
+            }
+            if (!library_.rename(id, name)) {
+                fx_->toast(QStringLiteral("Couldn't rename the plan"), kRed, QStringLiteral("Plan"));
+                return;
+            }
+            const QString clean = PlanLibrary::cleanName(name);
+            if (editor_id_ == id) {
+                editor_name_ = clean;
+            }
+            if (active_id_ == id) {
+                active_name_ = clean;
+            }
+            refreshPlanName();
+        });
+}
+
+void MainWindow::deleteSavedPlan(const QString& id) {
+    const auto entry = library_.entry(id);
+    if (!library_.remove(id)) {
+        fx_->toast(QStringLiteral("Couldn't delete the plan"), kRed, QStringLiteral("Plan"));
+        return;
+    }
+    if (editor_id_ == id) {
+        // still in the editor (and maybe on the vehicle), just not saved any more
+        editor_id_.clear();
+        editor_saved_.reset();
+    }
+    if (active_id_ == id) {
+        active_id_.clear();
+    }
+    refreshPlanName();
+    fx_->toast(QStringLiteral("Deleted “%1”").arg(entry ? entry->name : QString()), kMuted, QStringLiteral("Plan"));
+}
+
+void MainWindow::clearEditorToNoPlan() {
+    MissionPlan none;
+    none.pattern = map_->plan().pattern;
+    editor_id_.clear();
+    editor_name_.clear();
+    editor_saved_.reset();
+    map_->setPlan(none);
+    showLibrary(false);
+    fx_->toast(QStringLiteral("No plan · Sync to fly without one (Land and failsafes land at home)"), kCyan,
+               QStringLiteral("Plan"));
+}
+
 LandingApproach MainWindow::approachFor(const MissionPlan& plan, double from_lat, double from_lon) const {
     ApproachInputs in;
     in.from_lat = from_lat;
@@ -2324,17 +2676,28 @@ LandingApproach MainWindow::approachFor(const MissionPlan& plan, double from_lat
 }
 
 void MainWindow::syncPlan() {
-    if (map_->plan().wps.empty() || !s_.has_home) {
+    if (!s_.has_home) {
         return;
     }
     const bool had_land = map_->plan().land.has_value();
     const MissionPlan plan = withLanding(map_->plan());
+    if (!plan.land) {
+        return;
+    }
+    if (plan.wps.empty() && s_.custom_mode == plane::AUTO && isAirborne(s_)) {
+        // no route to stay on: AUTO would carry on into the landing items. Circle here.
+        hold();
+    }
     // provisional approach (from the loop's side, current wind); it is
     // refreshed in flight when the wind turns, and Land recomputes it
-    double from_lat = 0.0, from_lon = 0.0;
-    for (const auto& wp : plan.wps) {
-        from_lat += wp.lat / plan.wps.size();
-        from_lon += wp.lon / plan.wps.size();
+    double from_lat = isAirborne(s_) ? s_.lat : s_.home_lat;
+    double from_lon = isAirborne(s_) ? s_.lon : s_.home_lon;
+    if (!plan.wps.empty()) {
+        from_lat = from_lon = 0.0;
+        for (const auto& wp : plan.wps) {
+            from_lat += wp.lat / plan.wps.size();
+            from_lon += wp.lon / plan.wps.size();
+        }
     }
     const LandingApproach appr = approachFor(plan, from_lat, from_lon);
     auto items = buildLoopMission(s_.home_lat, s_.home_lon, s_.home_alt_amsl, plan, settings_.takeoff_alt, &appr);
@@ -2342,10 +2705,15 @@ void MainWindow::syncPlan() {
     uploading_ = true;
     // flying the plan: switch to the new one as soon as it is on board
     // (ArduPlane would otherwise finish the leg it has in memory)
-    rejoin_after_upload_ = flyingThePlan();
+    rejoin_after_upload_ = flyingThePlan() && !plan.wps.empty();
+    sync_upload_ = true;
     approach_wind_ = s_.has_wind ? std::optional<double>(s_.wind_from_deg) : std::nullopt;
     dock_->setProgress(kPlan, 0.0);
     client_->uploadMission(std::move(items));
+    if (plan.wps.empty()) {
+        fx_->toast(QStringLiteral("Uploading no plan · Land and failsafes land at home"), kAmber, QStringLiteral("Plan"));
+        return;
+    }
     const QString route = plan.wps.size() < 2                      ? QStringLiteral("circle at %1 waypoint")
                           : plan.pattern == Pattern::BackForth ? QStringLiteral("back-and-forth of %1 waypoints")
                           : plan.pattern == Pattern::OneWay    ? QStringLiteral("one-way route of %1 waypoints, then hold")
@@ -2374,7 +2742,7 @@ void MainWindow::refreshApproachForWind(qint64 now_ms) {
         return;
     }
     const MissionPlan plan = withLanding(extractPlan(s_.mission));
-    if (plan.wps.empty() || !plan.land) {
+    if (!plan.land) {
         return;
     }
     const LandingApproach appr = approachFor(plan, s_.lat, s_.lon);
@@ -2697,12 +3065,31 @@ void MainWindow::launchOrAuto() {
     // straight climb-out leg (into the wind) for the transition, and only once
     // the aircraft is wing-borne does it turn to the plan (or Hold). An AUTO
     // takeoff would start turning toward WP1 during the transition.
-    std::vector<link::CommandRequest> steps;
-    if (hasFlyableMission(s_)) {
-        // the mission is left on its takeoff item, so a later AUTO doesn't
-        // resume a finished landing ("In landing sequence")
-        steps.push_back(link::makeSetMissionCurrent(1, true));
+    // Land and the failsafes need a landing on board: with no plan (or an old
+    // mission from an earlier session) the landing-at-home mission goes up first
+    if (launch_pending_) {
+        return;  // its mission is on the way up
     }
+    bool stale = !vehicleMissionOurs();
+    if (!stale && extractPlan(s_.mission).wps.empty()) {
+        const MissionPlan on_board = extractPlan(s_.mission);
+        stale = !on_board.land ||
+                geo::distance(on_board.land->lat, on_board.land->lon, s_.home_lat, s_.home_lon) > 50.0;  // home moved
+    }
+    if (stale) {
+        launch_pending_ = true;
+        uploadNoPlanMission();
+        dock_->setPending(kLaunch, true);
+        return;
+    }
+    launchNow();
+}
+
+void MainWindow::launchNow() {
+    std::vector<link::CommandRequest> steps;
+    // the mission is left on its takeoff item, so a later AUTO doesn't
+    // resume a finished landing ("In landing sequence")
+    steps.push_back(link::makeSetMissionCurrent(1, true));
     steps.push_back(link::makeSetMode(plane::GUIDED, "GUIDED"));
     steps.push_back(link::makeArm(true));
     steps.push_back(link::makeVtolTakeoff(settings_.takeoff_alt));
@@ -2741,7 +3128,7 @@ void MainWindow::hold() {
 }
 
 void MainWindow::land() {
-    if (!s_.mission_known || !s_.has_home || extractPlan(s_.mission).wps.empty()) {
+    if (!s_.has_home) {
         return;
     }
     takeoff_handoff_ = false;
@@ -2752,8 +3139,9 @@ void MainWindow::land() {
 void MainWindow::startLandingApproach() {
     // circle here while the approach is recomputed with the current wind and
     // uploaded; the jump into it happens on MissionUploaded. No L: home.
-    const MissionPlan plan = withLanding(extractPlan(s_.mission));
-    if (!plan.land || plan.wps.empty()) {
+    // the plan on board (none: just the landing at home)
+    const MissionPlan plan = withLanding(s_.mission_known ? extractPlan(s_.mission) : MissionPlan{});
+    if (!plan.land) {
         return;
     }
     hold();
@@ -2764,7 +3152,7 @@ void MainWindow::startLandingApproach() {
     approach_wind_ = s_.has_wind ? std::optional<double>(s_.wind_from_deg) : std::nullopt;
     client_->uploadMission(std::move(items));
     dock_->setPending(kLand, true);
-    const QString where = extractPlan(s_.mission).land ? QStringLiteral("Landing") : QStringLiteral("Landing at home");
+    const QString where = landsAtHome(plan) ? QStringLiteral("Landing at home") : QStringLiteral("Landing");
     fx_->banner(s_.has_wind && s_.wind_speed >= kMinWindForApproach
                     ? QStringLiteral("%1 · into wind %2°").arg(where).arg(appr.heading_deg, 0, 'f', 0)
                     : QStringLiteral("%1 · approach %2°").arg(where).arg(appr.heading_deg, 0, 'f', 0),
@@ -2879,6 +3267,15 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* e) {
             const QRectF chip = camera_->hudChipRect().translated(camera_->mapTo(this, QPoint(0, 0)));
             if (!hud_panel_->geometry().contains(local) && !chip.contains(local) && !bar_->geometry().contains(local)) {
                 showHudPanel(false);
+                return !dock_->geometry().contains(local);
+            }
+        }
+        // the PLANS panel: a tap outside closes it (the plan strip is left
+        // alone: its PLANS button toggles the panel, its other buttons work)
+        if (library_panel_->isVisible()) {
+            const QPoint local = mapFromGlobal(global).toPoint();
+            if (!library_panel_->geometry().contains(local) && !strip_->geometry().contains(local)) {
+                showLibrary(false);
                 return !dock_->geometry().contains(local);
             }
         }

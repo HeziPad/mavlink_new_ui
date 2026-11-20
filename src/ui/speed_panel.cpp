@@ -89,6 +89,10 @@ SpeedPanel::SpeedPanel(QWidget* parent) : QWidget(parent) {
     explain_->setWordWrap(true);
     explain_->setMinimumWidth(420);
     v->addWidget(explain_);
+    descent_ = new QLabel;
+    descent_->setObjectName(QStringLiteral("spExplain"));
+    descent_->setWordWrap(true);
+    v->addWidget(descent_);
     active_ = new QLabel;
     active_->setObjectName(QStringLiteral("spActive"));
     v->addWidget(active_);
@@ -113,13 +117,20 @@ void SpeedPanel::setValues(double loiter, double cruise, double max, int mode, c
         modes_[i]->setChecked(i == mode);
     }
     static const char* explain[] = {
-        ("Circling: LOITER (longest endurance). Between points: CRUISE. Long descents: MAX (gravity pays). "
-         "Landing: CRUISE."),
-        "CRUISE everywhere (ArduPilot's own behaviour).",
-        "Between points and on descents: MAX. Circling and landing: CRUISE. Shortens the battery time left."};
+        "Saves battery. Flies gently and makes the most of the wind, for the longest flight time and range.",
+        "Balanced. Flies at the aircraft's usual cruising speed.",
+        "Gets there sooner. Flies at full speed between points; the battery runs down faster."};
     explain_->setText(QString::fromLatin1(explain[std::clamp(mode, 0, 2)]));
     active_->setText(active.isEmpty() ? QStringLiteral("now: autopilot default")
                                       : QStringLiteral("now: %1").arg(active));
+    adjustSize();
+}
+
+void SpeedPanel::setDescent(double airspeed, bool learned) {
+    descent_->setText(airspeed > 0 && learned
+                          ? QStringLiteral("Descent speed learned from your flights: %1").arg(units::speedText(airspeed))
+                          : QString());
+    descent_->setVisible(!descent_->text().isEmpty());
     adjustSize();
 }
 

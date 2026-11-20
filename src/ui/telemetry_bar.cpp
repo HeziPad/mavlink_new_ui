@@ -429,7 +429,7 @@ void TelemetryBar::paintEvent(QPaintEvent*) {
         if (speed_airborne_) {
             const auto t = static_cast<speed::Target>(speed_target_);
             word = t == speed::Target::Default ? QStringLiteral("CRUISE")
-                                                : QString::fromLatin1(speed::targetName(t));
+                                                : QString::fromUtf8(speed::targetName(t));
             wc = t == speed::Target::Max ? kAmber : kText;
         }
         drawText(p, QRectF(r.left(), r.top() + 19, r.width(), 24), Qt::AlignHCenter | Qt::AlignVCenter, word,

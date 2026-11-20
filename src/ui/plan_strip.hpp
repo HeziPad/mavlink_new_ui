@@ -22,6 +22,9 @@ public:
     // route_m / route_s: one cycle of the pattern (see routeLength)
     void setInfo(int waypoints, double route_m, double route_s, bool has_land, bool can_undo, Pattern pattern);
     void setLandingTool(bool on);  // reflects MapView's add tool
+    // the plan being edited: its name (empty = none yet), whether it is saved
+    // in the library, differs from that copy, and whether there is anything in it
+    void setName(const QString& name, bool saved, bool edited, bool empty);
     void applyScale();             // text size changed (theme::uiScale)
 
 signals:
@@ -30,6 +33,7 @@ signals:
     void undoRequested();
     void addByCoordRequested(bool landing);  // type a position for a new waypoint (or L)
     void clearRequested();
+    void libraryRequested();  // ☰ PLANS: the saved plans
     void cancelRequested();
 
 protected:
@@ -37,6 +41,8 @@ protected:
 
 private:
     void fit();  // resize to the laid-out contents
+    QLabel* name_;
+    QPushButton* library_;
     QLabel* info_;
     QLabel* warn_;
     QPushButton* wp_tool_;

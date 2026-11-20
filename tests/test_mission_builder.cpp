@@ -173,6 +173,10 @@ static void testDerivedState() {
     s.mission.resize(1);
     CHECK(!hasFlyableMission(s));
     s.mission.resize(4);
+    CHECK(!hasFlyableMission(s));  // no located route point
+    MissionPlan route;
+    route.wps = {{47.0, 8.0, 80.0f}, {47.001, 8.0, 80.0f}};
+    s.mission = buildLoopMission(47.0, 8.0, 400.0, route);
     CHECK(hasFlyableMission(s));
 }
 
@@ -474,7 +478,70 @@ static void testPatterns() {
     CHECK_NEAR(routeLength(p), 4 * 111.2, 1.5);
 }
 
+// No plan: a landing-only mission (Land and failsafes land at home)
+static void testHomeLandingOnly() {
+    MissionPlan plan;
+    CHECK(buildLoopMission(-35.363, 149.165, 584.0, plan, 40.0f, nullptr).empty());
+    plan.land = UserWaypoint{-35.363, 149.165, 30.0f};
+    ApproachInputs in;
+    in.from_lat = -35.363;
+    in.from_lon = 149.165;
+    const LandingApproach appr = computeLandingApproach(*plan.land, in);
+    CHECK(buildLoopMission(-35.363, 149.165, 584.0, plan, 40.0f, nullptr).empty());  // no approach: nothing
+    const auto items = buildLoopMission(-35.363, 149.165, 584.0, plan, 40.0f, &appr);
+    CHECK(items.size() == 5);
+    if (items.size() == 5) {
+        CHECK(items[1].command == mav::kCmdNavVtolTakeoff);
+        CHECK(items[2].command == mav::kCmdDoLandStart);
+        CHECK(items[3].command == mav::kCmdNavLoiterToAlt);
+        CHECK(items[4].command == mav::kCmdNavVtolLand);
+        CHECK(items[4].seq == 4);
+    }
+    CHECK(landSeq(items) == 3);
+    const MissionPlan back = extractPlan(items);
+    CHECK(back.wps.empty());
+    CHECK(back.land.has_value());
+    if (back.land) {
+        CHECK_NEAR(back.land->lat, -35.363, 1e-6);
+    }
+    CHECK(nearestLoopSeq(items, -35.363, 149.165, 50.0) == -1);
+
+    VehicleState s;
+    s.mission_known = true;
+    s.mission = items;
+    CHECK(!hasFlyableMission(s));  // nothing to fly: Takeoff, not Launch; no Resume Plan
+}
+
+static void testSameMission() {
+    MissionPlan plan;
+    plan.wps = {{-35.36, 149.16, 80.0f}, {-35.35, 149.17, 95.0f}};
+    const auto a = buildLoopMission(-35.363, 149.165, 584.0, plan);
+    auto b = a;
+    CHECK(sameMission(a, b));
+    b[0].z = 590.0f;  // the vehicle rewrites home
+    b[0].x += 10;
+    CHECK(sameMission(a, b));
+    b[2].param1 = 30.0f;
+    CHECK(!sameMission(a, b));
+    b = a;
+    b.pop_back();
+    CHECK(!sameMission(a, b));
+    CHECK(sameMission({}, {}));
+
+    MissionPlan q = plan;
+    CHECK(q == plan);
+    q.wps[1].hold_turns = 5;  // derived: not an edit
+    CHECK(q == plan);
+    q.wps[1].hold_s = 30.0f;
+    CHECK(q != plan);
+    q = plan;
+    q.land = UserWaypoint{-35.36, 149.16, 30.0f};
+    CHECK(q != plan);
+}
+
 int main() {
+    testHomeLandingOnly();
+    testSameMission();
     testPatterns();
     testNearestLoopSeq();
     testLandingInMission();

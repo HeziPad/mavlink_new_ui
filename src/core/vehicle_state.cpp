@@ -60,8 +60,8 @@ bool isAirborne(const VehicleState& s) {
 }
 
 bool hasFlyableMission(const VehicleState& s) {
-    // index 0 is home; anything beyond it is something to fly
-    return s.mission_known && s.mission.size() > 1;
+    // a route to fly: a landing-only mission (no plan) is not one
+    return s.mission_known && s.mission.size() > 1 && !extractPlan(s.mission).wps.empty();
 }
 
 SafetyState safetyState(const VehicleState& s) {

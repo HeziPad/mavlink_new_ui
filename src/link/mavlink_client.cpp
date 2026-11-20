@@ -975,6 +975,12 @@ void MavlinkClient::requestParams(Clock::time_point now) {
     if (state_.trans_decel < 0) {
         request("Q_TRANS_DECEL");
     }
+    if (state_.sink_max < 0) {
+        request("TECS_SINK_MAX");
+    }
+    if (state_.thr_min_pct < -100) {
+        request("THR_MIN");
+    }
     if (state_.loiter_radius < 0) {
         request("WP_LOITER_RAD");
     }
@@ -1043,6 +1049,14 @@ void MavlinkClient::handleParamValue(const mavlink_message_t& msg) {
     }
     if (name == "Q_TRANS_DECEL") {
         state_.trans_decel = p.param_value;
+        return;
+    }
+    if (name == "TECS_SINK_MAX") {
+        state_.sink_max = p.param_value;
+        return;
+    }
+    if (name == "THR_MIN") {
+        state_.thr_min_pct = p.param_value;
         return;
     }
     if (name == "WP_LOITER_RAD") {

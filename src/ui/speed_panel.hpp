@@ -19,6 +19,8 @@ public:
 
     // < 0: unknown (not read yet)
     // loiter_flown: what is actually commanded when circling (kept above Q_ASSIST_SPEED)
+    // the descent speed: learned in flight (DescentTuner), or the starting value
+    void setDescent(double airspeed, bool learned);
     void applyScale();  // text size changed (theme::uiScale)
     void setValues(double loiter, double cruise, double max, int mode, const QString& active, double loiter_flown,
                    double q_assist);
@@ -35,6 +37,7 @@ private:
     QLabel* cruise_;
     QLabel* max_;
     QLabel* explain_;
+    QLabel* descent_ = nullptr;
     QLabel* active_;
     QPushButton* modes_[3];
 };
