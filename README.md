@@ -288,6 +288,12 @@ box under WIND (air and ground speed). The ATTITUDE, WIND and SPEED boxes fold
 together: tap any of them (folded, SPEED shows the airspeed alone). The SPEED
 chip carries a small ▾, like the ALT chip's cycle mark: tap it for the speed mode.
 
+**Green on the map is where the aircraft is going now**, one target at a time:
+the current waypoint in AUTO, the Hold / Fly To circle, or L and its approach
+while landing. The route dims while the aircraft isn't flying it (Hold, Fly To,
+landing). Home is
+white, the route and an idle L cyan, the plan being edited amber.
+
 The map's **nav box** (bottom right) shows only the aircraft's coordinates and
 its height above the ground (AGL; where it is going is on the FLIGHT MODE and
 ETA chips), and, under a mouse cursor, the cursor's coordinates, ground height,

@@ -114,6 +114,10 @@ Settings → DISPLAY → TEXT SIZE scales the UI by `theme::uiScale()` (1 / 1.25
 
 What the video overlay draws is a `core/hud_config` `hud::Config`: which elements are shown, the crosshair, line width, colour, which side boxes are folded, and the measuring brackets as angles. Presets are CLEAN / CUSTOM / FULL: `cfg.preset` is the lit one and `custom_show` / `custom_collapsed` hold the operator's CUSTOM mix, so change them only through `applyPreset` / `editShown` / `editCollapsed`. It is stored as `camera/hud` (`hud::encode` v2, millidegrees, no locale-dependent decimals); `decode` migrates v1 strings (no preset, a RULER REF bit at 11). What the rulers follow (LOS / BODY) is not in the config: it is `camera/hud_reference`, switched in `HudPanel` (`rulerRefChanged`); there is no chip on the video. `HudPanel` edits it live. `CameraView` draws from it, and reports box folds and bracket drags with `hudConfigChanged`. Every HUD pen goes through `lw()` and every HUD colour through `hudColor()`. Amber and red stay semantic. The measuring maths is `geo::pixelAngleDeg` / `anglePixels` / `sizeAtRange` on the picture's own width (`pictureRect()`, the letterboxed video), and the range is `LosTarget.slant`.
 
+## Map colours
+
+Green means the aircraft's current target and nothing else: the mission's current item only in AUTO (L / approach once landing), the GUIDED Hold / Fly To circle. The route dims (0.45) while airborne and not flying it. Home is white (`kText`), the vehicle route and an idle L / approach cyan, the plan being edited amber, cautions amber / red. A new map item that isn't the target shouldn't be green. (The camera footprint is the one exception, by choice.)
+
 ## UI motion
 
 Telemetry arrives at 10–25 Hz. Don't draw the latest sample through a fast exponential tween: it arrives in about 60 ms and then sits still, which looks like a staircase. `MainWindow::frame` pulls every frame and calls `predictAttitude` / `predictPosition` (last sample + rate × age, capped), then views apply light smoothing on top.

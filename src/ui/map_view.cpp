@@ -4,6 +4,7 @@
 #include "elevation_cache.hpp"
 #include "wind_gauge.hpp"
 #include "core/geo.hpp"
+#include "core/plane_modes.hpp"
 #include "theme.hpp"
 #include "tile_cache.hpp"
 #include "units.hpp"
@@ -1066,17 +1067,24 @@ void MapView::paintEvent(QPaintEvent*) {
         p.setPen(Qt::NoPen);
         p.setBrush(alpha(kBg, 0.8));
         p.drawPath(hex);
-        drawGlowPath(p, hex, kGreen, 1.5, 5);
-        drawText(p, QRectF(-10, -10, 20, 20), Qt::AlignCenter, QStringLiteral("H"), monoFont(12, true), kGreen);
+        // white: a landmark. Green on the map is only where the aircraft is going
+        drawGlowPath(p, hex, kText, 1.5, 5);
+        drawText(p, QRectF(-10, -10, 20, 20), Qt::AlignCenter, QStringLiteral("H"), monoFont(12, true), kText);
         p.restore();
     }
 
     // routes: the vehicle's mission underneath, the plan being edited on top
+    // Green is where the aircraft is going now, one target at a time: in AUTO
+    // the mission's current item (L once landing); otherwise (Hold / Fly To:
+    // the green circle) no waypoint is.
     const int land_seq = s_.mission_known ? landSeq(s_.mission) : -1;
-    int active = s_.mission_known ? seqToWaypointIndex(s_.mission, s_.mission_current) : kNone;
-    if (land_seq >= 0 && s_.mission_current == land_seq) {
-        active = kLandId;
+    int active = kNone;
+    if (s_.custom_mode == plane::AUTO && s_.mission_known) {
+        active = land_seq >= 0 && s_.mission_current >= land_seq ? kLandId
+                                                                 : seqToWaypointIndex(s_.mission, s_.mission_current);
     }
+    // the route dims while the aircraft isn't flying it (Hold / Fly To, landing)
+    const bool route_paused = (active == kNone || active == kLandId) && isAirborne(s_);
     if (mode_ == Mode::Plan) {
         if (!vehicle_plan_.empty()) {
             p.setOpacity(0.35);
@@ -1085,7 +1093,21 @@ void MapView::paintEvent(QPaintEvent*) {
         }
         paintRoute(p, plan_, kAmber, true, kNone);
     } else if (!vehicle_plan_.empty()) {
-        paintRoute(p, vehicle_plan_, kCyan, false, active);
+        if (route_paused && active == kLandId && vehicle_plan_.land) {
+            // landing: the route dimmed, L (the target) at full strength
+            MissionPlan route = vehicle_plan_;
+            route.land.reset();
+            MissionPlan land_only;
+            land_only.land = vehicle_plan_.land;
+            p.setOpacity(0.45);
+            paintRoute(p, route, kCyan, false, kNone);
+            p.setOpacity(1.0);
+            paintRoute(p, land_only, kCyan, false, active);
+        } else {
+            p.setOpacity(route_paused ? 0.45 : 1.0);
+            paintRoute(p, vehicle_plan_, kCyan, false, active);
+            p.setOpacity(1.0);
+        }
     }
 
     // trail head: the points that arrived after the backdrop was drawn
@@ -1395,7 +1417,7 @@ void MapView::paintRoute(QPainter& p, const MissionPlan& plan, const QColor& c, 
             p.drawEllipse(toScreen(wp.lat, wp.lon), 3, 3);
         }
         if (plan.land) {
-            p.setBrush(kGreen);
+            p.setBrush(active_index == kLandId ? kGreen : c);
             p.drawEllipse(toScreen(plan.land->lat, plan.land->lon), 3, 3);
         }
         return;
@@ -1473,9 +1495,9 @@ void MapView::paintRoute(QPainter& p, const MissionPlan& plan, const QColor& c, 
             k == 0 ? spiral.moveTo(q) : spiral.lineTo(q);
         }
         p.setBrush(Qt::NoBrush);
-        p.setPen(QPen(alpha(kGreen, 0.45), 1.3, Qt::DashLine));
+        p.setPen(QPen(alpha(active_index == kLandId ? kGreen : c, 0.45), 1.3, Qt::DashLine));
         p.drawPath(spiral);
-        marker(lp, kLandId, QStringLiteral("L"), kGreen,
+        marker(lp, kLandId, QStringLiteral("L"), c,
                QStringLiteral("LAND · approach %1").arg(units::altText(plan.land->alt_rel)));
     }
 }
@@ -1486,7 +1508,7 @@ void MapView::paintOrbit(QPainter& p) {
     }
     const QPointF c = toScreen(orbit_->lat, orbit_->lon);
     const double rpx = orbit_->radius / metersPerPixel();
-    const QColor col = kCyan;  // Hold and Fly To alike (amber is for caution)
+    const QColor col = kGreen;  // Hold and Fly To alike: the aircraft's target (amber is for caution)
     // line from the aircraft while it's still on its way to the circle
     if (has_ac_) {
         const QPointF a = toScreen(ac_lat_, ac_lon_);
@@ -1548,27 +1570,28 @@ void MapView::paintApproach(QPainter& p) {
     }
     const auto& a = *approach_;
     const int lseq = landSeq(s_.mission);
-    const bool active = lseq >= 0 && s_.mission_current >= lseq;
+    const bool active = s_.custom_mode == plane::AUTO && lseq >= 0 && s_.mission_current >= lseq;
     const double op = active ? 1.0 : 0.35;
+    const QColor ac = active ? kGreen : kCyan;  // the target once landing, the route's colour before
     const QPointF c = toScreen(a.c_lat, a.c_lon);
     const QPointF e = toScreen(a.e_lat, a.e_lon);
     const QPointF l = toScreen(a.l_lat, a.l_lon);
     const double rpx = a.radius / metersPerPixel();
     // descent circle beside L, the tangent exit, and the straight leg into the wind
-    QPen ring(alpha(kGreen, 0.6 * op), 1.4, Qt::DashLine);
+    QPen ring(alpha(ac, 0.6 * op), 1.4, Qt::DashLine);
     p.setPen(ring);
     p.setBrush(Qt::NoBrush);
     const QRectF view = QRectF(rect()).adjusted(-16, -16, 16, 16);
     if (circleVisible(c, rpx, view)) {
         p.drawEllipse(c, rpx, rpx);
     }
-    QPen leg(alpha(kGreen, 0.9 * op), 2.0, Qt::CustomDashLine, Qt::FlatCap);
+    QPen leg(alpha(ac, 0.9 * op), 2.0, Qt::CustomDashLine, Qt::FlatCap);
     leg.setDashPattern({5, 4});
     leg.setDashOffset(reducedMotion() ? 0.0 : -std::fmod(time_ * 14.0, 9.0));
     p.setPen(leg);
     drawLineClipped(p, e, l, view);
     p.setPen(Qt::NoPen);
-    p.setBrush(alpha(kGreen, op));
+    p.setBrush(alpha(ac, op));
     p.drawEllipse(e, 3.5, 3.5);
     // wind arrow beside L: blows toward the downwind side
     if (s_.has_wind && s_.wind_speed >= 0.5) {
