@@ -5,17 +5,25 @@ Works on any computer with Python 3 (standard library only). It writes
 exactly the folder the GCS reads (Settings -> OFFLINE -> FOLDER, default
 ~/.local/share/mavlink_gcs_ui/mavlink_gcs_ui/offline/ -- the app name twice):
 
-    map.pmtiles                          street map: OpenStreetMap vector tiles (Protomaps build, ODbL)
+    world.pmtiles                        world street map z0-6 (~45 MB): coasts, borders, main roads, cities
+    map.pmtiles                          country street map: OpenStreetMap vector tiles (Protomaps build, ODbL)
     map.build                            which daily build that is (re-running skips it while it's the latest)
+    streets/{box}.pmtiles                street map z0-15 of each full-detail area
     esri_imagery/{z}/{x}/{y}.jpg         satellite (Esri World Imagery); {y}.none = no imagery at that zoom
     elevation/{z}/{x}/{y}.png            ground height (AWS Terrain Tiles, "terrarium")
     areas.json                           the full-detail areas downloaded so far
 
-Country pack (street map z0-15 + satellite z8-14 + elevation z12):
+Country pack (world street map if missing + street map z0-15 + satellite z8-14 + elevation z12):
     tools/fetch_offline.py --country israel --out ./offline [--dry-run]
 
-Full-detail area (satellite z15-18 + elevation z13), by bounding box:
-    tools/fetch_offline.py --bbox 34.75,32.05,34.82,32.12 --out ./offline
+World street map only:
+    tools/fetch_offline.py --world --out ./offline
+
+Area (street map z0-15 + ground height + satellite as deep as --detail), by bounding box:
+    tools/fetch_offline.py --bbox 34.75,32.05,34.82,32.12 --out ./offline            # satellite to ~0.5 m/px
+    tools/fetch_offline.py --bbox 32.2,34.5,34.7,35.8 --detail 2m --out ./offline   # Cyprus, to ~2 m/px
+    (--detail: streets = no satellite, 10m = z8-14, 2m = z8-16, 1m = z8-17, 0.5m = z8-18;
+     --dry-run prints every level's size. West of 0 / south of 0: write --bbox=-98.6,...)
 
 Files already present are skipped, so runs resume and overlapping areas share
 tiles (nothing is stored twice). Copy the folder to the field computer.
@@ -49,9 +57,17 @@ PROTOMAPS = "https://build.protomaps.com/{key}"
 ESRI_NO_DATA_MD5 = "f27d9de7f80c13501f470595e327aa6d"
 COUNTRY_SAT_ZOOMS = range(8, 15)
 COUNTRY_ELEV_ZOOMS = [12]
-AREA_SAT_ZOOMS = range(15, 19)
-AREA_ELEV_ZOOMS = [13]
+# --detail: (first, last satellite zoom or None, ground height zoom); the app's OfflineDownloader::zooms
+DETAILS = {
+    "streets": (None, None, 12),
+    "10m": (8, 14, 12),
+    "2m": (8, 16, 13),
+    "1m": (8, 17, 13),
+    "0.5m": (8, 18, 13),
+}
 VECTOR_MAX_ZOOM = 15
+WORLD_MAX_ZOOM = 6
+WORLD_BBOX = (-180.0, -85.0511, 180.0, 85.0511)
 
 
 def get(url, rng=None, timeout=60):
@@ -306,6 +322,35 @@ def latest_build():
     return PROTOMAPS.format(key=builds[-1]["key"])
 
 
+def area_streets_path(out, bbox):
+    """the app's name for an area's street map (OfflineDownloader::areaStreetsPath)"""
+    return os.path.join(out, "streets", "%.4f_%.4f_%.4f_%.4f.pmtiles" % bbox)
+
+
+def fetch_vector(url, bbox, max_zoom, path, dry_run, what):
+    """cuts bbox z0..max_zoom out of the Protomaps build at url into path"""
+    print(what, "from", url)
+    remote = Remote(url)
+    prog = lambda w, i, n: print("\r%s %d/%d" % (w, i, n), end="", flush=True)
+    found = plan_vector(remote, bbox, max_zoom, prog)
+    size = sum(ln for (_, ln) in set(found.values()))
+    print("\r%s: %d tiles, %.0f MB" % (what, len(found), size / 1e6))
+    if dry_run:
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    write_pmtiles(path, remote, found, bbox, max_zoom,
+                  lambda w, i, n: print("\r%s %.0f/%.0f MB" % (w, i / 1e6, n / 1e6), end="", flush=True))
+    print("\nwrote", path)
+
+
+def fetch_world(a):
+    url = a.pmtiles or latest_build()
+    fetch_vector(url, WORLD_BBOX, WORLD_MAX_ZOOM, os.path.join(a.out, "world.pmtiles"), a.dry_run, "world street map")
+    if not a.dry_run:
+        with open(os.path.join(a.out, "world.build"), "w") as f:
+            f.write(url.rsplit("/", 1)[-1].replace(".pmtiles", ""))
+
+
 # ---- raster tiles ------------------------------------------------------------------------------
 def raster_jobs(sub, ext, zooms, bbox, out):
     jobs = []
@@ -347,8 +392,10 @@ def main():
     what = ap.add_mutually_exclusive_group(required=True)
     what.add_argument("--country", choices=sorted(COUNTRIES), help="country pack")
     what.add_argument("--bbox", help="full-detail area: min_lon,min_lat,max_lon,max_lat")
+    what.add_argument("--world", action="store_true", help="only the world street map (z0-6)")
     ap.add_argument("--out", required=True, help="the offline folder")
     ap.add_argument("--only", choices=["vector", "satellite", "elevation"], help="one part of the country pack")
+    ap.add_argument("--detail", choices=list(DETAILS), default="0.5m", help="area: how deep the satellite goes")
     ap.add_argument("--pmtiles", help="Protomaps build URL (default: the latest daily build)")
     ap.add_argument("--delay", type=float, default=0.02, help="pause between raster requests, seconds")
     ap.add_argument("--dry-run", action="store_true", help="only report what would be downloaded")
@@ -356,9 +403,15 @@ def main():
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
 
+    if a.world:
+        fetch_world(a)
+        return
+
     if a.country:
         bbox = COUNTRIES[a.country]
         parts = [a.only] if a.only else ["vector", "satellite", "elevation"]
+        if "vector" in parts and not os.path.exists(os.path.join(a.out, "world.pmtiles")):
+            fetch_world(a)  # once: it's coarse, a newer build changes nothing you'd see
         if "vector" in parts:
             url = a.pmtiles or latest_build()
             build = url.rsplit("/", 1)[-1].replace(".pmtiles", "")
@@ -368,19 +421,11 @@ def main():
                 print("street map up to date (%s)" % build)
                 parts = [p for p in parts if p != "vector"]
         if "vector" in parts:
-            print("street map from", url)
-            remote = Remote(url)
-            prog = lambda what, i, n: print("\r%s %d/%d" % (what, i, n), end="", flush=True)
-            found = plan_vector(remote, bbox, VECTOR_MAX_ZOOM, prog)
-            size = sum(ln for (_, ln) in set(found.values()))
-            print("\rstreet map: %d tiles, %.0f MB" % (len(found), size / 1e6))
+            fetch_vector(url, bbox, VECTOR_MAX_ZOOM, os.path.join(a.out, "map.pmtiles"), a.dry_run, "street map")
             if not a.dry_run:
-                write_pmtiles(os.path.join(a.out, "map.pmtiles"), remote, found, bbox, VECTOR_MAX_ZOOM,
-                              lambda what, i, n: print("\r%s %.0f/%.0f MB" % (what, i / 1e6, n / 1e6), end="",
-                                                       flush=True))
                 with open(build_file, "w") as f:
                     f.write(build)
-                print("\nwrote", os.path.join(a.out, "map.pmtiles"), "(build %s)" % build)
+                print("(build %s)" % build)
         if "satellite" in parts:
             jobs = raster_jobs("esri_imagery", "jpg", COUNTRY_SAT_ZOOMS, bbox, a.out)
             print("satellite z8-14: %d tiles to fetch (~%.0f MB)" % (len(jobs), len(jobs) * 0.02))
@@ -394,18 +439,40 @@ def main():
         return
 
     bbox = tuple(float(v) for v in a.bbox.split(","))
-    sat = raster_jobs("esri_imagery", "jpg", AREA_SAT_ZOOMS, bbox, a.out)
-    elev = raster_jobs("elevation", "png", AREA_ELEV_ZOOMS, bbox, a.out)
-    print("area: satellite z15-18 %d new tiles, elevation z13 %d new tiles (~%.0f MB)" %
-          (len(sat), len(elev), len(sat) * 0.02 + len(elev) * 0.06))
+    country = COUNTRIES["israel"]
+    inside_country = (bbox[0] >= country[0] and bbox[2] <= country[2] and bbox[1] >= country[1] and
+                      bbox[3] <= country[3] and os.path.exists(os.path.join(a.out, "map.pmtiles")))
+    streets = area_streets_path(a.out, bbox)
+    if not inside_country and not os.path.exists(streets):
+        fetch_vector(a.pmtiles or latest_build(), bbox, VECTOR_MAX_ZOOM, streets, a.dry_run, "area street map")
+    if a.dry_run:
+        for name, (s0, s1, ez) in DETAILS.items():
+            n_sat = sum(len(tiles_in(bbox, z)) for z in range(s0, s1 + 1)) if s0 else 0
+            n_elev = len(tiles_in(bbox, ez))
+            print("  %-8s %8d tiles  ~%.1f GB" % (name, n_sat + n_elev, (n_sat * 0.022 + n_elev * 0.06) / 1000))
+    s0, s1, ez = DETAILS[a.detail]
+    sat = raster_jobs("esri_imagery", "jpg", range(s0, s1 + 1), bbox, a.out) if s0 else []
+    elev = raster_jobs("elevation", "png", [ez], bbox, a.out)
+    print("area (%s): satellite %d new tiles, elevation z%d %d new tiles (~%.0f MB)" %
+          (a.detail, len(sat), ez, len(elev), len(sat) * 0.022 + len(elev) * 0.06))
     if a.dry_run:
         return
     failed = fetch_rasters(sat, SAT_URL, ESRI_NO_DATA_MD5, a.delay, "satellite")
     failed += fetch_rasters(elev, ELEV_URL, None, a.delay, "elevation")
     areas_path = os.path.join(a.out, "areas.json")
     areas = json.load(open(areas_path)) if os.path.exists(areas_path) else []
+    old = [e for e in areas if (e["min_lon"], e["min_lat"], e["max_lon"], e["max_lat"]) == bbox]
+    areas = [e for e in areas if e not in old]
+    # one entry per box, as deep as the deepest download (entries without sat_max were z15-18)
+    for e in old:
+        if "sat_max" not in e:
+            e.update(sat_min=15, sat_max=18, elev=13)
+        if e["sat_max"]:
+            s0 = min(s0, e["sat_min"]) if s0 else e["sat_min"]
+            s1 = max(s1 or 0, e["sat_max"])
+        ez = max(ez, e["elev"])
     areas.append({"min_lon": bbox[0], "min_lat": bbox[1], "max_lon": bbox[2], "max_lat": bbox[3],
-                  "date": time.strftime("%Y-%m-%d")})
+                  "sat_min": s0 or 0, "sat_max": s1 or 0, "elev": ez, "date": time.strftime("%Y-%m-%d")})
     with open(areas_path, "w") as f:
         json.dump(areas, f, indent=1)
     if failed:

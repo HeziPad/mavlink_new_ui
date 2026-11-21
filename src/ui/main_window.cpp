@@ -307,57 +307,47 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
         setGuide(false);
         if (host_->mainView() != map_) host_->swap();
         std::vector<MapView::GeoBox> boxes;
-        for (const auto& b : OfflineDownloader::areas()) boxes.push_back({b.min_lon, b.min_lat, b.max_lon, b.max_lat});
+        for (const auto& a : OfflineDownloader::areas()) {
+            boxes.push_back({a.box.min_lon, a.box.min_lat, a.box.max_lon, a.box.max_lat});
+        }
         map_->setAreas(boxes);
         map_->clearAreaSelection();
+        area_detail_ = -1;
+        map_->setAreaLevels({}, -1);
         map_->setMode(MapView::Mode::Area);
     });
-    connect(map_, &MapView::areaChanged, this, [this](MapView::GeoBox g, bool final) {
-        if (!g.max_lat && !g.min_lat) return;
-        const OfflineDownloader::Box b{g.min_lon, g.min_lat, g.max_lon, g.max_lat};
-        const QString dims = QStringLiteral("%1 × %2 km").arg(b.widthKm(), 0, 'f', 1).arg(b.heightKm(), 0, 'f', 1);
-        // the full count checks the disk for every tile: only when the finger lifts
-        const double km2 = b.widthKm() * b.heightKm();
-        const double tiles_guess = km2 * 75.0;  // z15-18 at ~31 N
-        if (tiles_guess > 90000) {
-            map_->setAreaInfo(dims + QStringLiteral(" · too big for full detail"),
-                              QStringLiteral("about %1 tiles (~%2 GB). Draw a smaller area (up to ~1000 km²), or several.")
-                                  .arg(static_cast<long long>(tiles_guess))
-                                  .arg(tiles_guess * 22000 / 1e9, 0, 'f', 1),
-                              false, true);
-            return;
-        }
-        if (!final) {
-            map_->setAreaInfo(dims, QStringLiteral("lift to count the tiles…"), false, false);
-            return;
-        }
-        const auto c = OfflineDownloader::areaCount(b);
-        map_->setAreaInfo(
-            dims + QStringLiteral(" · ~%1 MB new").arg(c.bytes / 1e6, 0, 'f', 0),
-            c.fresh == 0 ? QStringLiteral("all %1 tiles already on disk: nothing to download").arg(c.have)
-                         : QStringLiteral("satellite to ~0.5 m/px + ground height · %1 new tiles · %2 already on disk "
-                                          "(shared with areas you have)")
-                               .arg(c.fresh)
-                               .arg(c.have),
-            c.fresh > 0 && !offline_->running(), false);
+    connect(map_, &MapView::areaChanged, this, [this](MapView::GeoBox, bool final) { refreshAreaPanel(final); });
+    connect(map_, &MapView::areaDetailPicked, this, [this](int level) {
+        area_detail_ = level;
+        refreshAreaPanel(true);
     });
     connect(map_, &MapView::areaCancel, this, [this] { map_->setMode(MapView::Mode::Normal); });
     connect(map_, &MapView::areaDownload, this, [this] {
         const auto g = map_->areaSelection();
         if (!g) return;
         offline_status_.clear();
-        offline_->startArea({g->min_lon, g->min_lat, g->max_lon, g->max_lat});
+        const OfflineDownloader::Box b{g->min_lon, g->min_lat, g->max_lon, g->max_lat};
+        const auto levels = OfflineDownloader::areaLevels(b);
+        const auto d = area_detail_ >= 0 && levels[static_cast<size_t>(area_detail_)].allowed
+                           ? static_cast<OfflineDownloader::Detail>(area_detail_)
+                           : OfflineDownloader::preferredDetail(levels);
+        offline_->startArea(b, d);
         map_->setMode(MapView::Mode::Normal);
-        fx_->toast(QStringLiteral("Downloading the full-detail area"), kCyan, QStringLiteral("Offline"));
+        fx_->toast(QStringLiteral("Downloading the area · ") + OfflineDownloader::detailText(d), kCyan,
+                   QStringLiteral("Offline"));
     });
     connect(settings_screen_, &SettingsScreen::offlineClearDetail, this, [this] {
+        vector_map_->close();  // the area street maps are open (Windows can't delete open files)
         offline_status_ = OfflineDownloader::clearFullDetail() ? QStringLiteral("full detail cleared")
                                                                : QStringLiteral("could not delete everything");
+        vector_map_->reopen();
+        tiles_->vectorChanged();
         tiles_->clearMemory();
         map_->tileSourcesChanged();
         refreshOfflineCounts();
     });
     connect(settings_screen_, &SettingsScreen::offlineDeleteAll, this, [this] {
+        vector_map_->close();
         offline_status_ = OfflineDownloader::clearAll() ? QStringLiteral("everything deleted")
                                                         : QStringLiteral("could not delete everything");
         vector_map_->reopen();
@@ -393,10 +383,10 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
         refreshOffline();
         map_->setDownloadStatus(QStringLiteral("⬇ %1 · %2%").arg(offline_->stage()).arg(static_cast<int>(offline_->fraction() * 100)));
     });
-    connect(offline_, &OfflineDownloader::streetMapInstalled, this, [this] {
+    connect(offline_, &OfflineDownloader::streetMapInstalled, this, [this](const QString& what) {
         vector_map_->reopen();
         tiles_->vectorChanged();
-        fx_->toast(QStringLiteral("Street map installed"), kGreen, QStringLiteral("Offline"));
+        fx_->toast(what + QStringLiteral(" installed"), kGreen, QStringLiteral("Offline"));
     });
     connect(offline_, &OfflineDownloader::finished, this, [this](bool cancelled, const QString& summary) {
         offline_status_ = summary;
@@ -897,6 +887,7 @@ void MainWindow::refreshOfflineCounts() {
         offline_country_ = QStringLiteral("not downloaded · about %1 MB").arg(c.bytes / 1e6, 0, 'f', 0);
     } else {
         QStringList parts;
+        parts << (OfflineDownloader::hasWorldMap() ? QStringLiteral("world ✓") : QStringLiteral("world map missing"));
         parts << (build.isEmpty() ? QStringLiteral("street map ✓")
                                   : QStringLiteral("street map ✓ %1-%2-%3").arg(build.left(4), build.mid(4, 2), build.mid(6, 2)));
         parts << (c.fresh == 0 ? QStringLiteral("country ✓")
@@ -907,6 +898,56 @@ void MainWindow::refreshOfflineCounts() {
         offline_country_ = parts.join(QStringLiteral(" · "));
     }
     refreshOffline();
+}
+
+void MainWindow::refreshAreaPanel(bool final) {
+    const auto g = map_->areaSelection();
+    if (!g || (!g->max_lat && !g->min_lat)) {
+        map_->setAreaLevels({}, -1);
+        return;
+    }
+    using D = OfflineDownloader::Detail;
+    const OfflineDownloader::Box b{g->min_lon, g->min_lat, g->max_lon, g->max_lat};
+    auto size = [](qint64 bytes) {
+        return bytes >= 1000LL * 1000 * 1000 ? QStringLiteral("%1 GB").arg(bytes / 1e9, 0, 'f', bytes < 1e10 ? 1 : 0)
+                                             : QStringLiteral("%1 MB").arg(std::max<qint64>(1, bytes / 1000000));
+    };
+    const auto levels = OfflineDownloader::areaLevels(b);
+    const D d = area_detail_ >= 0 && levels[static_cast<size_t>(area_detail_)].allowed
+                    ? static_cast<D>(area_detail_)
+                    : OfflineDownloader::preferredDetail(levels);
+    std::vector<MapView::AreaLevel> chips;
+    for (const auto& l : levels) {
+        chips.push_back({OfflineDownloader::detailLabel(l.detail), l.allowed ? size(l.bytes) : QStringLiteral("too big"),
+                         l.allowed});
+    }
+    map_->setAreaLevels(chips, static_cast<int>(d));
+    const auto& lv = levels[static_cast<size_t>(d)];
+    const QString dims = QStringLiteral("%1 × %2 km").arg(b.widthKm(), 0, 'f', 1).arg(b.heightKm(), 0, 'f', 1);
+    const QString what = d == D::Streets ? QStringLiteral("streets + ground height, no satellite")
+                                         : QStringLiteral("streets + ground height + ") + OfflineDownloader::detailText(d);
+    if (!lv.allowed) {
+        map_->setAreaInfo(dims + QStringLiteral(" · too big"),
+                          QStringLiteral("over 1 million tiles even without satellite. Draw a smaller area."), false, true);
+        return;
+    }
+    if (!final) {
+        map_->setAreaInfo(dims + QStringLiteral(" · up to ~") + size(lv.bytes), what + QStringLiteral(" · lift to count"),
+                          false, false);
+        return;
+    }
+    // the disk walk (when not too many): only when the finger lifts
+    const auto c = OfflineDownloader::areaCount(b, d);
+    const QString line1 = dims + QStringLiteral(" · ~%1 new").arg(size(c.bytes));
+    QString line2;
+    if (!c.exact) {
+        line2 = what + QStringLiteral(" · about %1 tiles (tiles you already have are skipped)").arg(c.fresh);
+    } else if (c.fresh == 0 && !c.streets) {
+        line2 = QStringLiteral("all %1 tiles already on disk: nothing to download").arg(c.have);
+    } else {
+        line2 = what + QStringLiteral(" · %1 new tiles · %2 already on disk").arg(c.fresh).arg(c.have);
+    }
+    map_->setAreaInfo(line1, line2, (c.fresh > 0 || c.streets) && !offline_->running(), false);
 }
 
 void MainWindow::refreshOffline() {

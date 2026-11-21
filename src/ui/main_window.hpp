@@ -247,6 +247,10 @@ private:
     QString offline_status_;
     void refreshOffline();
     void refreshOfflineCounts();
+    // the map's area panel: sizes per detail level and what the chosen one fetches
+    // (final: the finger is up, so the disk can be checked)
+    void refreshAreaPanel(bool final);
+    int area_detail_ = -1;  // the level the operator tapped (-1: the preferred one)
     link::MavlinkClient::Config linkConfig() const;
     void applyLink(const SettingsScreen::Link& l);
     SettingsScreen::Link linkValues() const;

@@ -450,8 +450,8 @@ void SettingsScreen::paintOffline(QPainter& p, const QRectF& body) {
     double y = body.top();
     // ---- country pack ------------------------------------------------------------------
     paintRow(p, QRectF(body.left(), y, body.width(), 44), QStringLiteral("COUNTRY PACK · ISRAEL + 50 KM"),
-             QStringLiteral("street map (all zooms) · satellite to ~10 m/px · ground height · "
-                            "the button only fetches what's new or missing"));
+             QStringLiteral("world street map (main roads, cities) · country street map (all zooms) · "
+                            "satellite to ~10 m/px · ground height · the button only fetches what's new or missing"));
     drawText(p, QRectF(body.left(), y + 44, body.width(), 18), Qt::AlignLeft | Qt::AlignVCenter, off_.country,
              monoFont(11), off_.street_map && !off_.country.contains(QStringLiteral("missing")) ? kGreen : kAmber);
     y += 70;
@@ -483,7 +483,8 @@ void SettingsScreen::paintOffline(QPainter& p, const QRectF& body) {
                                   .arg(off_.areas)
                                   .arg(off_.areas == 1 ? "" : "s")
                                   .arg(sizeText(off_.area_bytes))
-                            : QStringLiteral("draw a rectangle on the map: satellite to ~0.5 m/px there"));
+                            : QStringLiteral("draw a rectangle on the map: streets, ground height and satellite as sharp as "
+                                             "you choose there (down to ~0.5 m/px)"));
     y += 52;
     area_rect_ = QRectF(body.left(), y, 250, 50);
     paintAction(p, area_rect_, QStringLiteral("▭ SELECT AREA ON MAP"), kCyan, !off_.running);
@@ -528,10 +529,10 @@ void SettingsScreen::paintConfirm(QPainter& p, const QRectF& panel) {
         relink ? QStringLiteral("The aircraft is armed. Telemetry and control stop until it answers on the new link. "
                                 "It keeps flying what it is doing; a long silence triggers its GCS failsafe.")
         : confirm_ == Confirm::ClearDetail
-            ? QStringLiteral("Delete all full-detail satellite and ground height (%1)? The country map, the street map "
-                             "and the country satellite stay.")
+            ? QStringLiteral("Delete everything your drawn areas downloaded: satellite, streets and ground height (%1)? "
+                             "The world and country street maps and the country satellite stay.")
                   .arg(sizeText(off_.area_bytes))
-            : QStringLiteral("Delete everything in the offline folder (%1): the street map, all satellite and ground "
+            : QStringLiteral("Delete everything in the offline folder (%1): the street maps, all satellite and ground "
                              "height? Without internet the map will be empty until you download again.")
                   .arg(sizeText(off_.disk_bytes));
     drawText(p, QRectF(box.left() + 28, box.top() + 58, box.width() - 56, 70), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,

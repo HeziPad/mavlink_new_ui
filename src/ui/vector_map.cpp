@@ -2,6 +2,7 @@
 #include "core/geo.hpp"
 
 #include "core/gzip.hpp"
+#include "core/map_label.hpp"
 #include "core/mvt.hpp"
 #include "offline_store.hpp"
 #include "theme.hpp"
@@ -158,12 +159,9 @@ struct Ctx {
         }
         return path;
     }
+    // English or Hebrew only (map_label): never a third language
     std::string_view name(const mvt::Layer& l, const mvt::Feature& f) const {
-        if (english) {
-            const auto en = l.str(f, "name:en");
-            if (!en.empty()) return en;
-        }
-        return l.str(f, "name");
+        return map_label::pick(l.str(f, "name"), l.str(f, "name:en"), l.str(f, "name:he"), english);
     }
     bool place(const QRectF& r) {
         if (!clip.adjusted(1, 1, -1, -1).contains(r)) return false;  // kept inside its own tile
@@ -404,27 +402,33 @@ QImage render(const std::string& bytes, int z, int x, int y, int data_z, bool en
     return img;
 }
 
+using Sources = std::vector<std::shared_ptr<VectorMap::Source>>;
+
 class RenderJob : public QRunnable {
 public:
-    RenderJob(std::shared_ptr<VectorMap::Source> src, VectorMap* owner, int z, int x, int y, int max_z, bool en,
-              quint64 gen)
-        : src_(std::move(src)), owner_(owner), z_(z), x_(x), y_(y), max_z_(max_z), en_(en), gen_(gen) {}
+    RenderJob(Sources srcs, VectorMap* owner, int z, int x, int y, bool en, quint64 gen)
+        : srcs_(std::move(srcs)), owner_(owner), z_(z), x_(x), y_(y), en_(en), gen_(gen) {}
     void run() override {
-        const int dz = std::max(0, z_ - max_z_);
-        const int data_z = z_ - dz;
-        const auto bytes = src_->tile(data_z, x_ >> dz, y_ >> dz);
         QImage img;
-        if (bytes) {
-            img = render(*bytes, z_, x_, y_, data_z, en_);
+        // the most detailed file that has this place (a drawn area, the country, then the world)
+        for (const auto& src : srcs_) {
+            if (!pmtiles::covers(src->header, z_, x_, y_)) continue;
+            const int data_z = pmtiles::dataZoom(src->header, z_);
+            const int dz = z_ - data_z;
+            const auto bytes = src->tile(data_z, x_ >> dz, y_ >> dz);
+            if (bytes) {
+                img = render(*bytes, z_, x_, y_, data_z, en_);
+                break;
+            }
         }
         QMetaObject::invokeMethod(owner_, "deliver", Qt::QueuedConnection, Q_ARG(int, z_), Q_ARG(int, x_),
                                   Q_ARG(int, y_), Q_ARG(quint64, gen_), Q_ARG(QImage, img));
     }
 
 private:
-    std::shared_ptr<VectorMap::Source> src_;
+    Sources srcs_;
     VectorMap* owner_;
-    int z_, x_, y_, max_z_;
+    int z_, x_, y_;
     bool en_;
     quint64 gen_;
 };
@@ -443,21 +447,28 @@ VectorMap::~VectorMap() {
     pool_.waitForDone();
 }
 
-bool VectorMap::reopen() {
+void VectorMap::close() {
     pool_.clear();
-    pool_.waitForDone();
-    src_.reset();
+    pool_.waitForDone();  // jobs hold the files too
+    srcs_.clear();
     pending_.clear();
     ++gen_;
+}
+
+bool VectorMap::reopen() {
+    close();
     const QDir dir(offline::folder());
-    QStringList files = dir.entryList({QStringLiteral("*.pmtiles")}, QDir::Files, QDir::Name);
-    files.removeAll(QStringLiteral("map.pmtiles"));
-    if (QFileInfo::exists(dir.filePath(QStringLiteral("map.pmtiles")))) {
-        files.prepend(QStringLiteral("map.pmtiles"));  // the downloaded one first
+    QStringList paths;
+    for (const QString& name : dir.entryList({QStringLiteral("*.pmtiles")}, QDir::Files, QDir::Name)) {
+        paths << dir.filePath(name);  // map.pmtiles (country), world.pmtiles, hand-installed ones
     }
-    for (const QString& name : files) {
+    const QDir areas(dir.filePath(QStringLiteral("streets")));  // full-detail areas
+    for (const QString& name : areas.entryList({QStringLiteral("*.pmtiles")}, QDir::Files, QDir::Name)) {
+        paths << areas.filePath(name);
+    }
+    for (const QString& path : paths) {
         auto s = std::make_shared<Source>();
-        s->file.setFileName(dir.filePath(name));
+        s->file.setFileName(path);
         if (!s->file.open(QIODevice::ReadOnly)) continue;
         const QByteArray head = s->file.read(pmtiles::kHeaderSize);
         const auto h = pmtiles::parseHeader(std::string_view(head.constData(), static_cast<size_t>(head.size())));
@@ -468,18 +479,28 @@ bool VectorMap::reopen() {
         const auto root = dir_bytes ? pmtiles::decodeDirectory(*dir_bytes) : std::nullopt;
         if (!root) continue;
         s->root = *root;
-        src_ = s;
-        return true;
+        srcs_.push_back(s);
     }
-    return false;
+    // most detailed first: deepest zoom, then the smallest area (an area before the
+    // country before the world)
+    auto span = [](const pmtiles::Header& h) {
+        return (static_cast<double>(h.max_lon_e7) - h.min_lon_e7) * (static_cast<double>(h.max_lat_e7) - h.min_lat_e7);
+    };
+    std::stable_sort(srcs_.begin(), srcs_.end(), [&](const auto& a, const auto& b) {
+        if (a->header.max_zoom != b->header.max_zoom) return a->header.max_zoom > b->header.max_zoom;
+        return span(a->header) < span(b->header);
+    });
+    return !srcs_.empty();
 }
 
 QString VectorMap::path() const {
-    return src_ ? src_->file.fileName() : QString();
+    return srcs_.empty() ? QString() : srcs_.front()->file.fileName();
 }
 
 int VectorMap::maxDataZoom() const {
-    return src_ ? src_->header.max_zoom : 0;
+    int z = 0;
+    for (const auto& s : srcs_) z = std::max<int>(z, s->header.max_zoom);
+    return z;
 }
 
 void VectorMap::setEnglish(bool english) {
@@ -491,11 +512,11 @@ void VectorMap::setEnglish(bool english) {
 }
 
 void VectorMap::request(int z, int x, int y) {
-    if (!src_) return;
+    if (srcs_.empty()) return;
     const quint64 key = (static_cast<quint64>(z) << 58) | (static_cast<quint64>(x) << 29) | static_cast<quint64>(y);
     if (pending_.contains(key)) return;
     pending_.insert(key);
-    pool_.start(new RenderJob(src_, this, z, x, y, src_->header.max_zoom, english_, gen_));
+    pool_.start(new RenderJob(srcs_, this, z, x, y, english_, gen_));
 }
 
 void VectorMap::deliver(int z, int x, int y, quint64 gen, const QImage& img) {

@@ -106,6 +106,13 @@ public:
     void clearAreaSelection();
     // the panel under the selection: two lines and whether DOWNLOAD is allowed
     void setAreaInfo(const QString& line1, const QString& line2, bool can_download, bool warn);
+    // the detail chips under it (how deep the satellite goes), each with its size
+    struct AreaLevel {
+        QString label;  // "2 m"
+        QString size;   // "3.5 GB", "—" when too big
+        bool enabled = true;
+    };
+    void setAreaLevels(std::vector<AreaLevel> levels, int selected);
     // a chip while an offline download runs ("" hides it)
     void setDownloadStatus(const QString& text);
     void tileSourcesChanged();  // offline data changed: redraw the backdrop
@@ -137,6 +144,7 @@ signals:
     void ballCollapsedChanged(bool collapsed);
     void areaChanged(GeoBox box, bool final);  // final: the finger / button was released
     void areaDownload();
+    void areaDetailPicked(int level);
     void areaCancel();
 
 protected:
@@ -291,6 +299,9 @@ private:
     QString area_info1_, area_info2_;
     bool area_can_dl_ = false, area_warn_ = false;
     QRectF area_dl_rect_, area_cancel_rect_;
+    std::vector<AreaLevel> area_levels_;
+    int area_level_sel_ = -1;
+    std::vector<QRectF> area_level_rects_;
     QString dl_status_;
     static constexpr int kBackdropMargin = 320;
 };

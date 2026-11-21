@@ -55,4 +55,9 @@ std::string encodeDirectory(const std::vector<Entry>& entries);
 // the entry covering `id`: a tile (run covers it) or the leaf to look in next
 std::optional<Entry> findEntry(const std::vector<Entry>& dir, uint64_t id);
 
+// Does display tile z/x/y fall inside the file's area (header bounds, zooms)?
+// A tile above max_zoom is looked up in its ancestor at max_zoom (dataZoom).
+bool covers(const Header& h, int z, int x, int y);
+inline int dataZoom(const Header& h, int z) { return z < h.max_zoom ? z : h.max_zoom; }
+
 }  // namespace gcs::pmtiles

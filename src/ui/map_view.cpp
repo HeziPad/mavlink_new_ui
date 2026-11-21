@@ -880,6 +880,12 @@ bool MapView::areaPress(const QPointF& pos) {
         if (area_can_dl_ && area_sel_) emit areaDownload();
         return true;
     }
+    for (size_t i = 0; area_sel_ && i < area_level_rects_.size() && i < area_levels_.size(); ++i) {
+        if (area_level_rects_[i].contains(pos / chrome_k_)) {
+            if (area_levels_[i].enabled) emit areaDetailPicked(static_cast<int>(i));
+            return true;
+        }
+    }
     pressing_ = true;
     dragged_ = false;
     press_pos_ = last_pos_ = pos;
@@ -923,6 +929,12 @@ void MapView::setAreaInfo(const QString& line1, const QString& line2, bool can_d
     area_info2_ = line2;
     area_can_dl_ = can_download;
     area_warn_ = warn;
+    update();
+}
+
+void MapView::setAreaLevels(std::vector<AreaLevel> levels, int selected) {
+    area_levels_ = std::move(levels);
+    area_level_sel_ = selected;
     update();
 }
 
@@ -1753,7 +1765,7 @@ void MapView::paintOverlayChrome(QPainter& p) {
     if (!dl_status_.isEmpty()) {
         const QFont f = labelFont(11);
         const double w = QFontMetricsF(f).horizontalAdvance(dl_status_) + 30;
-        const QRectF box(lw() / 2.0 - w / 2.0, mode_ == Mode::Area ? 210 : 104, w, 26);
+        const QRectF box(lw() / 2.0 - w / 2.0, mode_ == Mode::Area ? 274 : 104, w, 26);
         drawGlass(p, chamferPath(box, 7), kCyan, 0.7, kGlassDeep);
         drawText(p, box, Qt::AlignCenter, dl_status_, f, kCyan);
     }
@@ -1829,7 +1841,8 @@ void MapView::paintArea(QPainter& p) {
     // bottom panel: size, new vs shared tiles, DOWNLOAD / CANCEL
     // at the top, under the hint: the bottom belongs to the dock and the picture-in-picture
     const double pw = std::min(lw() - 32.0, 640.0);
-    const QRectF panel(lw() / 2.0 - pw / 2.0, 104, pw, 96);
+    const bool levels = area_sel_ && !area_levels_.empty();
+    const QRectF panel(lw() / 2.0 - pw / 2.0, 104, pw, levels ? 160 : 96);
     drawGlass(p, chamferPath(panel, 10), kAmber, 0.8, alpha(kGlassDeep, 0.95));
     drawText(p, QRectF(panel.left() + 16, panel.top() + 10, pw - 300, 22), Qt::AlignLeft | Qt::AlignVCenter,
              area_sel_ ? area_info1_ : QStringLiteral("no area yet"), monoFont(12, true), area_warn_ ? kRed : kText);
@@ -1847,6 +1860,28 @@ void MapView::paintArea(QPainter& p) {
     };
     button(area_cancel_rect_, QStringLiteral("CANCEL"), kMuted, true);
     button(area_dl_rect_, QStringLiteral("⬇ DOWNLOAD"), kCyan, area_sel_.has_value() && area_can_dl_);
+    // how deep the satellite goes: one chip per level with its size
+    area_level_rects_.clear();
+    if (levels) {
+        const double gap = 8;
+        const int n = static_cast<int>(area_levels_.size());
+        const double cw = (pw - 32 - gap * (n - 1)) / n;
+        for (int i = 0; i < n; ++i) {
+            const AreaLevel& l = area_levels_[static_cast<size_t>(i)];
+            const QRectF r(panel.left() + 16 + i * (cw + gap), panel.top() + 96, cw, 52);
+            area_level_rects_.push_back(r);
+            const bool sel = i == area_level_sel_;
+            p.save();
+            p.setOpacity(l.enabled ? 1.0 : 0.35);
+            drawGlass(p, chamferPath(r, 7), sel ? kAmber : kMuted, sel ? 1.0 : 0.6,
+                      sel ? alpha(kAmber, 0.20) : alpha(kGlassDeep, 0.9));
+            drawText(p, QRectF(r.left(), r.top() + 5, r.width(), 22), Qt::AlignCenter, l.label, labelFont(12.5),
+                     sel ? kAmber : kText);
+            drawText(p, QRectF(r.left(), r.top() + 27, r.width(), 18), Qt::AlignCenter, l.size, monoFont(10.5),
+                     sel ? kAmber : kMuted);
+            p.restore();
+        }
+    }
 }
 
 void MapView::paintFootprint(QPainter& p) {

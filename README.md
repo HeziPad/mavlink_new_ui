@@ -529,48 +529,67 @@ you want that.
 
 | Layer | Where it comes from | Coverage |
 |---|---|---|
-| **Map** (streets) | OpenStreetMap vector data (Protomaps daily build, ODbL), drawn by the app in the HUD's style | the **country pack**: Israel + ~50 km, every zoom, sharp to the deepest |
-| **Sat** | Esri World Imagery | **country pack**: zoom 8–14 (≈10 m/px); **full-detail areas** you draw: zoom 15–18 (≈0.5 m/px) |
-| Ground height (hover) | AWS Terrain Tiles (SRTM) | country: zoom 12 (≈30 m); full-detail areas: zoom 13 |
+| **Map** (streets) | OpenStreetMap vector data (Protomaps daily build, ODbL), drawn by the app in the HUD's style | the **whole world** to zoom 6 (coasts, borders, main roads, cities; enlarged deeper); the **country pack**: Israel + ~50 km, every zoom; **full-detail areas** you draw: every zoom |
+| **Sat** | Esri World Imagery | **country pack**: zoom 8–14 (≈10 m/px); **areas** you draw: as sharp as you pick for each (none, 10, 2, 1 or 0.5 m/px) |
+| Ground height (hover) | AWS Terrain Tiles (SRTM) | country: zoom 12 (≈30 m); areas: zoom 12, or 13 at 2 m and sharper |
 
 - **Missing satellite is filled in.** Where there's no satellite imagery (outside your areas, or deeper
   than Esri has, which Esri answers with a grey "Map data not yet available" tile), the map shows the
   nearest coarser imagery enlarged, or the street map. The no-data answer is remembered (`{y}.none`),
   so it isn't fetched again.
-- **Street labels:** Hebrew or English, under Settings → MAP → MAP LABELS.
+- **The most detailed street map wins.** Each street tile comes from a full-detail area's map if one
+  covers it, else the country map, else the world map. Outside your areas, zooming in enlarges the world
+  map, and at an area's edge the detail stops.
+- **Street labels:** Hebrew or English, under Settings → MAP → MAP LABELS. A name missing in one shows
+  in the other; other languages are never shown (a local name counts only if it is in Latin or Hebrew
+  letters, so "Roma" shows but "Λευκωσία" only as "Nicosia" / "ניקוסיה").
 
 **Country pack.** Settings → OFFLINE → **DOWNLOAD COUNTRY**:
 
-1. The street map: about 175,000 tiles, about 235 MB, about a minute. Only the index pieces and tile
-   ranges covering the area are read from the 140 GB planet file.
-2. Then elevation and satellite: about 46,000 tiles, about 1 GB.
+1. The world street map (zoom 0–6, about 45 MB), once.
+2. The country street map: about 175,000 tiles, about 235 MB, about a minute. Only the index pieces
+   and tile ranges covering the area are read from the 140 GB planet file.
+3. Then elevation and satellite: about 46,000 tiles, about 1 GB.
 
 Afterwards the button reads **CHECK & COMPLETE**. It fetches only what's new or missing:
 
+- **The world street map:** only if it's missing (it's coarse: a newer build changes nothing you'd see).
 - **The street map:** only if a newer daily build exists than the one installed (recorded in
   `map.build`). It's a ~1 s check otherwise.
 - **The country's satellite and ground height:** missing tiles only.
-- **Your full-detail areas:** their missing tiles, for example ones that failed before.
+- **Your full-detail areas:** their missing tiles and street maps, for example ones that failed before
+  or areas downloaded before areas had their own street map.
 
 Nothing already on disk is downloaded again.
 
 **Full-detail areas.** Settings → OFFLINE → **SELECT AREA ON MAP**:
 
 - Drag a rectangle with a finger or the mouse, and drag a corner to adjust it.
-- The panel shows its size, the **new tiles** and the tiles **already on disk** before you press
-  **DOWNLOAD**. Areas you already have show as dashed outlines.
+- **Pick how sharp the satellite is.** Chips under the panel: **STREETS** (no satellite), **10 m**,
+  **2 m**, **1 m**, **0.5 m**, each with its size. Every step is 4× the one before, so a whole country
+  only fits at the coarse ones. Cyprus, for example: 10 m ≈ 0.4 GB, 2 m ≈ 4 GB, 1 m ≈ 16 GB, and
+  0.5 m (62 GB) is greyed out as too big (over a million tiles). The app picks the sharpest one under
+  ~2 GB; tap another to change it. Streets and ground height always come.
+- The panel shows the size, the **new tiles** and the tiles **already on disk** before you press
+  **DOWNLOAD** (for very big areas it only estimates). Areas you already have show as dashed outlines.
+  Downloading the same box again at another level keeps the sharper one.
+- An area also gets its own full-detail street map (`streets/`, about 1 MB per 100 km² of countryside,
+  more in cities: 7 MB for central Rome). Not for an area inside the country pack, which has it already.
 - Each tile is stored once, by its position, so overlapping areas share tiles and only the missing ones
   are downloaded.
-- **CLEAR FULL DETAIL** removes all full-detail satellite and ground height after an "are you sure?".
-  The country pack and the street map stay. **DELETE ALL** asks the same way.
+- **CLEAR FULL DETAIL** removes everything your drawn areas downloaded (satellite, streets, ground
+  height) after an "are you sure?". The country pack and the world and country street maps stay. **DELETE ALL** asks the same way.
 
 **Without the app** (another computer, or preparing in advance), `tools/fetch_offline.py` does the same
 and needs only Python 3:
 
 ```sh
-tools/fetch_offline.py --country israel --out ./offline              # street map + country satellite + ground height
+tools/fetch_offline.py --country israel --out ./offline              # world + country street map, country satellite + ground height
+tools/fetch_offline.py --world --out ./offline                       # only the world street map
 tools/fetch_offline.py --country israel --only vector --out ./offline
-tools/fetch_offline.py --bbox 34.75,32.05,34.82,32.12 --out ./offline  # a full-detail area (min_lon,min_lat,max_lon,max_lat)
+tools/fetch_offline.py --bbox 34.75,32.05,34.82,32.12 --out ./offline  # an area (min_lon,min_lat,max_lon,max_lat), satellite to 0.5 m
+tools/fetch_offline.py --bbox 32.2,34.5,34.7,35.8 --detail 2m --out ./offline  # --detail streets / 10m / 2m / 1m / 0.5m
+tools/fetch_offline.py --bbox=-98.6,39.0,-98.5,39.1 --out ./offline    # west of 0° or south of the equator: use --bbox=
 tools/fetch_offline.py --country israel --out ./offline --dry-run    # sizes only
 ```
 
@@ -582,11 +601,13 @@ Copy the folder to `~/.local/share/mavlink_gcs_ui/mavlink_gcs_ui/offline/` (the 
 Settings → OFFLINE → CHANGE at it. Its layout:
 
 ```
-offline/map.pmtiles                     street map (any *.pmtiles with vector tiles is used)
+offline/world.pmtiles                   world street map, zoom 0-6
+offline/map.pmtiles                     country street map (any other *.pmtiles with vector tiles is used too)
+offline/streets/{box}.pmtiles           street map of each full-detail area
 offline/esri_imagery/{z}/{x}/{y}.jpg    satellite        ({y}.none: no imagery at that zoom)
 offline/elevation/{z}/{x}/{y}.png       ground height    ("terrarium": m = R*256 + G + B/256 - 32768)
 offline/map.build                       which street map build is installed
-offline/areas.json                      the full-detail areas (outlines on the map)
+offline/areas.json                      the drawn areas (outlines on the map) and their satellite / ground height zooms
 ```
 
 - **Other sources work too.** Any slippy-tile source in that layout works for satellite (e.g. tiles

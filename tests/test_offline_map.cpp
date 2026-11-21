@@ -1,7 +1,9 @@
 #include "check.hpp"
 #include "core/gzip.hpp"
 #include "core/mvt.hpp"
+#include "core/map_label.hpp"
 #include "core/pmtiles.hpp"
+#include "core/tiles.hpp"
 
 #include <string>
 
@@ -134,8 +136,93 @@ static void testMvt() {
     CHECK(p.parts[0].back().x == 0 && p.parts[0].back().y == 0);  // closed
 }
 
+// several street maps are layered: each tile comes from the most detailed file
+// whose area has it
+static void testCovers() {
+    pmtiles::Header world;
+    world.max_zoom = 6;
+    world.min_lon_e7 = -1800000000;
+    world.max_lon_e7 = 1800000000;
+    world.min_lat_e7 = -850511000;
+    world.max_lat_e7 = 850511000;
+    pmtiles::Header area;  // a small box near Rome, z0-15
+    area.max_zoom = 15;
+    area.min_lon_e7 = 124000000;
+    area.max_lon_e7 = 125000000;
+    area.min_lat_e7 = 418000000;
+    area.max_lat_e7 = 419000000;
+    // a z16 tile over the box (12.45 E, 41.85 N), and one at Tel Aviv
+    const auto rome = tiles::locate(41.85, 12.45, 16);
+    const auto tlv = tiles::locate(32.08, 34.78, 16);
+    CHECK(pmtiles::covers(area, 16, rome.x, rome.y));
+    CHECK(!pmtiles::covers(area, 16, tlv.x, tlv.y));
+    CHECK(pmtiles::covers(world, 16, rome.x, rome.y));
+    CHECK(pmtiles::covers(world, 16, tlv.x, tlv.y));
+    CHECK(pmtiles::covers(area, 0, 0, 0));  // the whole world contains the box
+    // above the data's zoom: looked up in the ancestor
+    CHECK(pmtiles::dataZoom(world, 16) == 6);
+    CHECK(pmtiles::dataZoom(area, 16) == 15);
+    CHECK(pmtiles::dataZoom(area, 9) == 9);
+    // a tile only touching the box's edge isn't in it: x of 12.4 E exactly at z1 is
+    // inside tile 1, so tile 0 (west of 0 E) misses
+    CHECK(!pmtiles::covers(area, 1, 0, 0));
+    pmtiles::Header deep = area;
+    deep.min_zoom = 10;
+    CHECK(!pmtiles::covers(deep, 9, rome.x >> 7, rome.y >> 7));
+    CHECK(pmtiles::covers(deep, 10, rome.x >> 6, rome.y >> 6));
+}
+
+// what an area download fetches per zoom: counted from tile ranges, not a walk
+static void testBoxCount() {
+    CHECK(tiles::box(32.2, 34.5, 34.7, 35.8, 0).count() == 1);
+    // a small box inside one z10 tile: one tile at every zoom up to 10
+    const auto t = tiles::locate(32.08, 34.78, 10);
+    CHECK(tiles::box(34.78, 32.08, 34.7801, 32.0801, 10).count() == 1);
+    CHECK(tiles::box(34.78, 32.08, 34.7801, 32.0801, 10).x0 == t.x);
+    // Cyprus (2.5 x 1.3 deg at 35 N): z18 tiles are ~125 m, so ~1820 x ~1150
+    const auto cy = tiles::box(32.2, 34.5, 34.7, 35.8, 18);
+    CHECK(cy.x1 - cy.x0 + 1 >= 1810 && cy.x1 - cy.x0 + 1 <= 1825);
+    CHECK(cy.count() > 2000000 && cy.count() < 2300000);
+    // a 4x larger count per zoom
+    const auto cy17 = tiles::box(32.2, 34.5, 34.7, 35.8, 17);
+    CHECK_NEAR(static_cast<double>(cy.count()) / cy17.count(), 4.0, 0.05);
+}
+
+// labels: English or Hebrew, never a third language
+static void testLabels() {
+    using map_label::Script;
+    CHECK(map_label::script("Roma") == Script::Latin);
+    CHECK(map_label::script("Rue d'Été") == Script::Latin);
+    CHECK(map_label::script("Café 12") == Script::Latin);
+    CHECK(map_label::script("Nguyễn Huệ") == Script::Latin);
+    CHECK(map_label::script("תל אביב-יפו") == Script::Hebrew);
+    CHECK(map_label::script("רח' הרצל 5") == Script::Hebrew);
+    CHECK(map_label::script("Λευκωσία") == Script::Other);
+    CHECK(map_label::script("دمشق") == Script::Other);
+    CHECK(map_label::script("Москва") == Script::Other);
+    CHECK(map_label::script("Roma רומא") == Script::Other);
+    CHECK(map_label::script("\xff\xfe") == Script::Other);  // not UTF-8
+    // Nicosia: both tags
+    CHECK(map_label::pick("Λευκωσία", "Nicosia", "ניקוסיה", true) == "Nicosia");
+    CHECK(map_label::pick("Λευκωσία", "Nicosia", "ניקוסיה", false) == "ניקוסיה");
+    // Greek only: no label
+    CHECK(map_label::pick("Λεμεσός", "", "", true).empty());
+    CHECK(map_label::pick("Λεμεσός", "", "", false).empty());
+    // an Italian street (local name only, Latin): shown in both
+    CHECK(map_label::pick("Via del Corso", "", "", true) == "Via del Corso");
+    CHECK(map_label::pick("Via del Corso", "", "", false) == "Via del Corso");
+    // an Israeli street with only its Hebrew name: shown in English mode too
+    CHECK(map_label::pick("הרצל", "", "", true) == "הרצל");
+    // an Arabic name with a Hebrew tag
+    CHECK(map_label::pick("دمشق", "", "דמשק", true) == "דמשק");
+    CHECK(map_label::pick("دمشق", "Damascus", "דמשק", true) == "Damascus");
+}
+
 int main() {
     testTileIds();
+    testLabels();
+    testBoxCount();
+    testCovers();
     testDirectory();
     testGzip();
     testMvt();

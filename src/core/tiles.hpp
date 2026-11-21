@@ -31,6 +31,10 @@ struct Range {
 };
 Range around(double lat, double lon, double radius_m, int z);
 
+// Every tile at zoom z that touches the lon/lat box (what an offline download
+// of that box fetches at that zoom).
+Range box(double min_lon, double min_lat, double max_lon, double max_lat, int z);
+
 // Ground size of one tile edge at this latitude, metres.
 double tileMeters(double lat, int z);
 

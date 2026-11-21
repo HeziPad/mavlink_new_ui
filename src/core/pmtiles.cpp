@@ -1,6 +1,9 @@
 #include "pmtiles.hpp"
 
+#include "geo.hpp"
+
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace gcs::pmtiles {
@@ -206,6 +209,18 @@ std::optional<Entry> findEntry(const std::vector<Entry>& dir, uint64_t id) {
         return e;
     }
     return std::nullopt;
+}
+
+bool covers(const Header& h, int z, int x, int y) {
+    if (z < h.min_zoom || z < 0 || z > 30) return false;
+    const double n = std::ldexp(1.0, z);
+    const double lon0 = x / n * 360.0 - 180.0;
+    const double lon1 = (x + 1) / n * 360.0 - 180.0;
+    const double lat0 = std::atan(std::sinh(geo::kPi * (1.0 - 2.0 * (y + 1) / n))) * 180.0 / geo::kPi;  // south edge
+    const double lat1 = std::atan(std::sinh(geo::kPi * (1.0 - 2.0 * y / n))) * 180.0 / geo::kPi;        // north edge
+    // strict: a tile only touching the area's edge isn't in it
+    return lon1 > h.min_lon_e7 / 1e7 && lon0 < h.max_lon_e7 / 1e7 && lat1 > h.min_lat_e7 / 1e7 &&
+           lat0 < h.max_lat_e7 / 1e7;
 }
 
 }  // namespace gcs::pmtiles

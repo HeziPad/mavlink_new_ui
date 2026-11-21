@@ -44,6 +44,18 @@ Range around(double lat, double lon, double radius_m, int z) {
     return r;
 }
 
+Range box(double min_lon, double min_lat, double max_lon, double max_lat, int z) {
+    const TilePos a = locate(max_lat, min_lon, z);  // north-west
+    const TilePos b = locate(min_lat, max_lon, z);  // south-east
+    Range r;
+    r.z = z;
+    r.x0 = a.x;
+    r.x1 = b.x;
+    r.y0 = a.y;
+    r.y1 = b.y;
+    return r;
+}
+
 double tileMeters(double lat, int z) {
     return std::cos(lat * geo::kDegToRad) * 2.0 * geo::kPi * geo::kEarthRadius / std::exp2(z);
 }

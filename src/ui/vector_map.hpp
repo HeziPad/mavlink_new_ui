@@ -18,9 +18,11 @@
 
 namespace gcs::ui {
 
-// The offline street map: OpenStreetMap vector tiles in one PMTiles file in
-// the offline folder (Protomaps basemap schema), drawn by the app in the
-// HUD's dark style. Tiles are rendered on a private thread pool (never Qt's
+// The offline street map: OpenStreetMap vector tiles (Protomaps basemap
+// schema) in the offline folder's PMTiles files, drawn by the app in the
+// HUD's dark style. Several files are layered: each tile comes from the most
+// detailed one that has it (a drawn full-detail area in streets/, the country
+// map.pmtiles, then the coarse world.pmtiles). Tiles are rendered on a private thread pool (never Qt's
 // global one, which the raster engine waits on) and delivered through
 // rendered(). Zooms above the data's maximum are drawn from the deepest tile,
 // so the map stays sharp all the way in.
@@ -31,11 +33,12 @@ public:
     explicit VectorMap(QObject* parent = nullptr);
     ~VectorMap() override;
 
-    // opens the first *.pmtiles in the offline folder (again after a download
-    // or a folder change); false when there is none
+    // opens every *.pmtiles in the offline folder and its streets/ (again after
+    // a download or a folder change); false when there is none
     bool reopen();
-    bool available() const { return src_ != nullptr; }
-    QString path() const;
+    void close();  // lets the files go (before deleting them)
+    bool available() const { return !srcs_.empty(); }
+    QString path() const;  // the most detailed file
     int maxDataZoom() const;
 
     void setEnglish(bool english);  // labels: name:en (falling back to name) vs name
@@ -54,7 +57,7 @@ signals:
     void rendered(int z, int x, int y, quint64 generation, const QImage& image);
 
 private:
-    std::shared_ptr<Source> src_;
+    std::vector<std::shared_ptr<Source>> srcs_;  // most detailed first
     QThreadPool pool_;
     QSet<quint64> pending_;
     bool english_ = false;

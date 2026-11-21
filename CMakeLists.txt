@@ -61,6 +61,7 @@ add_library(gcs_core STATIC
     src/core/endurance.cpp
     src/core/flight_status.cpp
     src/core/hud_config.cpp
+    src/core/map_label.cpp
     src/core/display_round.cpp
     src/core/mission.cpp
     src/core/mvt.cpp
