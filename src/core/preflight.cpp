@@ -13,18 +13,15 @@ namespace gcs::preflight {
 
 const char* stageName(Stage s) {
     switch (s) {
-    case Stage::Profile: return "Aircraft";
-    case Stage::Site: return "Site";
-    case Stage::Airframe: return "Airframe";
-    case Stage::Power: return "Power";
-    case Stage::Links: return "Links & RC";
-    case Stage::Sensors: return "Sensors";
-    case Stage::Surfaces: return "Surfaces";
-    case Stage::Motors: return "Motors";
-    case Stage::Payload: return "Payload";
-    case Stage::Params: return "Settings";
-    case Stage::Mission: return "Mission";
-    case Stage::Final: return "Ready";
+    case Stage::Look: return "Look at the aircraft";
+    case Stage::Connection: return "Connection";
+    case Stage::Battery: return "Battery";
+    case Stage::Sensors: return "Sensors and position";
+    case Stage::Setup: return "Aircraft settings";
+    case Stage::Camera: return "Camera";
+    case Stage::Plan: return "Plan";
+    case Stage::Moving: return "Moving parts";
+    case Stage::Final: return "Ready to arm";
     case Stage::Count: break;
     }
     return "";
@@ -34,9 +31,7 @@ const char* kindName(Kind k) {
     switch (k) {
     case Kind::Auto: return "AUTO";
     case Kind::Test: return "TEST";
-    case Kind::Cal: return "CALIBRATE";
     case Kind::You: return "CHECK";
-    case Kind::Fix: return "SETTING";
     }
     return "";
 }
@@ -61,193 +56,86 @@ bool isDone(Status s) {
 // ---- catalogue -------------------------------------------------------------------------
 
 const std::vector<StepDef>& steps() {
-    static const std::vector<StepDef> list = [] {
-        std::vector<StepDef> v = {
-            // ---- aircraft profile
-            {"profile.vehicle", Stage::Profile, Kind::Auto, "Autopilot and frame",
-             "Everything after this depends on knowing the frame and which output drives what.",
-             "Wait for the vehicle's firmware, frame and output map to load.", true, false},
-            {"profile.battery", Stage::Profile, Kind::You, "Battery profile",
-             "Voltage thresholds and failsafes are only right for the right chemistry and cell count.",
-             "Choose the chemistry, check the cell count and enter the pack capacity.", true, false},
-            // ---- site
-            {"site.airspace", Stage::Site, Kind::You, "Airspace and permission",
-             "Flying where you're not allowed is the one failure no autopilot can fix.",
-             "Confirm the area is permitted (no restrictions or NOTAMs) and you have any needed approval.", false,
-             false},
-            {"site.weather", Stage::Site, Kind::You, "Weather and visibility",
-             "Gusts and rain hurt most in the hover, where a QuadPlane is weakest.",
-             "Wind within the aircraft's limits, no rain or icing, the aircraft stays in sight.", false, false},
-            {"site.area", Stage::Site, Kind::You, "Takeoff area clear",
-             "The lift rotors need room: a gust in the hover can drift it several metres.",
-             "Clear a 10 m circle around the aircraft: no people, wires, branches or loose objects.", true, true},
-            {"site.landing", Stage::Site, Kind::You, "Landing point clear",
-             "Land comes down vertically at L; anything there gets hit.",
-             "Check the landing point (L on the map) is clear, flat and reachable.", false, true},
-            {"site.people", Stage::Site, Kind::You, "People briefed",
-             "Bystanders walking under a hovering aircraft is the classic accident.",
-             "Everyone knows where to stand (behind you) and that it lifts off vertically.", false, false},
-            {"site.gcs", Stage::Site, Kind::You, "Ground station ready",
-             "A dead tablet mid-flight leaves only the transmitter.",
-             "GCS device charged (or on power), telemetry radio connected, transmitter charged.", false, false},
-            // ---- airframe
-            {"air.structure", Stage::Airframe, Kind::You, "Wing, booms and mounts",
-             "A loose wing joint or boom fails under the hover loads.",
-             "Wing joiners locked, booms tight, every motor mount tight, no cracks.", true, false},
-            {"air.props", Stage::Airframe, Kind::You, "Propellers",
-             "A cracked or loose prop sheds a blade; a wrong-hand prop gives no lift.",
-             "4 lift props and the pusher: undamaged, tight, and each the right hand for its position.", true, true},
-            {"air.linkages", Stage::Airframe, Kind::You, "Control linkages",
-             "Slop or a popped clevis means a surface stops responding.",
-             "Every horn, clevis and pushrod secure; wiggle each surface: no play.", true, false},
-            {"air.pitot", Stage::Airframe, Kind::You, "Pitot cover off",
-             "A covered pitot reads zero airspeed: the autopilot thinks it's stalling.",
-             "Remove the pitot cover; check the tube and port are clear.", true, true},
-            {"air.cg", Stage::Airframe, Kind::You, "Centre of gravity",
-             "A tail-heavy QuadPlane is unstable on the wing and fights the rotors in the hover.",
-             "Balance it at the marked CG point (with this battery and payload).", false, false},
-            {"air.battery", Stage::Airframe, Kind::You, "Battery secured",
-             "A battery that shifts moves the CG; a loose connector browns out the autopilot.",
-             "Battery strapped, connector fully seated, wires clear of props; hatches closed.", true, true},
-            {"air.antennas", Stage::Airframe, Kind::You, "Antennas and payload",
-             "A loose GPS mast or folded RC antenna costs you the link or the position.",
-             "GPS, telemetry, RC and video antennas secure and oriented; gimbal/payload secured.", false, false},
-            // ---- power
-            {"power.voltage", Stage::Power, Kind::Auto, "Battery charged",
-             "A half-charged pack may not have the power for the vertical landing.",
-             "Fit a fully charged pack.", true, true},
-            {"power.balance", Stage::Power, Kind::Auto, "Cell balance",
-             "One weak cell sags under hover load long before the pack voltage looks low.",
-             "Cells within 0.05 V of each other.", false, true},
-            {"power.current", Stage::Power, Kind::Auto, "Current sensor",
-             "Without current, capacity used and the battery failsafe are guesswork.",
-             "The current reading should be small and positive at rest.", false, false},
-            {"power.board", Stage::Power, Kind::Auto, "Autopilot supply",
-             "A sagging 5 V rail resets the autopilot in flight.", "Board voltage 4.8-5.4 V.", true, false},
-            // ---- links
-            {"link.telemetry", Stage::Links, Kind::Auto, "Telemetry link",
-             "This GCS flies the aircraft through it; a weak link means delayed commands.",
-             "Steady message rate; radio signal well above noise.", true, false},
-            {"link.sticks", Stage::Links, Kind::Test, "Transmitter sticks",
-             "The transmitter is your manual backup; a reversed or dead axis is dangerous.",
-             "Move each stick to both ends; every axis must reach both ends. Leave throttle low.", true, false},
-            {"link.modes", Stage::Links, Kind::Test, "Mode switch",
-             "In an emergency you need to know exactly what each switch position does.",
-             "Flip the mode switch through every position and check the mode shown.", false, false},
-            {"link.rcfailsafe", Stage::Links, Kind::Test, "RC failsafe",
-             "If the transmitter link drops in flight, the failsafe must trigger.",
-             "Turn the transmitter off: the vehicle must report RC failsafe. Then turn it back on.", true, false},
-            // ---- sensors
-            {"sens.gyro", Stage::Sensors, Kind::Cal, "Gyro calibration",
-             "Gyro drift makes the attitude estimate wander.", "Keep the aircraft completely still.", false, false},
-            {"sens.level", Stage::Sensors, Kind::Cal, "Level",
-             "If 'level' is wrong the aircraft flies with a constant tilt and drifts in the hover.",
-             "Place the aircraft level (wing chord at its flying angle), then calibrate.", false, false},
-            {"sens.accel", Stage::Sensors, Kind::Cal, "Accelerometer",
-             "Needed after mounting changes; a bad accel calibration corrupts the attitude.",
-             "Only if it's uncalibrated or failing: the 6-position calibration.", false, false},
-            {"sens.compass", Stage::Sensors, Kind::Cal, "Compass",
-             "A bad compass gives a wrong heading: the aircraft circles or flies off.",
-             "Calibrate from a known heading (best for a big airframe) or by rotating it.", true, false},
-            {"sens.baro", Stage::Sensors, Kind::Cal, "Barometer and airspeed zero",
-             "Zeroes altitude here and the airspeed offset.",
-             "Shield the pitot from the wind, then calibrate.", false, false},
-            {"sens.pitot", Stage::Sensors, Kind::Test, "Pitot response",
-             "A blocked or leaking pitot fools stall protection and the transitions.",
-             "Blow gently into the pitot (or cup a hand over it): the airspeed must rise.", true, true},
-            {"sens.orientation", Stage::Sensors, Kind::Test, "Attitude follows the aircraft",
-             "A wrong board orientation flips the aircraft on takeoff.",
-             "Tilt right, nose up, and turn it: the ball and heading must follow.", true, false},
-            {"sens.heading", Stage::Sensors, Kind::You, "Heading matches",
-             "The final compass sanity check.",
-             "The aircraft arrow on the map points where the real nose points.", true, false},
-            {"sens.health", Stage::Sensors, Kind::Auto, "Sensors healthy",
-             "Any unhealthy sensor is a reason not to fly.", "Gyro, accel, compass, baro, airspeed all healthy.",
-             true, false},
-            {"sens.ekf", Stage::Sensors, Kind::Auto, "Navigation filter",
-             "The EKF decides where the aircraft is; it must be confident.",
-             "EKF healthy, all innovation ratios under 0.5.", true, true},
-            {"sens.gps", Stage::Sensors, Kind::Auto, "GPS",
-             "Every automatic mode needs a good position.", "3D fix, 10 or more satellites, HDOP 1.2 or better.",
-             true, true},
-            {"sens.gps2", Stage::Sensors, Kind::Auto, "Second GPS",
-             "The backup only helps if it's healthy too.", "3D fix on the second GPS.", false, false},
-            {"sens.home", Stage::Sensors, Kind::Auto, "Home position",
-             "QRTL and the failsafes fly back to home.", "Home set, within 20 m of the aircraft.", true, true},
-            {"sens.logging", Stage::Sensors, Kind::Auto, "Flight log",
-             "Without a log, nothing can be learned from a problem.", "SD card logging works.", false, false},
-            {"sens.vibe", Stage::Sensors, Kind::Auto, "Vibration at rest",
-             "High vibration at rest points at a loose board or mount.", "Vibration low, no clipping.", false,
-             false},
-            // ---- surfaces
-            {"surf.roll", Stage::Surfaces, Kind::Test, "Ailerons",
-             "A reversed aileron rolls the aircraft the wrong way at the first turn.",
-             "Watch the ailerons while the GCS rolls right then left.", true, false},
-            {"surf.pitch", Stage::Surfaces, Kind::Test, "Elevator",
-             "A reversed elevator stalls or dives the aircraft after the transition.",
-             "Watch the elevator while the GCS pitches up then down.", true, false},
-            {"surf.yaw", Stage::Surfaces, Kind::Test, "Rudder",
-             "A reversed rudder makes turns uncoordinated.", "Watch the rudder while the GCS yaws right then left.",
-             false, false},
-            {"surf.stabilize", Stage::Surfaces, Kind::Test, "Stabilisation",
-             "The autopilot must push back against a disturbance, not with it.",
-             "In FBWA, tilt the aircraft right by hand: the ailerons must roll it back left.", true, false},
-            {"surf.trim", Stage::Surfaces, Kind::You, "Surfaces neutral",
-             "Off-neutral surfaces at rest mean the autopilot fights a trim error all flight.",
-             "With the sticks centred, every surface sits neutral.", false, false},
-            // ---- motors
-            {"mot.gate", Stage::Motors, Kind::You, "Ready to spin motors",
-             "Spinning motors is the most dangerous part of a preflight.",
-             "Choose props OFF (safest) or props ON with the aircraft held/tied down and everyone clear.", true,
-             false},
-            {"mot.lift", Stage::Motors, Kind::Test, "Lift motors",
-             "A motor in the wrong position or spinning the wrong way flips the aircraft at liftoff.",
-             "Each motor spins briefly: check it's the one shown, spinning the way shown.", true, false},
-            {"mot.pusher", Stage::Motors, Kind::Test, "Pusher motor",
-             "No pusher thrust means no transition: it hovers until the battery runs out.",
-             "The pusher spins briefly: check it blows air backwards.", true, false},
-            // ---- payload
-            {"pay.gimbal", Stage::Payload, Kind::Test, "Gimbal",
-             "A stuck gimbal means no useful picture and wrong camera targets.",
-             "The GCS moves the gimbal: check it moves the way shown and re-centres.", false, false},
-            {"pay.video", Stage::Payload, Kind::Auto, "Video feed", "No video, no mission.",
-             "Frames arriving from the camera.", false, false},
-            // ---- mission
-            {"mis.synced", Stage::Mission, Kind::Auto, "Mission on the vehicle",
-             "AUTO flies what the vehicle holds, not what the GCS shows.",
-             "The vehicle has a mission and it matches the plan.", true, true},
-            {"mis.landing", Stage::Mission, Kind::Auto, "Landing for Land and failsafes",
-             "Land and every failsafe RTL fly the mission's landing: circle beside L, into the wind, land vertically.",
-             "The mission has a landing (L, or home) with its DO_LAND_START marker. Re-sync the plan if not.", true,
-             true},
-            {"mis.alts", Stage::Mission, Kind::Auto, "Mission altitudes",
-             "Too low hits obstacles; too high breaks rules or the fence.",
-             "Every waypoint between the takeoff altitude and 120 m (or the fence).", false, true},
-            {"mis.range", Stage::Mission, Kind::Auto, "Distances",
-             "Far waypoints eat the reserve for the vertical landing.",
-             "Waypoints and L within a sensible range of home.", true, true},
-            {"mis.endurance", Stage::Mission, Kind::Auto, "Endurance",
-             "Running out of battery on a loop that flies forever.",
-             "Enough battery for the laps you plan, plus the landing reserve.", false, true},
-            {"mis.review", Stage::Mission, Kind::You, "Route reviewed",
-             "The last look at where it will go.", "Check the route, the takeoff altitude and L on the map.",
-             false, true},
-            // ---- final
-            {"fin.ready", Stage::Final, Kind::Auto, "Vehicle set for launch",
-             "Launch must start the mission from its takeoff, with every pre-arm check passing.",
-             "The GCS selects AUTO, resets the mission to the takeoff and runs the pre-arm checks.", true, true},
-            {"fin.safety", Stage::Final, Kind::Auto, "Safety OFF",
-             "With safety on, the motors can't spin and Launch can't arm.",
-             "Hold SAFETY until it reads OFF. From now on the props are live.", true, true},
-        };
-        for (const auto& c : paramChecks()) {
-            v.push_back({c.id, Stage::Params, Kind::Fix, c.title, c.why, "", c.critical, false});
-        }
-        // keep stage order (params were appended)
-        std::stable_sort(v.begin(), v.end(),
-                         [](const StepDef& a, const StepDef& b) { return a.stage < b.stage; });
-        return v;
-    }();
+    // id, stage, kind, title, sentence (while it runs), how (when it isn't right), critical, turnaround, wait
+    static const std::vector<StepDef> list = {
+        // ---- the look card: only a person can see these
+        {"air.props", Stage::Look, Kind::You, "Propellers undamaged and tight", "",
+         "Replace a cracked or chipped propeller and tighten any loose one.", true, true, 0},
+        {"air.pitot", Stage::Look, Kind::You, "Pitot cover off", "", "Take the cover off the pitot tube.", true, true, 0},
+        {"air.battery", Stage::Look, Kind::You, "Battery strapped in and plugged in", "",
+         "Strap the battery down and push the connector fully in.", true, true, 0},
+        {"site.area", Stage::Look, Kind::You, "10 m clear around it, nobody close", "",
+         "Move people and loose things at least 10 m away.", true, true, 0},
+        {"sens.pitot", Stage::Look, Kind::Test, "Blow gently into the pitot tube", "",
+         "The airspeed didn't rise: check the pitot tube and its hoses for a blockage or a leak.", true, true, 0},
+        // ---- connection
+        {"profile.vehicle", Stage::Connection, Kind::Auto, "Aircraft type and wiring",
+         "Reading the aircraft's type and how its motors and servos are wired",
+         "The aircraft's outputs aren't set up for a QuadPlane: needs a technician.", true, true, 30},
+        {"link.telemetry", Stage::Connection, Kind::Auto, "Telemetry link", "Checking the radio link",
+         "Check the telemetry radio and its antennas.", true, true, 10},
+        // ---- battery
+        {"power.voltage", Stage::Battery, Kind::Auto, "Battery charged", "Checking the battery is charged",
+         "Fit a fully charged battery.", true, true, 10},
+        {"power.balance", Stage::Battery, Kind::Auto, "Battery cells even", "Checking the battery's cells are even",
+         "One cell is lower than the others: balance-charge the battery, or use another.", false, true, 10},
+        {"power.current", Stage::Battery, Kind::Auto, "Current sensor", "Checking the battery current reading",
+         "The battery current isn't measured right, so battery time left is a guess: needs a technician.", false,
+         false, 10},
+        {"power.board", Stage::Battery, Kind::Auto, "Autopilot power", "Checking the autopilot's power supply",
+         "The autopilot's supply voltage is out of range: needs a technician.", true, false, 10},
+        // ---- sensors
+        {"sens.health", Stage::Sensors, Kind::Auto, "Sensors healthy", "Checking every sensor reports healthy",
+         "A sensor isn't working.", true, true, 20},
+        {"sens.ekf", Stage::Sensors, Kind::Auto, "Position estimate", "Waiting for the autopilot to know where it is",
+         "The autopilot isn't sure where it is. Keep it still, away from metal and power lines, and wait.", true, true,
+         90},
+        {"sens.gps", Stage::Sensors, Kind::Auto, "GPS", "Waiting for a good GPS fix",
+         "Not enough satellites yet: give it a clear view of the sky and wait.", true, true, 90},
+        {"sens.home", Stage::Sensors, Kind::Auto, "Home position", "Checking home is set where the aircraft is",
+         "Home isn't where the aircraft is: restart the autopilot here.", true, true, 60},
+        {"sens.vibe", Stage::Sensors, Kind::Auto, "Vibration", "Checking for vibration at rest",
+         "High vibration at rest: check the autopilot's mounting.", false, false, 10},
+        {"sens.logging", Stage::Sensors, Kind::Auto, "Flight log", "Checking the flight log is recording",
+         "The flight log isn't recording: check the autopilot's SD card.", false, false, 8},
+        // ---- settings
+        {"setup.app", Stage::Setup, Kind::Auto, "Aircraft settings", "Checking the aircraft is set up for this app",
+         "Some of the aircraft's settings aren't right for this app.", true, false, 30},
+        {"setup.battery", Stage::Setup, Kind::Auto, "Battery warning levels",
+         "Checking the low-battery warnings match this battery",
+         "The battery warning levels on the aircraft don't match this battery: ask a technician to set them.", false,
+         false, 30},
+        // ---- camera
+        {"pay.video", Stage::Camera, Kind::Auto, "Video", "Checking the video from the camera",
+         "No video: check the camera and the video link.", false, true, 8},
+        {"pay.gimbal", Stage::Camera, Kind::Test, "Gimbal", "Moving the gimbal and watching it follow",
+         "The gimbal didn't follow: check it's powered and nothing blocks it.", false, false, 20},
+        // ---- plan
+        {"mis.synced", Stage::Plan, Kind::Auto, "Plan on the aircraft", "Reading the plan on the aircraft",
+         "Open the plan and Sync it.", true, true, 30},
+        {"mis.landing", Stage::Plan, Kind::Auto, "Landing", "Checking where it lands",
+         "Open the plan and Sync it: that adds the landing.", true, true, 30},
+        {"mis.alts", Stage::Plan, Kind::Auto, "Plan heights", "Checking the plan's heights",
+         "Check the waypoint heights in the plan.", false, true, 30},
+        {"mis.range", Stage::Plan, Kind::Auto, "Plan distances", "Checking how far the plan goes",
+         "Make a new plan here and Sync it.", true, true, 30},
+        {"mis.endurance", Stage::Plan, Kind::Auto, "Battery for the plan", "Checking the battery lasts the plan",
+         "Shorten the plan.", false, true, 30},
+        // ---- moving parts
+        {"surf.roll", Stage::Moving, Kind::Test, "Ailerons", "Moving the ailerons",
+         "An aileron didn't move: check its servo and wiring.", true, false, 30},
+        {"surf.pitch", Stage::Moving, Kind::Test, "Elevator", "Moving the elevator",
+         "The elevator didn't move: check its servo and wiring.", true, false, 30},
+        {"surf.yaw", Stage::Moving, Kind::Test, "Rudder", "Moving the rudder",
+         "The rudder didn't move: check its servo and wiring.", false, false, 30},
+        {"mot.lift", Stage::Moving, Kind::Test, "Lift motors", "Spinning each lift motor in turn",
+         "Check the lift motors, their wiring and their speed controllers.", true, false, 90},
+        {"mot.pusher", Stage::Moving, Kind::Test, "Pusher motor", "Spinning the pusher motor",
+         "Check the pusher motor, its wiring and its speed controller.", true, false, 40},
+        // ---- final
+        {"fin.ready", Stage::Final, Kind::Auto, "Ready to arm", "Asking the autopilot whether it's ready to arm",
+         "The autopilot isn't ready to arm.", true, true, 30},
+    };
     return list;
 }
 
@@ -269,6 +157,14 @@ double fullCellVolts(Chemistry c) {
     case Chemistry::LiPo: break;
     }
     return 4.10;
+}
+const char* chemistryName(Chemistry c) {
+    switch (c) {
+    case Chemistry::LiHV: return "LiHV";
+    case Chemistry::LiIon: return "Li-ion";
+    case Chemistry::LiPo: break;
+    }
+    return "LiPo";
 }
 double storageCellVolts(Chemistry c) { return c == Chemistry::LiIon ? 3.70 : 3.85; }
 double lowCellVolts(Chemistry c) { return c == Chemistry::LiIon ? 3.30 : 3.50; }
@@ -351,10 +247,8 @@ OutputMap outputMap(const VehicleState& s, int lift_motors) {
 
 std::optional<Eval> evaluate(const std::string& id, const VehicleState& s, const Profile& p, Clock::time_point now) {
     const bool alive = linkAlive(s, now);
-    if (!alive && id != "profile.battery") {
-        if (findStep(id) && findStep(id)->kind == Kind::Auto) {
-            return ev(Status::Waiting, "no vehicle link");
-        }
+    if (!alive && findStep(id) && findStep(id)->kind == Kind::Auto) {
+        return ev(Status::Waiting, "no link to the aircraft");
     }
 
     if (id == "profile.vehicle") {
@@ -392,18 +286,19 @@ std::optional<Eval> evaluate(const std::string& id, const VehicleState& s, const
         if (!s.has_battery || s.battery_v <= 0.0) {
             return ev(Status::Waiting, "no battery voltage");
         }
-        if (!p.set || p.cells <= 0) {
-            return ev(Status::Waiting, "set the battery profile first (" + f2(s.battery_v) + " V)");
+        if (p.cells <= 0) {
+            return ev(Status::Waiting, "reading the battery (" + f2(s.battery_v) + " V)");
         }
         const double per = s.battery_v / p.cells;
-        const std::string d = f2(s.battery_v) + " V = " + f2(per) + " V/cell (full ≥ " + f2(fullCellVolts(p.chemistry)) + ")";
+        const std::string d = f1(s.battery_v) + " V, " + std::to_string(p.cells) + " cells " + chemistryName(p.chemistry) +
+                              " (" + f2(per) + " V each, full is " + f2(fullCellVolts(p.chemistry)) + ")";
         if (per >= fullCellVolts(p.chemistry)) {
             return ev(Status::Pass, d);
         }
         if (per >= storageCellVolts(p.chemistry)) {
-            return ev(Status::Warn, d + ": not fully charged");
+            return ev(Status::Warn, "not fully charged: " + d);
         }
-        return ev(Status::Fail, d + ": not charged");
+        return ev(Status::Fail, "not charged: " + d);
     }
     if (id == "power.balance") {
         if (s.cell_v.size() < 2) {
@@ -496,13 +391,6 @@ std::optional<Eval> evaluate(const std::string& id, const VehicleState& s, const
         }
         return ev(Status::Waiting, d + ": waiting for a better fix");
     }
-    if (id == "sens.gps2") {
-        if (!s.has_gps2) {
-            return ev(Status::NotApplicable, "no second GPS");
-        }
-        const std::string d = std::to_string(s.gps2_sats) + " sats · HDOP " + f1(s.gps2_hdop);
-        return ev(s.gps2_fix >= 3 ? Status::Pass : Status::Waiting, d);
-    }
     if (id == "sens.home") {
         if (!s.has_home) {
             return ev(Status::Waiting, "home not set yet (needs a GPS fix)");
@@ -535,7 +423,7 @@ std::optional<Eval> evaluate(const std::string& id, const VehicleState& s, const
         return std::nullopt;  // the UI knows the video
     }
 
-    if (id.rfind("mis.", 0) == 0 && id != "mis.review") {
+    if (id.rfind("mis.", 0) == 0) {
         if (!s.mission_known) {
             return ev(Status::Waiting, "mission not read yet");
         }
@@ -612,8 +500,8 @@ std::optional<Eval> evaluate(const std::string& id, const VehicleState& s, const
             const double speed = s.airspeed_cruise > 0.0 ? s.airspeed_cruise : 18.0;
             const double lap_min = lap / speed / 60.0;
             if (p.endurance_min <= 0.0) {
-                return ev(Status::Warn, "lap " + std::to_string(static_cast<int>(lap)) + " m ≈ " + f1(lap_min) +
-                                            " min; enter the typical flight time in the profile to estimate laps");
+                return ev(Status::NotApplicable, "lap " + std::to_string(static_cast<int>(lap)) + " m ≈ " + f1(lap_min) +
+                                                     " min; enter the flight time in Settings → Battery to check it");
             }
             // keep 25 % for the landing and margin
             const double usable = p.endurance_min * 0.75;
@@ -624,6 +512,8 @@ std::optional<Eval> evaluate(const std::string& id, const VehicleState& s, const
     }
 
     if (id == "fin.ready") {
+        // Launch picks the mode and the mission item itself; this is the
+        // autopilot's own verdict (its PreArm messages say why not)
         std::string missing;
         auto need = [&](bool ok, const char* what) {
             if (!ok) {
@@ -631,34 +521,47 @@ std::optional<Eval> evaluate(const std::string& id, const VehicleState& s, const
             }
         };
         need(!s.armed, "disarmed");
-        need(s.custom_mode == plane::AUTO, "AUTO selected");
-        need(s.mission_known && s.mission_current == 1, "mission at its takeoff");
-        need(prearmHealthy(s), "pre-arm checks passing");
-        need(gpsHealthy(s) && ekfHealthy(s), "GPS and EKF good");
-        return missing.empty() ? ev(Status::Pass, "AUTO · mission at the takeoff · pre-arm checks pass")
-                               : ev(Status::Waiting, "needs: " + missing);
-    }
-    if (id == "fin.safety") {
-        const SafetyState st = safetyState(s);
-        if (st == SafetyState::Live) {
-            return ev(Status::Pass, "safety OFF: motors live");
-        }
-        if (st == SafetyState::Unknown) {
-            return ev(Status::NotApplicable, "no safety switch reported");
-        }
-        return ev(Status::Waiting, "safety ON: hold SAFETY to turn it off");
+        need(gpsHealthy(s) && ekfHealthy(s), "GPS and position");
+        need(prearmHealthy(s), "the pre-arm checks");
+        return missing.empty() ? ev(Status::Pass, "the autopilot's pre-arm checks pass")
+                               : ev(Status::Waiting, "waiting for " + missing);
     }
 
-    if (id.rfind("param.", 0) == 0) {
+    if (id == "setup.app") {
+        const SetupReport r = setupReport(s, p);
+        if (!r.known) {
+            return ev(Status::Waiting, "reading the aircraft's settings");
+        }
+        if (r.wrong.empty()) {
+            return ev(Status::Pass, "set up for this app, failsafes included");
+        }
+        std::string d;
+        for (const auto& w : r.wrong) {
+            d += (d.empty() ? "" : " · ") + w.check->title;
+        }
+        return ev(Status::Fail, std::to_string(r.wrong.size()) + (r.wrong.size() == 1 ? " setting" : " settings") +
+                                    " not right: " + d);
+    }
+    if (id == "setup.battery") {
+        if (p.cells <= 0) {
+            return ev(Status::Waiting, "reading the battery");
+        }
+        bool known = true;
+        std::string d;
         for (const auto& c : paramChecks()) {
-            if (c.id == id) {
-                const ParamVerdict v = checkParam(c, s, p);
-                if (!v.known) {
-                    return ev(Status::Waiting, "reading…");
-                }
-                return ev(v.ok ? Status::Pass : (c.critical ? Status::Fail : Status::Warn), v.detail);
+            if (c.group != ParamGroup::Battery) continue;
+            if (c.name == "BATT_CAPACITY" && p.capacity_mah <= 0) continue;  // not entered: nothing to compare
+            const ParamVerdict v = checkParam(c, s, p);
+            known &= v.known;
+            if (v.known && !v.ok) {
+                d += (d.empty() ? "" : " · ") + v.detail;
             }
         }
+        if (!known) {
+            return ev(Status::Waiting, "reading the aircraft's settings");
+        }
+        return d.empty() ? ev(Status::Pass, "set for this " + std::to_string(p.cells) + "-cell battery")
+                         : ev(Status::Warn, d);
     }
     return std::nullopt;
 }
@@ -666,65 +569,70 @@ std::optional<Eval> evaluate(const std::string& id, const VehicleState& s, const
 // ---- parameters ---------------------------------------------------------------------------------
 
 const std::vector<ParamCheck>& paramChecks() {
+    using G = ParamGroup;
     static const std::vector<ParamCheck> list = {
-        {"param.Q_GUIDED_MODE", "Q_GUIDED_MODE", "Fly To stays on the wing",
-         "1 makes Hold/Fly To hover on the rotors instead of circling on the wing.", true},
-        {"param.Q_WVANE_GAIN", "Q_WVANE_GAIN", "Hover turns into the wind",
-         "Weathervaning yaws the nose into the wind while hovering, so the takeoff's straight transition leg "
-         "(flown straight ahead) goes into the wind: shortest and safest. ArduPlane enables it but ships the "
-         "gain at 0, which turns it off.",
-         false},
-        {"param.Q_ASSIST_SPEED", "Q_ASSIST_SPEED", "Stall protection (Q_ASSIST)",
-         "Below this airspeed the lift rotors catch a stalling wing; 0 turns that off.", true},
-        {"param.AIRSPEED", "", "Airspeed limits consistent",
-         "AIRSPEED_MIN < AIRSPEED_CRUISE < AIRSPEED_MAX, or the speed controller fights itself.", true},
-        {"param.ARMING", "", "All arming checks on",
-         "Skipped arming checks are how broken sensors get airborne.", true},
-        {"param.THR_FAILSAFE", "THR_FAILSAFE", "RC failsafe enabled",
-         "Without it, losing the transmitter isn't detected.", true},
-        {"param.FS_LONG_ACTN", "FS_LONG_ACTN", "Long failsafe lands at L",
-         "After a long RC or GCS link loss: RTL, which flies the same landing as the Land button.", true},
-        {"param.FS_GCS_ENABL", "FS_GCS_ENABL", "GCS link failsafe",
-         "This GCS flies the aircraft; if its link is lost the aircraft should come back and land.", true},
-        {"param.RTL_AUTOLAND", "RTL_AUTOLAND", "Failsafes fly the Land approach",
+        {"param.Q_GUIDED_MODE", "Q_GUIDED_MODE", "Hold and Fly To circle on the wing",
+         "1 makes Hold/Fly To hover on the rotors instead of circling on the wing.", G::Setup},
+        {"param.Q_ASSIST_SPEED", "Q_ASSIST_SPEED", "Lift rotors catch a stall",
+         "Below this airspeed the lift rotors catch a stalling wing; 0 turns that off.", G::Setup},
+        {"param.AIRSPEED", "", "Airspeed limits in order",
+         "AIRSPEED_MIN < AIRSPEED_CRUISE < AIRSPEED_MAX, or the speed controller fights itself.", G::Setup},
+        {"param.ARMING", "", "All arming checks on", "Skipped arming checks are how broken sensors get airborne.",
+         G::Setup},
+        {"param.THR_FAILSAFE", "THR_FAILSAFE", "Notices a lost transmitter",
+         "Without it, losing the transmitter isn't detected.", G::Setup},
+        {"param.FS_LONG_ACTN", "FS_LONG_ACTN", "Comes back and lands after a long link loss",
+         "After a long RC or GCS link loss: RTL, which flies the same landing as the Land button.", G::Setup},
+        {"param.FS_GCS_ENABL", "FS_GCS_ENABL", "Notices a lost link to this app",
+         "This GCS flies the aircraft; if its link is lost the aircraft should come back and land.", G::Setup},
+        {"param.RTL_AUTOLAND", "RTL_AUTOLAND", "Return home flies the landing",
          "2 makes every RTL go straight to the mission's landing (circle beside L, into the wind, land "
          "vertically) instead of circling over home. With 0 the mission's landing marker also blocks arming.",
+         G::Setup},
+        {"param.Q_RTL_MODE", "Q_RTL_MODE", "Return home lands at L",
+         "Any other value makes RTL do its own vertical landing at home and skip the landing at L.", G::Setup},
+        {"param.BRD_SAFETY_DEFLT", "BRD_SAFETY_DEFLT", "Motors cut at power-up",
+         "The motors stay cut after power-up until you turn safety off by hand. Applies after a restart.", G::Setup,
          true},
-        {"param.Q_RTL_MODE", "Q_RTL_MODE", "RTL uses the mission landing",
-         "Any other value makes RTL do its own vertical landing at home and skip the landing at L.", true},
-        {"param.BRD_SAFETY_DEFLT", "BRD_SAFETY_DEFLT", "Safety ON at power-up",
-         "The motors stay cut after power-up until you turn safety off by hand. Applies after a reboot.", true,
-         true},
-        {"param.BATT_FS_LOW_ACT", "BATT_FS_LOW_ACT", "Low battery lands at L",
-         "At low battery it should fly the landing at L on its own.", true},
-        {"param.BATT_FS_CRT_ACT", "BATT_FS_CRT_ACT", "Critical battery action",
-         "At critical battery it should land right away (QLand).", true},
-        {"param.BATT_LOW_VOLT", "BATT_LOW_VOLT", "Low battery voltage",
-         "The trigger for the low-battery action, per this pack.", true},
-        {"param.BATT_CRT_VOLT", "BATT_CRT_VOLT", "Critical battery voltage",
-         "The trigger for the critical-battery landing, per this pack.", true},
-        {"param.BATT_CAPACITY", "BATT_CAPACITY", "Battery capacity",
-         "Remaining % and capacity failsafes use it.", false},
-        {"param.BATT_ARM_VOLT", "BATT_ARM_VOLT", "Minimum voltage to arm",
-         "Refuses to arm on a pack that isn't charged.", false},
-        {"param.FENCE_ENABLE", "FENCE_ENABLE", "Geofence",
-         "A fence (with a maximum altitude) catches a flyaway.", false},
-        {"param.WP_LOITER_RAD", "WP_LOITER_RAD", "Default circle radius",
-         "Smaller than the aircraft can turn at its bank limit means it can never fly the circle.", false},
-        {"param.ROLL_LIMIT_DEG", "ROLL_LIMIT_DEG", "Bank limit",
-         "Very steep banks stall a loaded wing; very shallow ones make huge circles.", false},
-        {"param.LOG_DISARMED", "LOG_DISARMED", "Logging while disarmed",
-         "Logging on the ground fills the SD card with nothing.", false},
+        {"param.BATT_FS_LOW_ACT", "BATT_FS_LOW_ACT", "Lands by itself at low battery",
+         "At low battery it should fly the landing at L on its own.", G::Setup},
+        {"param.BATT_FS_CRT_ACT", "BATT_FS_CRT_ACT", "Lands at once at critical battery",
+         "At critical battery it should land right away (QLand).", G::Setup},
+        {"param.BATT_LOW_VOLT", "BATT_LOW_VOLT", "Low-battery level", "The trigger for the low-battery landing.",
+         G::Battery},
+        {"param.BATT_CRT_VOLT", "BATT_CRT_VOLT", "Critical-battery level",
+         "The trigger for the critical-battery landing.", G::Battery},
+        {"param.BATT_CAPACITY", "BATT_CAPACITY", "Battery size", "Remaining % and capacity failsafes use it.",
+         G::Battery},
+        {"param.BATT_ARM_VOLT", "BATT_ARM_VOLT", "Won't arm on a flat battery",
+         "Refuses to arm on a pack that isn't charged.", G::Battery},
     };
     return list;
 }
 
+bool SetupReport::fixable() const {
+    return std::any_of(wrong.begin(), wrong.end(),
+                       [](const SetupItem& w) { return w.verdict.recommended && !w.check->name.empty(); });
+}
+
+SetupReport setupReport(const VehicleState& s, const Profile& p) {
+    SetupReport r;
+    r.known = true;
+    for (const auto& c : paramChecks()) {
+        if (c.group != ParamGroup::Setup) continue;
+        const ParamVerdict v = checkParam(c, s, p);
+        r.known &= v.known;
+        if (v.known && !v.ok) {
+            r.wrong.push_back({&c, v});
+        }
+    }
+    return r;
+}
+
 std::vector<std::string> paramsToFetch() {
-    std::vector<std::string> v = {"Q_ENABLE", "Q_FRAME_CLASS", "Q_FRAME_TYPE", "AIRSPEED_MIN", "AIRSPEED_CRUISE",
-                                  "AIRSPEED_MAX", "ARMING_CHECK", "ARMING_SKIPCHK", "ARSPD_TYPE", "FLTMODE_CH",
-                                  "FLTMODE1", "FLTMODE2", "FLTMODE3", "FLTMODE4", "FLTMODE5", "FLTMODE6",
-                                  "RCMAP_ROLL", "RCMAP_PITCH", "RCMAP_THROTTLE", "RCMAP_YAW", "RC_OVERRIDE_TIME",
-                                  "Q_WVANE_ENABLE"};
+    std::vector<std::string> v = {"Q_ENABLE",       "Q_FRAME_CLASS", "Q_FRAME_TYPE", "AIRSPEED_MIN",
+                                  "AIRSPEED_CRUISE", "AIRSPEED_MAX", "ARMING_CHECK", "ARMING_SKIPCHK",
+                                  "ARSPD_TYPE",     "MNT1_TYPE"};
     for (const auto& c : paramChecks()) {
         if (!c.name.empty()) {
             v.push_back(c.name);
@@ -769,28 +677,6 @@ ParamVerdict checkParam(const ParamCheck& c, const VehicleState& s, const Profil
     };
 
     if (c.id == "param.Q_GUIDED_MODE") return simple("Q_GUIDED_MODE", 0.0f, "circle on the wing");
-    if (c.id == "param.Q_WVANE_GAIN") {
-        const auto en = get("Q_WVANE_ENABLE");
-        const auto gain = get("Q_WVANE_GAIN");
-        if (!en || !gain) return v;
-        v.known = true;
-        v.current = *gain;
-        const int dir = static_cast<int>(std::lround(*en));
-        const bool nose = dir == 1 || dir == -1;  // nose into wind (always, or takeoff / landing only)
-        v.ok = nose && *gain > 0.0f;
-        if (*gain <= 0.0f) {
-            v.recommended = 1.0f;
-        }
-        if (v.ok) {
-            v.detail = "Q_WVANE_ENABLE = " + num(*en) + ", Q_WVANE_GAIN = " + num(*gain) + " ✓ noses into the wind";
-        } else if (!nose) {
-            v.detail = "Q_WVANE_ENABLE = " + num(*en) + ": set it to 1 (nose into wind) in your parameter editor" +
-                       (*gain <= 0.0f ? "; and Q_WVANE_GAIN → recommended 1" : "");
-        } else {
-            v.detail = "Q_WVANE_GAIN = " + num(*gain) + " → recommended 1: with 0 the hover never turns into the wind";
-        }
-        return v;
-    }
     if (c.id == "param.RTL_AUTOLAND") return simple("RTL_AUTOLAND", 2.0f, "RTL flies the landing at L");
     if (c.id == "param.Q_RTL_MODE") return simple("Q_RTL_MODE", 0.0f, "RTL hands over to the mission landing");
     if (c.id == "param.BRD_SAFETY_DEFLT") return simple("BRD_SAFETY_DEFLT", 1.0f, "safety starts ON");
@@ -841,50 +727,39 @@ ParamVerdict checkParam(const ParamCheck& c, const VehicleState& s, const Profil
         const bool low = c.id == "param.BATT_LOW_VOLT";
         const char* n = low ? "BATT_LOW_VOLT" : "BATT_CRT_VOLT";
         const auto cur = get(n);
-        if (!cur || !p.set || p.cells <= 0) return v;
+        if (!cur || p.cells <= 0) return v;
         v.known = true;
         v.current = *cur;
         const float want = static_cast<float>(std::round(p.cells * (low ? lowCellVolts(p.chemistry) : criticalCellVolts(p.chemistry)) * 10.0) / 10.0);
         v.ok = *cur > 0.0f && std::abs(*cur - want) <= p.cells * 0.1f;
         if (!v.ok) v.recommended = want;
-        v.detail = std::string(n) + " = " + num(*cur) + " V" +
-                   (v.ok ? " ✓" : " → recommended " + num(want) + " V for " + std::to_string(p.cells) + " cells");
+        v.detail = std::string(low ? "low-battery level " : "critical-battery level ") + num(*cur) + " V" +
+                   (v.ok ? " ✓" : "; for this " + std::to_string(p.cells) + "-cell battery about " + num(want) + " V");
         return v;
     }
     if (c.id == "param.BATT_CAPACITY") {
         const auto cur = get("BATT_CAPACITY");
-        if (!cur || !p.set || p.capacity_mah <= 0) return v;
+        if (!cur || p.capacity_mah <= 0) return v;
         v.known = true;
         v.current = *cur;
         v.ok = std::abs(*cur - p.capacity_mah) <= p.capacity_mah * 0.05f;
         if (!v.ok) v.recommended = static_cast<float>(p.capacity_mah);
-        v.detail = "BATT_CAPACITY = " + num(*cur) + " mAh" + (v.ok ? " ✓" : " → this pack is " + std::to_string(p.capacity_mah) + " mAh");
+        v.detail = "battery size set to " + num(*cur) + " mAh" +
+                   (v.ok ? " ✓" : "; Settings → Battery says " + std::to_string(p.capacity_mah) + " mAh");
         return v;
     }
     if (c.id == "param.BATT_ARM_VOLT") {
         const auto cur = get("BATT_ARM_VOLT");
-        if (!cur || !p.set || p.cells <= 0) return v;
+        if (!cur || p.cells <= 0) return v;
         v.known = true;
         v.current = *cur;
         const float want = static_cast<float>(std::round(p.cells * (storageCellVolts(p.chemistry) + 0.05) * 10.0) / 10.0);
         v.ok = *cur > 0.0f;
         if (!v.ok) v.recommended = want;
-        v.detail = "BATT_ARM_VOLT = " + num(*cur) + " V" + (v.ok ? " ✓" : " → recommended " + num(want) + " V");
+        v.detail = v.ok ? "won't arm below " + num(*cur) + " V ✓"
+                        : "it would arm on a flat battery (about " + num(want) + " V is right for this one)";
         return v;
     }
-    if (c.id == "param.FENCE_ENABLE") {
-        // advice only: enabling a fence that has no boundary or altitude set up
-        // makes the pre-arm checks fail, so never a one-tap write
-        const auto cur = get("FENCE_ENABLE");
-        if (!cur) return v;
-        v.known = true;
-        v.current = *cur;
-        v.ok = *cur >= 1.0f;
-        v.detail = "FENCE_ENABLE = " + num(*cur) +
-                   (v.ok ? " ✓" : ": set up a fence (boundary and maximum altitude) in your planner, then enable it there");
-        return v;
-    }
-    if (c.id == "param.LOG_DISARMED") return simple("LOG_DISARMED", 0.0f, "log only when armed");
     if (c.id == "param.Q_ASSIST_SPEED") {
         const auto cur = get("Q_ASSIST_SPEED"), mn = get("AIRSPEED_MIN");
         if (!cur || !mn) return v;
@@ -923,31 +798,6 @@ ParamVerdict checkParam(const ParamCheck& c, const VehicleState& s, const Profil
         v.ok = std::abs(*chk - 1.0f) < 1e-4f;
         if (!v.ok) v.recommended = 1.0f;
         v.detail = "ARMING_CHECK = " + num(*chk) + (v.ok ? " ✓ all checks" : " → recommended 1 (all checks)");
-        return v;
-    }
-    if (c.id == "param.WP_LOITER_RAD") {
-        const auto rad = get("WP_LOITER_RAD"), roll = get("ROLL_LIMIT_DEG"), cr = get("AIRSPEED_CRUISE");
-        if (!rad || !roll || !cr) return v;
-        v.known = true;
-        v.current = *rad;
-        const double bank = std::clamp(static_cast<double>(*roll), 10.0, 80.0) * geo::kDegToRad;
-        // the turn it can fly at 75 % of the bank limit
-        const double min_r = (*cr) * (*cr) / (9.81 * std::tan(bank * 0.75));
-        v.ok = std::abs(*rad) >= min_r;
-        const float want = static_cast<float>(std::ceil(min_r / 10.0) * 10.0);
-        if (!v.ok) v.recommended = want;
-        v.detail = "WP_LOITER_RAD = " + num(std::abs(*rad)) + " m (tightest comfortable circle at " + num(*cr) +
-                   " m/s ≈ " + num(static_cast<float>(std::round(min_r))) + " m)" + (v.ok ? " ✓" : " → recommended " + num(want) + " m");
-        return v;
-    }
-    if (c.id == "param.ROLL_LIMIT_DEG") {
-        const auto cur = get("ROLL_LIMIT_DEG");
-        if (!cur) return v;
-        v.known = true;
-        v.current = *cur;
-        v.ok = *cur >= 30.0f && *cur <= 65.0f;
-        if (!v.ok) v.recommended = 45.0f;
-        v.detail = "ROLL_LIMIT_DEG = " + num(*cur) + "°" + (v.ok ? " ✓" : " → recommended 45°");
         return v;
     }
     return v;
@@ -1025,11 +875,8 @@ bool Session::complete() const {
     }
     for (const auto* d : activeSteps()) {
         const Status st = result(d->id).status;
-        if (!isDone(st)) {
-            return false;
-        }
-        if (d->critical && st == Status::Skipped) {
-            return false;
+        if (d->critical ? (!isDone(st) || st == Status::Skipped) : !(isDone(st) || st == Status::Fail)) {
+            return false;  // a required step not passed, or an optional one not decided yet
         }
     }
     return true;

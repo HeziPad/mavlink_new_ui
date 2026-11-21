@@ -286,6 +286,10 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
         v.labels_english = vector_map_->english();
         v.reserve_pct = settings_.battery_reserve_pct;
         v.text_size = settings_.text_size;
+        v.battery_chem = static_cast<int>(pf_->profile().chemistry);
+        v.battery_mah = pf_->profile().capacity_mah;
+        v.battery_minutes = static_cast<int>(std::lround(pf_->profile().endurance_min));
+        v.battery_cells = pf_->profile().cells;
         v.link = linkValues();
         refreshOfflineCounts();
         updateLinkStatus();
@@ -411,6 +415,29 @@ MainWindow::MainWindow(const AppSettings& settings, QWidget* parent) : QWidget(p
         settings_.battery_reserve_pct = pct;
         settings_.save();
         endurance_ms_ = -1000000;  // recompute now
+    });
+    connect(settings_screen_, &SettingsScreen::batteryChemistryChanged, this, [this](int chem) {
+        const auto& pr = pf_->profile();
+        pf_->setBattery(static_cast<preflight::Chemistry>(chem), pr.capacity_mah, pr.endurance_min);
+    });
+    connect(settings_screen_, &SettingsScreen::batteryEdit, this, [this](int field) {
+        const auto& pr = pf_->profile();
+        auto apply = [this](int mah, double minutes) {
+            pf_->setBattery(pf_->profile().chemistry, mah, minutes);
+            settings_screen_->setBattery(mah, static_cast<int>(std::lround(minutes)));
+        };
+        if (field == SettingsScreen::kCapacityField) {
+            pad_->openNumber(QStringLiteral("BATTERY SIZE (mAh)"), QStringLiteral("mAh"), pr.capacity_mah, 0, 100000,
+                             {{QStringLiteral("5000"), 5000}, {QStringLiteral("10000"), 10000}, {QStringLiteral("16000"), 16000},
+                              {QStringLiteral("22000"), 22000}},
+                             [apply, this](int mah) { apply(mah, pf_->profile().endurance_min); });
+        } else {
+            pad_->openNumber(QStringLiteral("TYPICAL FLIGHT TIME (minutes)"), QStringLiteral("MIN"),
+                             static_cast<int>(std::lround(pr.endurance_min)), 0, 600,
+                             {{QStringLiteral("20"), 20}, {QStringLiteral("40"), 40}, {QStringLiteral("60"), 60},
+                              {QStringLiteral("90"), 90}},
+                             [apply, this](int min) { apply(pf_->profile().capacity_mah, min); });
+        }
     });
     connect(settings_screen_, &SettingsScreen::textSizeChanged, this, &MainWindow::applyTextSize);
     connect(settings_screen_, &SettingsScreen::trailChanged, this, [this](bool on, int secs) {
@@ -2168,7 +2195,7 @@ void MainWindow::refreshDock() {
         spec.accent = ok ? kGreen : (pf_->session().active() && pf_->session().failCount() ? kRed : kAmber);
         spec.active = preflight_->isOpen();
         spec.hint = ok ? QStringLiteral("Preflight passed · tap to review")
-                       : QStringLiteral("Every check, test and calibration before launch");
+                       : QStringLiteral("Checks the aircraft before launch, mostly by itself");
         if (!alive) {
             spec.enabled = false;
             spec.reason = no_link;

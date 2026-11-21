@@ -229,7 +229,7 @@ or descends to it (what the GCS asked for, so it doesn't drift during the climb)
 - **The on-board approach follows the wind.** In flight, the GCS re-uploads it
   when the wind direction moves 30° or more (at most once a minute), so a
   failsafe also lands into the current wind. A toast says when it does.
-- **Preflight checks all of these** and fixes them with one tap.
+- **Preflight checks all of these** and fixes them with one SET IT UP tap.
 - **Arming is refused if `RTL_AUTOLAND` is 0.** ArduPilot won't arm with a
   `DO_LAND_START` in the mission and `RTL_AUTOLAND` at 0 ("DO_LAND_START set
   and RTL_AUTOLAND disabled"); SYSTEMS explains it.
@@ -474,28 +474,51 @@ On the ground, dock slot 3 is **PREFLIGHT** (a progress ring shows how far
 you are). **Launch stays locked until it passes.** A 3 s hold on "launch
 without preflight" overrides that, and the override is written to the report.
 
-It is a full-window checklist in 12 stages:
+It is made for an operator who isn't an expert: tap it, look at the aircraft,
+and watch it check itself.
 
-| Stage | What happens |
-|---|---|
-| Aircraft | Firmware, frame (`Q_FRAME_CLASS/TYPE`) and output map are read; you set the battery chemistry, cells, capacity and typical flight time once |
-| Site | Airspace, weather, a clear 10 m takeoff circle, the landing point, bystanders, GCS power |
-| Airframe | Wing and booms, props (CW/CCW per position shown), linkages, **pitot cover off**, CG, battery, antennas |
-| Power | Charge per cell for the chemistry, cell balance, current sensor, autopilot supply |
-| Links & RC | Telemetry rate and radio margin; move each stick to both ends; mode-switch positions with their modes; **RC failsafe test** (turn the transmitter off) |
-| Sensors | Gyro, level, accelerometer (simple or 6-position with each pose drawn), **compass** (from a known heading, or rotate it while a sphere fills in), baro/airspeed zero, pitot blow test, attitude follows the aircraft, heading matches; health, EKF, GPS, home, logging, vibration |
-| Surfaces | The GCS sweeps ailerons, elevator and rudder in MANUAL (disarmed) while the picture shows which way each must move; a wrong one can be reversed with one tap; stabilisation check in FBWA |
-| Motors | Props off (or tied down), safety OFF, then each lift motor A–D spins 2 s at 15 %: the picture lights the position and spin direction it must have, and the GCS checks the right output moved. The pusher spins 2 s at 12 % in MANUAL and is force-disarmed |
-| Payload | Gimbal sweep, video frames arriving |
-| Settings | 18 parameter checks (Q_GUIDED_MODE, weathervaning into the wind, Q_ASSIST_SPEED, airspeed limits, arming checks, RC/GCS/battery failsafes and voltages for your pack, fence, loiter radius vs bank limit, ...), each with the reason and a one-tap fix (confirmed, read back, logged) where there is a safe value |
-| Mission | On the vehicle, landing point, altitudes, range, laps per pack |
-| Ready | The GCS selects AUTO, resets the mission to its takeoff and runs the pre-arm checks (their messages are listed if any fail); then safety OFF and **READY TO LAUNCH** |
+1. **Look at the aircraft.** One card with the things only a person can see:
+   propellers undamaged and tight, pitot cover off, battery strapped in and
+   plugged in, 10 m clear around it. Tap each one. The last row, "blow gently
+   into the pitot tube", ticks itself when the airspeed rises and settles.
+2. **Checking.** Every other step runs by itself, one row at a time, with a
+   plain sentence of what it's doing ("Waiting for a good GPS fix") and the
+   live values next to it. A step that is still waiting gets its own time
+   (90 s for GPS and the position estimate) before it is marked.
 
-Tests that move or spin anything need a 1 s hold, have a **STOP ALL** button,
-and have vehicle-side timeouts as well. A pass stays valid until the autopilot
+   | Section | Checked |
+   |---|---|
+   | Connection | Aircraft type and wiring (frame, motor and servo outputs), telemetry link |
+   | Battery | Charge per cell, cells even, current sensor, autopilot supply |
+   | Sensors and position | Sensor health, position estimate, GPS, home, vibration, flight log |
+   | Aircraft settings | The settings this app relies on (below), and the battery warning levels |
+   | Camera | Video arriving; the gimbal moves and is seen to follow |
+   | Plan | On the aircraft, landing, heights, distances, battery for the plan |
+   | Moving parts | After a hold ("all clear"): ailerons, elevator and rudder sweep in MANUAL (disarmed) and pass when each output moves both ways; each lift motor spins 2 s at 15 % and must come out on its own output and draw current; the pusher spins 2 s at 12 % in MANUAL and is force-disarmed. Safety is turned off for this and back on afterwards |
+   | Ready to arm | The autopilot's own pre-arm checks (its reasons are listed if not) |
+
+3. **Result.** **READY TO FLY**, or the problems in plain words, each saying
+   what to do and with at most one action: **SET IT UP**, **CALIBRATE COMPASS
+   / LEVEL** (when that sensor is the problem), or **TRY AGAIN**. Problems
+   block Launch; notes (a warning, or an optional step that failed) don't.
+
+**Aircraft settings.** One SET IT UP tap writes every one that's wrong, then
+says what it changed: Hold and Fly To circle on the wing (`Q_GUIDED_MODE` 0),
+stall protection (`Q_ASSIST_SPEED` below `AIRSPEED_MIN`), all arming checks
+on, lost transmitter / lost link / low and critical battery failsafes,
+`RTL_AUTOLAND` 2, `Q_RTL_MODE` 0, safety on at power-up (`BRD_SAFETY_DEFLT` 1,
+then RESTART AUTOPILOT). Airspeed limits out of order have no single right
+value and need a technician. The battery warning levels (`BATT_LOW_VOLT`,
+`BATT_CRT_VOLT`, `BATT_CAPACITY`, `BATT_ARM_VOLT`) are only checked against the
+pack fitted and shown as a note: they are never written, because packs change.
+
+The battery type, size and typical flight time are set once in Settings →
+BATTERY; the cell count is read off the pack. STOP ends the test running and
+the moving parts still to come. A pass stays valid until the autopilot
 reboots, the battery is swapped, a parameter is changed elsewhere, an hour
-passes, or it flies; after a flight a short **turnaround** preflight is offered.
-Every run is saved as JSON under `~/.local/share/mavlink_gcs_ui/mavlink_gcs_ui/preflight/`.
+passes, or it flies; after a flight a short check (the look card and the scan,
+nothing moves) is asked for. Every run is saved as JSON under
+`~/.local/share/mavlink_gcs_ui/mavlink_gcs_ui/preflight/`.
 
 ## Offline maps
 

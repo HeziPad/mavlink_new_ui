@@ -1021,7 +1021,8 @@ void MavlinkClient::handleParamValue(const mavlink_message_t& msg) {
                 break;
             }
         }
-        if (!ours && old != state_.params.end() && std::abs(old->second - p.param_value) > 1e-6f) {
+        if (!ours && old != state_.params.end() && std::abs(old->second - p.param_value) > 1e-6f &&
+            !autopilotOwnedParam(name)) {
             ++state_.params_changed;
         }
         state_.params[name] = p.param_value;

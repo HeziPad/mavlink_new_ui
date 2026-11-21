@@ -1,10 +1,8 @@
 #include "preflight_screen.hpp"
 
 #include "anim.hpp"
-#include "attitude_ball.hpp"
 #include "core/geo.hpp"
 #include "core/mission.hpp"
-#include "core/plane_modes.hpp"
 #include "preflight_art.hpp"
 #include "theme.hpp"
 
@@ -38,7 +36,7 @@ QColor statusColor(Status s) {
 }
 
 QFont body(double px, bool bold = false) {
-    QFont f(QStringLiteral("DejaVu Sans"));
+    QFont f(QString::fromLatin1(kSansFamily));
     f.setPixelSize(static_cast<int>(std::round(px)));
     f.setBold(bold);
     return f;
@@ -54,17 +52,19 @@ void wrapText(QPainter& p, const QRectF& r, const QString& t, const QFont& f, co
     p.drawText(r, Qt::TextWordWrap | Qt::AlignLeft | Qt::AlignTop, t);
 }
 
+QString q(const std::string& s) {
+    return QString::fromStdString(s);
+}
+
 art::Part partFor(const std::string& id) {
-    if (id == "air.structure") return art::Part::Structure;
     if (id == "air.props") return art::Part::Props;
-    if (id == "air.linkages") return art::Part::Linkages;
-    if (id == "air.pitot") return art::Part::Pitot;
-    if (id == "air.cg") return art::Part::CG;
+    if (id == "air.pitot" || id == "sens.pitot") return art::Part::Pitot;
     if (id == "air.battery") return art::Part::Battery;
-    if (id == "air.antennas") return art::Part::Antennas;
-    if (id == "mot.gate") return art::Part::Props;
     return art::Part::None;
 }
+
+constexpr double kGateHold = 1.0;
+constexpr double kRebootHold = 1.0;
 
 }  // namespace
 
@@ -80,20 +80,6 @@ void PreflightScreen::open(bool turnaround) {
     open_target_ = 1.0;
     if (reducedMotion()) {
         open_ = 1.0;
-    }
-    ready_shown_ = runner_->session().passed();
-    ready_dismissed_ = ready_shown_;
-    if (step_.empty() || !runner_->session().includes(step_)) {
-        // first step that isn't done
-        for (const auto* d : runner_->session().activeSteps()) {
-            if (!isDone(runner_->status(d->id))) {
-                selectStep(d->id);
-                break;
-            }
-        }
-        if (step_.empty() && !runner_->session().activeSteps().empty()) {
-            selectStep(runner_->session().activeSteps().front()->id);
-        }
     }
     show();
     raise();
@@ -133,57 +119,13 @@ void PreflightScreen::tick(double dt) {
         }
     }
     toast_t_ = std::max(0.0, toast_t_ - dt);
-    if (runner_->session().passed() && !ready_shown_) {
-        ready_shown_ = true;
-        ready_dismissed_ = false;
+    const Phase ph = runner_->flow().phase();
+    if (ph != last_phase_) {
+        last_phase_ = ph;
+        list_scroll_ = 0.0;
+        last_row_ = -1;
     }
     update();
-}
-
-std::vector<const StepDef*> PreflightScreen::stageSteps(int stage) const {
-    std::vector<const StepDef*> v;
-    for (const auto* d : runner_->session().activeSteps()) {
-        if (static_cast<int>(d->stage) == stage) {
-            v.push_back(d);
-        }
-    }
-    return v;
-}
-
-void PreflightScreen::selectStage(int stage) {
-    const auto list = stageSteps(stage);
-    if (list.empty()) {
-        return;
-    }
-    stage_ = stage;
-    list_scroll_ = 0.0;
-    for (const auto* d : list) {
-        if (!isDone(runner_->status(d->id))) {
-            step_ = d->id;
-            return;
-        }
-    }
-    step_ = list.front()->id;
-}
-
-void PreflightScreen::selectStep(const std::string& id) {
-    const StepDef* d = findStep(id);
-    if (!d) {
-        return;
-    }
-    step_ = id;
-    stage_ = static_cast<int>(d->stage);
-}
-
-void PreflightScreen::stepBy(int delta) {
-    const auto all = runner_->session().activeSteps();
-    for (size_t i = 0; i < all.size(); ++i) {
-        if (all[i]->id == step_) {
-            const int j = std::clamp(static_cast<int>(i) + delta, 0, static_cast<int>(all.size()) - 1);
-            selectStep(all[j]->id);
-            return;
-        }
-    }
 }
 
 // ---- input ------------------------------------------------------------------------------------
@@ -216,7 +158,9 @@ void PreflightScreen::mouseMoveEvent(QMouseEvent* e) {
     if (list_rect_.contains(press_pos_) && std::abs(dy) > 8) {
         dragging_ = true;
         pressed_ = -1;
-        list_scroll_ = std::clamp(press_scroll_ - dy, 0.0, std::max(0.0, list_content_h_ - list_rect_.height()));
+        list_scroll_ = press_scroll_ - dy;
+        user_scrolled_t_ = time_;
+        clampScroll();
     }
 }
 
@@ -241,43 +185,42 @@ void PreflightScreen::mouseReleaseEvent(QMouseEvent* e) {
 
 void PreflightScreen::wheelEvent(QWheelEvent* e) {
     if (list_rect_.contains(toLogical(e->position()))) {
-        list_scroll_ = std::clamp(list_scroll_ - e->angleDelta().y() / 2.0, 0.0,
-                                  std::max(0.0, list_content_h_ - list_rect_.height()));
+        list_scroll_ -= e->angleDelta().y() / 2.0;
+        user_scrolled_t_ = time_;
+        clampScroll();
     }
 }
 
+void PreflightScreen::clampScroll() {
+    list_scroll_ = std::clamp(list_scroll_, 0.0, std::max(0.0, list_content_h_ - list_rect_.height()));
+}
+
 void PreflightScreen::fire(const Hit& h) {
-    if (h.kind == "close") {
+    if (h.kind == "close" || h.kind == "ready") {
         close();
-    } else if (h.kind == "stage") {
-        selectStage(std::stoi(h.value));
-    } else if (h.kind == "step") {
-        selectStep(h.value);
-    } else if (h.kind == "btn") {
-        runner_->act(step_, h.value);
-        // a confirmed step moves on by itself
-        if (h.value == "yes" || h.value == "save" || h.value.rfind("props:", 0) == 0 || h.value == "already" ||
-            h.value == "na" || h.value == "skip") {
-            if (isDone(runner_->status(step_))) {
-                stepBy(1);
-            }
-        }
-    } else if (h.kind == "prev") {
-        stepBy(-1);
-    } else if (h.kind == "next") {
-        stepBy(1);
+    } else if (h.kind == "look") {
+        runner_->setLook(h.value, !isDone(runner_->status(h.value)));
+    } else if (h.kind == "continue") {
+        runner_->lookContinue();
+    } else if (h.kind == "gate") {
+        runner_->goMoving();
     } else if (h.kind == "stop") {
         runner_->stopAll();
     } else if (h.kind == "override") {
         emit launchOverride();
         close();
-    } else if (h.kind == "full" || h.kind == "turn") {
-        runner_->session().begin(runner_->vehicle(), Clock::now(), h.kind == "turn");
-        step_.clear();
-        open(h.kind == "turn");
-    } else if (h.kind == "ready") {
-        ready_dismissed_ = true;
-        close();
+    } else if (h.kind == "rerun") {
+        runner_->rerun();
+    } else if (h.kind == "restart") {
+        runner_->restart();
+    } else if (h.kind == "setup") {
+        runner_->fixSetup();
+    } else if (h.kind == "cal") {
+        runner_->startCal(static_cast<PreflightRunner::Cal>(std::stoi(h.value)));
+    } else if (h.kind == "calcancel") {
+        runner_->cancelCal();
+    } else if (h.kind == "reboot") {
+        runner_->reboot();
     }
 }
 
@@ -309,6 +252,12 @@ void PreflightScreen::paintButton(QPainter& p, const QRectF& r, const QString& l
     }
 }
 
+void PreflightScreen::addButton(QPainter& p, const QRectF& r, const QString& label, Style style, Hit h) {
+    h.rect = r;
+    paintButton(p, r, label, style, h.enabled, h.hold, 0.0);
+    hits_.push_back(std::move(h));
+}
+
 void PreflightScreen::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
@@ -325,72 +274,31 @@ void PreflightScreen::paintEvent(QPaintEvent*) {
     p.translate(0, (1.0 - e) * 30.0);
 
     const QRectF r = full.adjusted(16, 12, -16, -12);
-    // ---- top bar
-    const auto& ses = runner_->session();
-    drawText(p, QRectF(r.left() + 6, r.top() + 2, 300, 34), Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("PREFLIGHT"),
-             titleFont(26), kText);
-    const int done = ses.doneCount(), total = ses.totalCount();
-    {
-        const QRectF bar(r.left() + 280, r.top() + 14, std::min(320.0, r.width() * 0.25), 10);
-        p.setPen(Qt::NoPen);
-        p.setBrush(alpha(kMuted, 0.25));
-        p.drawRect(bar);
-        p.setBrush(ses.failCount() ? kAmber : kGreen);
-        p.drawRect(QRectF(bar.left(), bar.top(), bar.width() * (total ? double(done) / total : 0.0), bar.height()));
-        drawText(p, QRectF(bar.right() + 12, r.top() + 2, 260, 34), Qt::AlignLeft | Qt::AlignVCenter,
-                 QStringLiteral("%1 / %2 · %3%4")
-                     .arg(done)
-                     .arg(total)
-                     .arg(ses.turnaround() ? QStringLiteral("TURNAROUND") : QStringLiteral("FULL"))
-                     .arg(ses.failCount() ? QStringLiteral(" · %1 FAILED").arg(ses.failCount()) : QString()),
-                 labelFont(12), ses.failCount() ? kAmber : kText);
-    }
-    {
-        const QRectF cl(r.right() - 52, r.top(), 52, 48);
-        drawGlass(p, chamferPath(cl, 8), kCyan, 0.6, kGlassDeep);
-        drawText(p, cl, Qt::AlignCenter, QStringLiteral("✕"), monoFont(20, true), kText);
-        hits_.push_back({cl, "close", "", false, 1.0, true, {}});
-        const QRectF turn(cl.left() - 150, r.top(), 140, 48), fullb(turn.left() - 110, r.top(), 100, 48);
-        paintButton(p, fullb, QStringLiteral("FULL"), ses.turnaround() ? Style::Neutral : Style::Good, true, false, 0);
-        paintButton(p, turn, QStringLiteral("TURNAROUND"), ses.turnaround() ? Style::Good : Style::Neutral, true, false, 0);
-        hits_.push_back({fullb, "full", "", false, 1.0, !ses.turnaround() ? false : true, QStringLiteral("Already the full preflight")});
-        hits_.push_back({turn, "turn", "", false, 1.0, ses.turnaround() ? false : true, QStringLiteral("Already the turnaround preflight")});
-    }
-
-    const double top = r.top() + 60, bottom = r.bottom() - 64;
-    // the data column needs ~1240 logical px (1920 at text size Large); the
-    // rail keeps its width either way, or "AIRFRAME 0/7" is clipped
-    const bool wide = r.width() >= 1240;
-    const double rail_w = 210, list_w = wide ? 270 : 220, data_w = wide ? 230 : 0;
-    const QRectF rail(r.left(), top, rail_w, bottom - top);
-    const QRectF list(rail.right() + 12, top, list_w, bottom - top);
-    const QRectF data_col(r.right() - data_w, top, data_w, bottom - top);
-    const QRectF card(list.right() + 12, top, (wide ? data_col.left() - 12 : r.right()) - list.right() - 12, bottom - top);
-    paintRail(p, rail);
-    paintSteps(p, list);
-    paintCard(p, card);
-    if (wide) {
-        paintData(p, data_col);
+    paintTop(p, r);
+    const QRectF bodyr(r.left(), r.top() + 64, r.width(), r.height() - 64 - 66);
+    const Phase ph = runner_->flow().phase();
+    if (ph == Phase::Look || ph == Phase::Idle) {
+        paintLook(p, bodyr);
+    } else if (ph == Phase::Result) {
+        paintResult(p, bodyr);
+    } else {
+        paintChecks(p, bodyr);
     }
 
     // ---- bottom bar
-    {
-        const QRectF prev(r.left(), r.bottom() - 52, 140, 52), next(prev.right() + 10, prev.top(), 140, 52);
-        paintButton(p, prev, QStringLiteral("◀ BACK"), Style::Neutral, true, false, 0);
-        paintButton(p, next, QStringLiteral("NEXT ▶"), Style::Primary, true, false, 0);
-        hits_.push_back({prev, "prev", "", false, 1.0, true, {}});
-        hits_.push_back({next, "next", "", false, 1.0, true, {}});
-        if (runner_->testRunning()) {
-            const QRectF stop(r.center().x() - 110, r.bottom() - 52, 220, 52);
-            paintButton(p, stop, QStringLiteral("■ STOP ALL"), Style::Danger, true, false, 0);
-            hits_.push_back({stop, "stop", "", false, 1.0, true, {}});
-        }
-        if (!ses.passed()) {
-            // the logged way around a preflight that can't be finished here
-            const QRectF ov(r.right() - 330, r.bottom() - 52, 330, 52);
-            paintButton(p, ov, QStringLiteral("LAUNCH WITHOUT PREFLIGHT · 3 s"), Style::Neutral, true, true, 0);
-            hits_.push_back({ov, "override", "", true, 3.0, true, {}});
-        }
+    const auto& ses = runner_->session();
+    if (runner_->testRunning()) {
+        addButton(p, QRectF(r.center().x() - 120, r.bottom() - 54, 240, 54), QStringLiteral("■ STOP"), Style::Danger,
+                  {{}, "stop", "", false, 1.0, true, {}});
+    }
+    if (ph == Phase::Result) {
+        addButton(p, QRectF(r.left(), r.bottom() - 54, 200, 54), QStringLiteral("↻ START OVER"), Style::Neutral,
+                  {{}, "restart", "", false, 1.0, !runner_->testRunning(), QStringLiteral("A test is running")});
+    }
+    if (!ses.passed()) {
+        // the logged way around a preflight that can't be finished here
+        addButton(p, QRectF(r.right() - 330, r.bottom() - 54, 330, 54), QStringLiteral("LAUNCH WITHOUT PREFLIGHT · 3 s"),
+                  Style::Neutral, {{}, "override", "", true, 3.0, true, {}});
     }
     // charge overlay for the button being held
     if (pressed_ >= 0 && pressed_ < static_cast<int>(hits_.size()) && hits_[pressed_].hold) {
@@ -400,9 +308,8 @@ void PreflightScreen::paintEvent(QPaintEvent*) {
         p.drawRect(QRectF(h.rect.left(), h.rect.top(), h.rect.width() * std::clamp(hold_t_ / h.hold_secs, 0.0, 1.0),
                           h.rect.height()));
     }
-
-    if (ses.passed() && !ready_dismissed_) {
-        paintReady(p, r);
+    if (runner_->calRunning() != PreflightRunner::Cal::None) {
+        paintCal(p, r);
     }
     if (toast_t_ > 0.0) {
         const QFont f = labelFont(12);
@@ -414,157 +321,439 @@ void PreflightScreen::paintEvent(QPaintEvent*) {
     }
 }
 
-void PreflightScreen::paintRail(QPainter& p, const QRectF& r) {
-    drawGlass(p, chamferPath(r, 12), kCyan, 0.35, alpha(kGlassDeep, 0.9));
-    const int n = static_cast<int>(Stage::Count);
-    const double row = std::min(54.0, (r.height() - 16) / n);
-    for (int i = 0; i < n; ++i) {
-        const auto list = stageSteps(i);
-        if (list.empty()) continue;
-        int done = 0, fail = 0, wait = 0;
-        for (const auto* d : list) {
-            const Status st = runner_->status(d->id);
-            done += isDone(st);
-            fail += st == Status::Fail;
-            wait += st == Status::Waiting;
+void PreflightScreen::paintTop(QPainter& p, const QRectF& r) {
+    const auto& ses = runner_->session();
+    const auto& fl = runner_->flow();
+    drawText(p, QRectF(r.left() + 6, r.top() + 2, 260, 40), Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("PREFLIGHT"),
+             titleFont(26), kText);
+    QString sub;
+    switch (fl.phase()) {
+    case Phase::Idle:
+    case Phase::Look: sub = QStringLiteral("STEP 1 OF 2 · LOOK AT THE AIRCRAFT"); break;
+    case Phase::Scan:
+    case Phase::Gate:
+        sub = QStringLiteral("STEP 2 OF 2 · CHECKING %1 OF %2")
+                  .arg(std::min(fl.current() + 1, static_cast<int>(fl.rows().size())))
+                  .arg(fl.rows().size());
+        break;
+    case Phase::Result: sub = QStringLiteral("RESULT"); break;
+    }
+    if (ses.turnaround()) {
+        sub += QStringLiteral(" · SHORT CHECK AFTER A FLIGHT");
+    }
+    drawText(p, QRectF(r.left() + 250, r.top() + 2, r.width() - 330, 40), Qt::AlignLeft | Qt::AlignVCenter, sub,
+             labelFont(12), kCyan);
+    // progress over the whole run
+    if (fl.phase() == Phase::Scan || fl.phase() == Phase::Gate || fl.phase() == Phase::Result) {
+        const QRectF bar(r.left() + 6, r.top() + 50, r.width() - 12, 4);
+        p.setPen(Qt::NoPen);
+        p.setBrush(alpha(kMuted, 0.25));
+        p.drawRect(bar);
+        const double f = fl.phase() == Phase::Result ? 1.0 : static_cast<double>(fl.current()) / std::max<size_t>(1, fl.rows().size());
+        p.setBrush(kCyan);
+        p.drawRect(QRectF(bar.left(), bar.top(), bar.width() * f, bar.height()));
+    }
+    const QRectF cl(r.right() - 52, r.top(), 52, 48);
+    drawGlass(p, chamferPath(cl, 8), kCyan, 0.6, kGlassDeep);
+    drawText(p, cl, Qt::AlignCenter, QStringLiteral("✕"), monoFont(20, true), kText);
+    hits_.push_back({cl, "close", "", false, 1.0, true, {}});
+}
+
+// ---- look at the aircraft ----------------------------------------------------------------------------
+
+void PreflightScreen::paintLook(QPainter& p, const QRectF& r) {
+    const auto& ses = runner_->session();
+    const double list_w = std::min(680.0, r.width() * 0.58);
+    const QRectF col(r.left(), r.top(), list_w, r.height());
+    drawText(p, QRectF(col.left() + 4, col.top(), col.width(), 36), Qt::AlignLeft | Qt::AlignVCenter,
+             QStringLiteral("Look at the aircraft"), body(26, true), kText);
+    drawText(p, QRectF(col.left() + 4, col.top() + 36, col.width(), 24), Qt::AlignLeft | Qt::AlignVCenter,
+             QStringLiteral("Tap each one once you've checked it. The rest checks itself."), body(14), alpha(kText, 0.7));
+    double y = col.top() + 76;
+    const double row_h = std::clamp((r.bottom() - y) / 5.0, 52.0, 72.0);
+    std::string focus;
+    for (const auto* d : ses.activeSteps()) {
+        if (d->stage != Stage::Look) continue;
+        const Status st = runner_->status(d->id);
+        const bool done = isDone(st);
+        if (!done && focus.empty()) focus = d->id;
+        const QRectF rr(col.left(), y, col.width(), row_h - 8);
+        const bool tappable = d->kind == Kind::You;
+        drawGlass(p, chamferPath(rr, 8), done ? kGreen : kCyan, done ? 0.8 : 0.45,
+                  alpha(done ? kGreen : kGlassDeep, done ? 0.10 : 0.9));
+        // tick box (the pitot row ticks itself)
+        const QRectF box(rr.left() + 16, rr.center().y() - 16, 32, 32);
+        if (tappable) {
+            p.setPen(QPen(done ? kGreen : kCyan, 2));
+            p.setBrush(done ? alpha(kGreen, 0.25) : Qt::NoBrush);
+            p.drawRect(box);
+            if (done) {
+                drawText(p, box, Qt::AlignCenter, QStringLiteral("✓"), monoFont(22, true), kGreen);
+            }
+        } else {
+            art::statusGlyph(p, box.center(), 16, st == Status::Pending ? Status::Waiting : st, time_);
         }
-        const QRectF rr(r.left() + 8, r.top() + 8 + i * row, r.width() - 16, row - 4);
-        const bool sel = i == stage_;
-        if (sel) {
-            drawGlass(p, chamferPath(rr, 6), kCyan, 0.9, alpha(kCyan, 0.12));
+        const QString title = q(d->title);
+        const QString live = tappable ? QString() : runner_->detail(d->id);
+        drawText(p, QRectF(box.right() + 18, rr.top() + (live.isEmpty() ? 0 : 6), rr.width() - 90,
+                           live.isEmpty() ? rr.height() : 26),
+                 Qt::AlignLeft | Qt::AlignVCenter, title, body(18, true), done ? kGreen : kText);
+        if (!live.isEmpty()) {
+            drawText(p, QRectF(box.right() + 18, rr.top() + 30, rr.width() - 90, 20), Qt::AlignLeft | Qt::AlignVCenter,
+                     live + (st != Status::NotApplicable && !done
+                                 ? QStringLiteral(" · %1 m/s").arg(runner_->vehicle().airspeed, 0, 'f', 1)
+                                 : QString()),
+                     body(13), alpha(statusColor(st), 0.95));
         }
-        const Status agg = fail ? Status::Fail : (done == static_cast<int>(list.size()) ? Status::Pass : (wait ? Status::Waiting : Status::Pending));
-        art::statusGlyph(p, QPointF(rr.left() + 18, rr.center().y()), 11, agg, time_);
-        drawText(p, QRectF(rr.left() + 38, rr.top(), rr.width() - 80, rr.height()), Qt::AlignLeft | Qt::AlignVCenter,
-                 QString::fromLatin1(stageName(static_cast<Stage>(i))).toUpper(), labelFont(11.5), sel ? kCyan : kText);
-        drawText(p, QRectF(rr.right() - 48, rr.top(), 44, rr.height()), Qt::AlignRight | Qt::AlignVCenter,
-                 QStringLiteral("%1/%2").arg(done).arg(list.size()), monoFont(11), alpha(kMuted, 0.95));
-        hits_.push_back({rr, "stage", std::to_string(i), false, 1.0, true, {}});
+        if (tappable) {
+            hits_.push_back({rr, "look", d->id, false, 1.0, true, {}});
+        }
+        y += row_h;
+    }
+    const bool all = lookComplete(ses);
+    // in the bottom bar, where the result has START OVER: always on screen
+    addButton(p, QRectF(col.left(), r.bottom() + 66 - 54, 320, 54), QStringLiteral("CONTINUE ▶"),
+              all ? Style::Good : Style::Primary,
+              {{}, "continue", "", false, 1.0, all,
+               runner_->status("sens.pitot") != Status::Pass && runner_->status("sens.pitot") != Status::NotApplicable &&
+                       ses.includes("sens.pitot")
+                   ? QStringLiteral("Blow gently into the pitot tube first")
+                   : QStringLiteral("Tap each item once you've checked it")});
+
+    // the picture: the item to look at next
+    const QRectF pic(col.right() + 30, r.top() + 60, r.right() - col.right() - 30, r.height() - 60);
+    if (pic.width() > 160) {
+        const double side = std::min(pic.width(), pic.height());
+        const QRectF sq(pic.center().x() - side / 2, pic.top(), side, side);
+        if (focus == "site.area") {
+            art::site(p, sq, time_);
+        } else {
+            art::TopView v;
+            v.frame = runner_->frame();
+            v.show_dirs = focus == "air.props";
+            v.highlight = partFor(focus);
+            art::quadplaneTop(p, sq.adjusted(20, 10, -20, -10), v, time_);
+        }
     }
 }
 
-void PreflightScreen::paintSteps(QPainter& p, const QRectF& r) {
-    drawGlass(p, chamferPath(r, 12), kCyan, 0.35, alpha(kGlassDeep, 0.9));
-    drawText(p, QRectF(r.left() + 14, r.top() + 8, r.width() - 28, 18), Qt::AlignLeft | Qt::AlignVCenter,
-             QString::fromLatin1(stageName(static_cast<Stage>(stage_))).toUpper(), labelFont(11), kMuted);
-    list_rect_ = r.adjusted(6, 32, -6, -6);
-    const auto list = stageSteps(stage_);
-    const double row = 52;
-    list_content_h_ = list.size() * row;
+// ---- the checks ------------------------------------------------------------------------------------------
+
+void PreflightScreen::paintChecks(QPainter& p, const QRectF& r) {
+    const auto& fl = runner_->flow();
+    const auto& rows = fl.rows();
+    const double list_w = std::clamp(r.width() * 0.42, 340.0, 520.0);
+    const QRectF col(r.left(), r.top(), list_w, r.height());
+    drawGlass(p, chamferPath(col, 12), kCyan, 0.35, alpha(kGlassDeep, 0.9));
+    list_rect_ = col.adjusted(8, 8, -8, -8);
+
+    // content: a header per section, a row per step
+    const double row_h = 40, head_h = 30;
+    struct Line {
+        double y;
+        int row;  // -1 = header
+        Stage stage;
+    };
+    std::vector<Line> lines;
+    double y = 0;
+    Stage last = Stage::Count;
+    int cur_y = 0;
+    for (size_t i = 0; i < rows.size(); ++i) {
+        const StepDef* d = findStep(rows[i]);
+        if (!d) continue;
+        if (d->stage != last) {
+            lines.push_back({y, -1, d->stage});
+            y += head_h;
+            last = d->stage;
+        }
+        if (static_cast<int>(i) == fl.current()) cur_y = static_cast<int>(y);
+        lines.push_back({y, static_cast<int>(i), d->stage});
+        y += row_h;
+    }
+    list_content_h_ = y;
+    // keep the running row in view unless the operator is looking around
+    if (fl.current() != last_row_ && time_ - user_scrolled_t_ > 4.0) {
+        last_row_ = fl.current();
+        list_scroll_ = cur_y - list_rect_.height() * 0.45;
+    }
+    clampScroll();
+
     p.save();
     p.setClipRect(list_rect_);
-    for (size_t i = 0; i < list.size(); ++i) {
-        const QRectF rr(list_rect_.left(), list_rect_.top() + i * row - list_scroll_, list_rect_.width(), row - 4);
+    for (const auto& ln : lines) {
+        const QRectF rr(list_rect_.left(), list_rect_.top() + ln.y - list_scroll_, list_rect_.width(),
+                        ln.row < 0 ? head_h : row_h - 4);
         if (rr.bottom() < list_rect_.top() || rr.top() > list_rect_.bottom()) continue;
-        const bool sel = list[i]->id == step_;
-        if (sel) drawGlass(p, chamferPath(rr, 6), kCyan, 0.9, alpha(kCyan, 0.12));
-        const Status st = runner_->status(list[i]->id);
-        art::statusGlyph(p, QPointF(rr.left() + 18, rr.center().y()), 10, st, time_);
-        drawText(p, QRectF(rr.left() + 36, rr.top() + 5, rr.width() - 40, 20), Qt::AlignLeft | Qt::AlignVCenter,
-                 QString::fromStdString(list[i]->title), body(13, sel), sel ? kText : alpha(kText, 0.85));
-        drawText(p, QRectF(rr.left() + 36, rr.top() + 26, rr.width() - 40, 16), Qt::AlignLeft | Qt::AlignVCenter,
-                 QString::fromLatin1(kindName(list[i]->kind)) + (list[i]->critical ? QStringLiteral(" · REQUIRED") : QString()),
-                 labelFont(8.5), alpha(statusColor(st), 0.9));
-        const QRectF vis = rr.intersected(list_rect_);
-        if (!vis.isEmpty()) hits_.push_back({vis, "step", list[i]->id, false, 1.0, true, {}});
+        if (ln.row < 0) {
+            drawText(p, rr.adjusted(10, 6, -10, 0), Qt::AlignLeft | Qt::AlignVCenter,
+                     QString::fromLatin1(stageName(ln.stage)).toUpper(), labelFont(10), kMuted);
+            continue;
+        }
+        const std::string& id = rows[static_cast<size_t>(ln.row)];
+        const StepDef* d = findStep(id);
+        const bool now = ln.row == fl.current() && fl.phase() != Phase::Result;
+        const bool reached = fl.reached(ln.row);
+        const Status st = runner_->status(id);
+        if (now) drawGlass(p, chamferPath(rr, 6), kCyan, 0.9, alpha(kCyan, 0.12));
+        const Status shown = now ? Status::Waiting : reached ? st : Status::Pending;
+        art::statusGlyph(p, QPointF(rr.left() + 20, rr.center().y()), 11, shown, time_);
+        const QColor tc = now ? kText : reached ? alpha(kText, 0.9) : alpha(kMuted, 0.7);
+        drawText(p, QRectF(rr.left() + 42, rr.top(), rr.width() - 140, rr.height()), Qt::AlignLeft | Qt::AlignVCenter,
+                 q(d->title), body(14, now), tc);
+        if (reached) {
+            const QString word = st == Status::Pass ? QStringLiteral("OK")
+                                 : st == Status::NotApplicable ? QStringLiteral("—")
+                                 : st == Status::Fail && d->critical ? QStringLiteral("PROBLEM")
+                                 : isDone(st) || st == Status::Fail ? QStringLiteral("NOTE")
+                                                                    : QStringLiteral("…");
+            drawText(p, QRectF(rr.right() - 96, rr.top(), 88, rr.height()), Qt::AlignRight | Qt::AlignVCenter, word,
+                     labelFont(10), statusColor(st == Status::Fail && !d->critical ? Status::Warn : st));
+        }
     }
     p.restore();
+
+    const QRectF right(col.right() + 16, r.top(), r.right() - col.right() - 16, r.height());
+    if (fl.phase() == Phase::Gate) {
+        paintGate(p, right);
+    } else {
+        paintNow(p, right);
+    }
 }
 
-void PreflightScreen::paintCard(QPainter& p, const QRectF& r) {
+void PreflightScreen::paintNow(QPainter& p, const QRectF& r) {
     drawGlass(p, chamferPath(r, 14), kCyan, 0.5, alpha(kGlassDeep, 0.92));
-    const StepDef* d = findStep(step_);
+    const std::string id = runner_->flow().currentId();
+    const StepDef* d = findStep(id);
     if (!d) return;
-    const Status st = runner_->status(step_);
-    const QColor sc = statusColor(st);
-    const double x = r.left() + 22, w = r.width() - 44;
-    double y = r.top() + 16;
-    // header
-    const QString kind = QString::fromLatin1(kindName(d->kind)) + (d->critical ? QStringLiteral(" · REQUIRED") : QString());
-    drawText(p, QRectF(x, y, w, 16), Qt::AlignLeft | Qt::AlignVCenter, kind, labelFont(10), kCyan);
-    art::statusGlyph(p, QPointF(r.right() - 40, r.top() + 36), 20, st, time_);
-    y += 20;
-    const QString title = QString::fromStdString(d->title);
-    drawText(p, QRectF(x, y, w - 60, 32), Qt::AlignLeft | Qt::AlignVCenter, title, body(24, true), kText);
-    y += 36;
-    const QString why = QString::fromStdString(d->why);
-    const double wh = wrapH(body(13), w - 60, why);
-    wrapText(p, QRectF(x, y, w - 60, wh + 2), why, body(13), alpha(kText, 0.7));
-    y += wh + 10;
-
-    // buttons (bottom), measured first so the picture gets the rest
-    const auto btns = runner_->buttons(step_);
-    std::vector<QRectF> brects;
-    {
-        double bx = x, by = 0;
-        const double bh = 54, gap = 10;
-        std::vector<double> widths;
-        for (const auto& b : btns) {
-            widths.push_back(std::max(110.0, QFontMetricsF(labelFont(12)).horizontalAdvance(b.label) + 40));
-        }
-        // lay out in rows from the bottom
-        std::vector<std::vector<int>> rows(1);
-        double rowx = 0;
-        for (size_t i = 0; i < btns.size(); ++i) {
-            if (rowx + widths[i] > w && !rows.back().empty()) {
-                rows.emplace_back();
-                rowx = 0;
-            }
-            rows.back().push_back(static_cast<int>(i));
-            rowx += widths[i] + gap;
-        }
-        brects.resize(btns.size());
-        by = r.bottom() - 16 - rows.size() * (bh + gap) + gap;
-        for (const auto& row : rows) {
-            bx = x;
-            for (int i : row) {
-                brects[i] = QRectF(bx, by, widths[i], bh);
-                bx += widths[i] + gap;
-            }
-            by += bh + gap;
-        }
+    const double x = r.left() + 26, w = r.width() - 52;
+    double y = r.top() + 20;
+    drawText(p, QRectF(x, y, w, 18), Qt::AlignLeft | Qt::AlignVCenter, QString::fromLatin1(stageName(d->stage)).toUpper(),
+             labelFont(11), kCyan);
+    y += 26;
+    const int dots = static_cast<int>(time_ * 2.5) % 4;
+    const QString sentence = q(d->sentence) + QString(dots, QLatin1Char('.'));
+    const double sh = wrapH(body(26, true), w, sentence);
+    wrapText(p, QRectF(x, y, w, sh + 4), sentence, body(26, true), kText);
+    y += sh + 12;
+    const QString det = runner_->detail(id);
+    if (!det.isEmpty()) {
+        const double dh = std::min(90.0, wrapH(body(15), w, det));
+        wrapText(p, QRectF(x, y, w, dh + 2), det, body(15), alpha(statusColor(runner_->status(id)), 0.95));
+        y += dh + 12;
     }
-    const double buttons_top = btns.empty() ? r.bottom() - 16 : brects.front().top();
-
-    // instruction + live detail above the buttons
-    const QString how = runner_->instruction(step_);
-    const QString det = runner_->detail(step_);
-    const double hh = wrapH(body(15, true), w, how);
-    const double dh = det.isEmpty() ? 0 : wrapH(body(13), w, det);
-    const double text_top = buttons_top - 12 - hh - (dh > 0 ? dh + 8 : 0);
-    // the picture
-    const QRectF artr(x, y, w, std::max(60.0, text_top - y - 10));
-    paintArt(p, artr);
-    wrapText(p, QRectF(x, text_top, w, hh + 2), how, body(15, true), kCyan);
-    if (dh > 0) {
-        wrapText(p, QRectF(x, text_top + hh + 8, w, dh + 2), det, body(13), sc);
-    }
-
-    for (size_t i = 0; i < btns.size(); ++i) {
-        paintButton(p, brects[i], btns[i].label, btns[i].style, btns[i].enabled, btns[i].hold, 0);
-        hits_.push_back({brects[i], "btn", btns[i].action, btns[i].hold, 1.0, btns[i].enabled, btns[i].reason});
-    }
+    paintArt(p, QRectF(x, y, w, r.bottom() - 20 - y), id);
 }
 
-void PreflightScreen::paintArt(QPainter& p, const QRectF& r) {
-    const std::string& id = step_;
+void PreflightScreen::paintGate(QPainter& p, const QRectF& r) {
+    drawGlass(p, chamferPath(r, 14), kAmber, 0.8, alpha(kGlassDeep, 0.94));
+    const double x = r.left() + 30, w = r.width() - 60;
+    double y = r.top() + 26;
+    drawText(p, QRectF(x, y, w, 18), Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("MOVING PARTS NEXT"), labelFont(12),
+             kAmber);
+    y += 30;
+    const QString t1 = QStringLiteral("The control surfaces will move, then each motor spins slowly for 2 seconds.");
+    const double h1 = wrapH(body(24, true), w, t1);
+    wrapText(p, QRectF(x, y, w, h1 + 4), t1, body(24, true), kText);
+    y += h1 + 14;
+    const QString t2 = QStringLiteral("It stays on the ground. Keep hands, people and loose things clear of every "
+                                      "propeller, then hold the button.");
+    const double h2 = wrapH(body(16), w, t2);
+    wrapText(p, QRectF(x, y, w, h2 + 4), t2, body(16), alpha(kText, 0.8));
+    y += h2 + 20;
+    const double side = std::min(w, r.bottom() - y - 110);
+    if (side > 80) {
+        art::TopView v;
+        v.frame = runner_->frame();
+        v.show_letters = true;
+        v.highlight = art::Part::Motors;
+        art::quadplaneTop(p, QRectF(r.center().x() - side / 2, y, side, side), v, time_);
+    }
+    const bool armed = runner_->vehicle().armed;
+    addButton(p, QRectF(r.center().x() - 190, r.bottom() - 92, 380, 70), QStringLiteral("ALL CLEAR · MOVE AND SPIN"),
+              Style::Danger, {{}, "gate", "", true, kGateHold, !armed, QStringLiteral("Disarm first")});
+}
+
+// ---- result ----------------------------------------------------------------------------------------------
+
+void PreflightScreen::paintResult(QPainter& p, const QRectF& r) {
+    const auto& ses = runner_->session();
+    const auto probs = problems(ses);
+    const auto nts = notes(ses);
+    const bool ready = probs.empty() && ses.complete();
+    const double x = r.left(), w = std::min(r.width(), 1100.0);
+    const double cx = r.center().x() - w / 2;
+    double y = r.top();
+    if (ready) {
+        const double pulse = reducedMotion() ? 1.0 : 0.8 + 0.2 * std::sin(time_ * 3.0);
+        drawText(p, QRectF(cx, y, w, 56), Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("READY TO FLY"), titleFont(40),
+                 alpha(kGreen, pulse));
+        drawText(p, QRectF(cx, y + 56, w, 26), Qt::AlignLeft | Qt::AlignVCenter,
+                 nts.empty() ? QStringLiteral("Everything checked out. Launch from the dock.")
+                             : QStringLiteral("Everything needed checked out. %1 note%2 below, none of them stops the flight.")
+                                   .arg(nts.size())
+                                   .arg(nts.size() == 1 ? "" : "s"),
+                 body(16), alpha(kText, 0.85));
+    } else {
+        const size_t n = probs.size();
+        drawText(p, QRectF(cx, y, w, 56), Qt::AlignLeft | Qt::AlignVCenter,
+                 n ? QStringLiteral("%1 PROBLEM%2 TO FIX").arg(n).arg(n == 1 ? "" : "S") : QStringLiteral("STILL CHECKING"),
+                 titleFont(36), n ? kRed : kCyan);
+        drawText(p, QRectF(cx, y + 56, w, 26), Qt::AlignLeft | Qt::AlignVCenter,
+                 n == 1 ? QStringLiteral("Launch stays locked until it's fixed. It says what to do.")
+                        : QStringLiteral("Launch stays locked until they're fixed. Each one says what to do."),
+                 body(16),
+                 alpha(kText, 0.85));
+    }
+    y += 96;
+    if (!ready) {
+        addButton(p, QRectF(cx + w - 220, r.top() + 6, 220, 56), QStringLiteral("↻ CHECK AGAIN"), Style::Primary,
+                  {{}, "rerun", "", false, 1.0, !runner_->testRunning(), QStringLiteral("A test is running")});
+    } else {
+        addButton(p, QRectF(cx + w - 220, r.top() + 6, 220, 56), QStringLiteral("CLOSE"), Style::Good,
+                  {{}, "ready", "", false, 1.0, true, {}});
+    }
+
+    // the cards: problems, the restart, then the notes
+    struct Card {
+        const StepDef* def = nullptr;
+        Result res;
+        bool problem = false;
+        bool reboot = false;
+    };
+    std::vector<Card> cards;
+    for (const auto& it : probs) cards.push_back({it.def, it.result, true, false});
+    if (runner_->rebootPending()) cards.push_back({nullptr, {}, false, true});
+    for (const auto& it : nts) cards.push_back({it.def, it.result, false, false});
+
+    list_rect_ = QRectF(cx, y, w, r.bottom() - y);
+    const double card_w = w;
+    std::vector<double> heights;
+    double total = 0;
+    for (const auto& c : cards) {
+        double h = 0;
+        if (c.reboot) {
+            h = 92;
+        } else {
+            const QString how = q(c.def->how), det = q(c.res.detail);
+            h = 16 + 26 + wrapH(body(15), card_w - 330, how) + 6 + (det.isEmpty() ? 0 : wrapH(body(12.5), card_w - 330, det) + 6) + 14;
+            h = std::max(h, 92.0);
+        }
+        heights.push_back(h);
+        total += h + 10;
+    }
+    list_content_h_ = total;
+    clampScroll();
+    p.save();
+    p.setClipRect(list_rect_);
+    double cy = list_rect_.top() - list_scroll_;
+    for (size_t i = 0; i < cards.size(); ++i) {
+        const Card& c = cards[i];
+        const QRectF cr(cx, cy, card_w, heights[i]);
+        cy += heights[i] + 10;
+        if (cr.bottom() < list_rect_.top() || cr.top() > list_rect_.bottom()) continue;
+        const QColor edge = c.problem ? kRed : c.reboot ? kCyan : kAmber;
+        drawGlass(p, chamferPath(cr, 10), edge, 0.7, alpha(kGlassDeep, 0.92));
+        const QRectF btn(cr.right() - 270, cr.center().y() - 30, 250, 60);
+        const bool btn_visible = cr.intersects(list_rect_);
+        if (c.reboot) {
+            art::statusGlyph(p, QPointF(cr.left() + 30, cr.top() + 30), 14, Status::Waiting, 0.0);
+            drawText(p, QRectF(cr.left() + 58, cr.top() + 14, cr.width() - 340, 28), Qt::AlignLeft | Qt::AlignVCenter,
+                     QStringLiteral("Restart the autopilot"), body(18, true), kText);
+            drawText(p, QRectF(cr.left() + 58, cr.top() + 44, cr.width() - 340, 36), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
+                     QStringLiteral("A new setting only takes effect after a restart. The link comes back in a few seconds."),
+                     body(14), alpha(kText, 0.8));
+            if (btn_visible) {
+                addButton(p, btn, QStringLiteral("RESTART AUTOPILOT"), Style::Primary,
+                          {{}, "reboot", "", true, kRebootHold, !runner_->vehicle().armed, QStringLiteral("Disarm first")});
+            }
+            continue;
+        }
+        const Status shown = c.problem ? (c.res.status == Status::Waiting || c.res.status == Status::Pending ? Status::Fail : c.res.status)
+                                       : Status::Warn;
+        art::statusGlyph(p, QPointF(cr.left() + 30, cr.top() + 30), 14, shown, time_);
+        const double tx = cr.left() + 58, tw = cr.width() - 340;
+        double ty = cr.top() + 14;
+        drawText(p, QRectF(tx, ty, tw, 26), Qt::AlignLeft | Qt::AlignVCenter, q(c.def->title), body(18, true), kText);
+        ty += 30;
+        const QString how = q(c.def->how);
+        const double hh = wrapH(body(15), tw, how);
+        wrapText(p, QRectF(tx, ty, tw, hh + 2), how, body(15), alpha(kText, 0.85));
+        ty += hh + 6;
+        QString det = q(c.res.detail);
+        if (c.res.note == "timed out") det = QStringLiteral("Still waiting: ") + det;
+        if (!det.isEmpty()) {
+            wrapText(p, QRectF(tx, ty, tw, wrapH(body(12.5), tw, det) + 2), det, body(12.5), alpha(kMuted, 0.95));
+        }
+        if (!btn_visible) continue;
+        // at most one action
+        const std::string& id = c.def->id;
+        const PreflightRunner::Cal cal = runner_->calFor(id);
+        if (id == "setup.app" && runner_->setupFixable()) {
+            addButton(p, btn, runner_->setupWriting() ? QStringLiteral("WRITING…") : QStringLiteral("SET IT UP"),
+                      Style::Good, {{}, "setup", "", false, 1.0, !runner_->setupWriting(), QStringLiteral("Writing the settings")});
+        } else if (cal != PreflightRunner::Cal::None) {
+            addButton(p, btn, cal == PreflightRunner::Cal::Compass ? QStringLiteral("CALIBRATE COMPASS")
+                                                                   : QStringLiteral("CALIBRATE LEVEL"),
+                      Style::Primary,
+                      {{}, "cal", std::to_string(static_cast<int>(cal)), false, 1.0,
+                       !runner_->vehicle().armed && !runner_->testRunning(), QStringLiteral("Disarm first")});
+        } else if (c.def->kind == Kind::Test && c.def->stage != Stage::Look) {
+            addButton(p, btn, QStringLiteral("↻ TRY AGAIN"), Style::Primary,
+                      {{}, "rerun", "", false, 1.0, !runner_->testRunning(), QStringLiteral("A test is running")});
+        }
+    }
+    p.restore();
+    (void)x;
+}
+
+void PreflightScreen::paintCal(QPainter& p, const QRectF& r) {
+    p.fillRect(r, alpha(kBg, 0.8));
+    const QRectF box(r.center().x() - 360, r.center().y() - 260, 720, 520);
+    drawGlass(p, chamferPath(box, 18), kCyan, 1.0, alpha(kGlassDeep, 0.97));
+    const bool compass = runner_->calRunning() == PreflightRunner::Cal::Compass;
+    drawText(p, QRectF(box.left() + 30, box.top() + 20, box.width() - 60, 40), Qt::AlignLeft | Qt::AlignVCenter,
+             compass ? QStringLiteral("Calibrating the compass") : QStringLiteral("Calibrating level"), body(24, true), kText);
+    const QString t = runner_->calText();
+    const double th = wrapH(body(16), box.width() - 60, t);
+    wrapText(p, QRectF(box.left() + 30, box.top() + 70, box.width() - 60, th + 4), t, body(16), alpha(kText, 0.85));
+    const QRectF pic(box.center().x() - 140, box.top() + 90 + th, 280, 280);
+    if (compass) {
+        std::array<uint8_t, 10> mask{};
+        for (const auto& c : runner_->vehicle().magcal) {
+            if (!c.active) continue;
+            for (int k = 0; k < 10; ++k) mask[k] |= c.mask[k];
+        }
+        art::compassSphere(p, pic, mask, runner_->calPercent(), time_);
+    } else {
+        art::statusGlyph(p, pic.center(), 60, Status::Waiting, time_);
+    }
+    addButton(p, QRectF(box.center().x() - 110, box.bottom() - 76, 220, 56), QStringLiteral("CANCEL"), Style::Neutral,
+              {{}, "calcancel", "", false, 1.0, true, {}});
+}
+
+// ---- pictures --------------------------------------------------------------------------------------------
+
+void PreflightScreen::paintArt(QPainter& p, const QRectF& r, const std::string& id) {
+    if (r.height() < 60) return;
     const auto& s = runner_->vehicle();
     const auto& a = runner_->art();
     p.save();
     p.setClipRect(r);
-    const QRectF sq(r.center().x() - std::min(r.width(), r.height()) / 2, r.top(), std::min(r.width(), r.height()),
-                    std::min(r.width(), r.height()));
+    const double side = std::min(r.width(), r.height());
+    const QRectF sq(r.center().x() - side / 2, r.top(), side, side);
     auto bigGlyph = [&](const QString& g, const QColor& c) {
         drawText(p, r, Qt::AlignCenter, g, body(std::min(r.height() * 0.5, 110.0), true), alpha(c, 0.85));
     };
+    auto gaugeAt = [&](int k, double v, double lo, double hi, double glo, double ghi, const QString& label) {
+        art::gauge(p, QRectF(r.left() + 40, r.top() + 20 + k * 56, r.width() - 80, 30), v, lo, hi, glo, ghi, label);
+    };
 
-    if (id == "profile.vehicle" || id == "mot.gate" || id.rfind("air.", 0) == 0) {
+    if (id == "profile.vehicle") {
         art::TopView v;
         v.frame = runner_->frame();
-        v.show_dirs = id == "profile.vehicle" || id == "air.props" || id == "mot.gate";
-        v.show_letters = id == "profile.vehicle";
-        v.highlight = partFor(id);
-        art::quadplaneTop(p, sq.adjusted(30, 20, -30, -10), v, time_);
+        v.show_dirs = true;
+        v.show_letters = true;
+        art::quadplaneTop(p, sq.adjusted(30, 10, -30, -10), v, time_);
     } else if (id == "mot.lift" || id == "mot.pusher") {
         art::TopView v;
         v.frame = runner_->frame();
@@ -572,126 +761,43 @@ void PreflightScreen::paintArt(QPainter& p, const QRectF& r) {
         v.lit_motor = a.lit_motor;
         v.pusher_lit = a.pusher_lit;
         v.highlight = id == "mot.pusher" ? art::Part::Pusher : art::Part::Motors;
-        art::quadplaneTop(p, sq.adjusted(30, 20, -30, -10), v, time_);
-    } else if (id == "profile.battery" || id == "power.voltage" || id == "power.balance") {
+        art::quadplaneTop(p, sq.adjusted(30, 10, -30, -10), v, time_);
+    } else if (id == "power.voltage" || id == "power.balance") {
         const auto& pr = runner_->profile();
-        const QRectF br(r.left(), r.top(), r.width(), std::min(r.height(), 200.0));
-        art::battery(p, br.adjusted(r.width() * 0.15, 0, -r.width() * 0.15, 0), s.cell_v, s.battery_v,
-                     pr.cells, fullCellVolts(pr.chemistry), storageCellVolts(pr.chemistry));
-        if (id == "profile.battery") {
-            const char* chem = pr.chemistry == Chemistry::LiPo ? "LiPo" : pr.chemistry == Chemistry::LiHV ? "LiHV" : "Li-ion";
-            drawText(p, QRectF(r.left(), br.bottom() + 6, r.width(), 30), Qt::AlignCenter,
-                     QStringLiteral("%1 · %2 cells · %3 mAh · flight time %4 min")
-                         .arg(QString::fromLatin1(chem))
-                         .arg(pr.cells)
-                         .arg(pr.capacity_mah)
-                         .arg(pr.endurance_min, 0, 'f', 0),
-                     monoFont(16, true), kText);
-        }
+        art::battery(p, QRectF(r.left() + r.width() * 0.15, r.top(), r.width() * 0.7, std::min(r.height(), 200.0)), s.cell_v,
+                     s.battery_v, pr.cells, fullCellVolts(pr.chemistry), storageCellVolts(pr.chemistry));
     } else if (id == "power.current") {
-        art::gauge(p, QRectF(r.left() + 40, r.center().y() - 20, r.width() - 80, 30), std::max(0.0, s.battery_a), 0, 20, 0.05, 8,
-                   QStringLiteral("CURRENT AT REST  %1 A").arg(s.battery_a, 0, 'f', 1));
+        gaugeAt(0, std::max(0.0, s.battery_a), 0, 20, 0.05, 8, QStringLiteral("CURRENT AT REST  %1 A").arg(s.battery_a, 0, 'f', 1));
     } else if (id == "power.board") {
-        art::gauge(p, QRectF(r.left() + 40, r.center().y() - 20, r.width() - 80, 30), s.board_vcc, 4.0, 6.0, 4.8, 5.4,
-                   QStringLiteral("BOARD SUPPLY  %1 V").arg(s.board_vcc, 0, 'f', 2));
+        gaugeAt(0, s.board_vcc, 4.0, 6.0, 4.8, 5.4, QStringLiteral("AUTOPILOT SUPPLY  %1 V").arg(s.board_vcc, 0, 'f', 2));
     } else if (id == "link.telemetry") {
-        art::gauge(p, QRectF(r.left() + 40, r.center().y() - 50, r.width() - 80, 30), s.attitude_hz, 0, 30, 8, 30,
-                   QStringLiteral("ATTITUDE RATE  %1 Hz").arg(s.attitude_hz, 0, 'f', 0));
+        gaugeAt(0, s.attitude_hz, 0, 30, 8, 30, QStringLiteral("MESSAGES  %1 / s").arg(s.attitude_hz, 0, 'f', 0));
         if (s.has_radio) {
             const int margin = std::min(s.radio_rssi - s.radio_noise, s.radio_remrssi - s.radio_remnoise);
-            art::gauge(p, QRectF(r.left() + 40, r.center().y() + 10, r.width() - 80, 30), margin, 0, 120, 20, 120,
-                       QStringLiteral("RADIO MARGIN  %1").arg(margin));
+            gaugeAt(1, margin, 0, 120, 20, 120, QStringLiteral("RADIO SIGNAL  %1").arg(margin));
         }
-    } else if (id == "link.sticks") {
-        const auto norm = [&](const char* m, int def) {
-            const auto it = s.params.find(m);
-            const int ch = it != s.params.end() ? static_cast<int>(it->second) : def;
-            return ch >= 1 && ch <= 18 && s.rc[ch - 1] ? std::clamp((s.rc[ch - 1] - 1500.0) / 400.0, -1.0, 1.0) : 0.0;
-        };
-        art::sticks(p, r.adjusted(10, 10, -10, -10), norm("RCMAP_ROLL", 1), norm("RCMAP_PITCH", 2) * -1.0,
-                    (norm("RCMAP_THROTTLE", 3) + 1.0) / 2.0, norm("RCMAP_YAW", 4), a.stick_reached);
-    } else if (id == "link.modes") {
-        double yy = r.top() + 10;
-        for (size_t i = 0; i < a.mode_list.size(); ++i) {
-            const bool live = static_cast<int>(i) == a.mode_live;
-            const QRectF row(r.left() + r.width() * 0.2, yy, r.width() * 0.6, 34);
-            if (live) drawGlass(p, chamferPath(row, 6), kGreen, 0.9, alpha(kGreen, 0.12));
-            drawText(p, row.adjusted(14, 0, -10, 0), Qt::AlignLeft | Qt::AlignVCenter, a.mode_list[i], monoFont(15, live),
-                     live ? kGreen : kText);
-            yy += 38;
+    } else if (id == "sens.gps") {
+        gaugeAt(0, s.gps_sats, 0, 25, 10, 25, QStringLiteral("SATELLITES  %1  (10 needed)").arg(s.gps_sats));
+        gaugeAt(1, 3.0 - std::min(3.0, s.gps_hdop), 0, 3, 1.8, 3,
+                QStringLiteral("PRECISION  %1  (lower is better)").arg(s.gps_hdop, 0, 'f', 1));
+    } else if (id == "sens.ekf") {
+        const double v[4] = {s.ekf_vel_var, s.ekf_pos_var, s.ekf_hgt_var, s.ekf_mag_var};
+        const char* n[4] = {"SPEED", "POSITION", "HEIGHT", "COMPASS"};
+        for (int k = 0; k < 4; ++k) {
+            gaugeAt(k, v[k], 0, 1.2, 0, 0.5, QStringLiteral("%1  %2").arg(QString::fromLatin1(n[k])).arg(v[k], 0, 'f', 2));
         }
-        drawText(p, QRectF(r.left(), yy + 4, r.width(), 22), Qt::AlignCenter,
-                 QStringLiteral("vehicle mode now: %1").arg(QString::fromStdString(s.mode_name)), labelFont(11), kMuted);
-    } else if (id == "link.rcfailsafe") {
-        const bool rc_bad = (s.sensors_present & 0x10000) && !(s.sensors_health & 0x10000);
-        bigGlyph(rc_bad ? QStringLiteral("RC LOST") : QStringLiteral("RC OK"), rc_bad ? kAmber : kGreen);
-    } else if (id == "sens.gyro" || id == "sens.level" || id == "sens.accel") {
-        art::pose(p, sq.adjusted(20, 10, -20, -10), a.pose >= 1 && a.pose <= 6 ? a.pose : 1, time_);
-        paintAttitudeBall(p, QPointF(r.right() - 70, r.top() + 70), 50, s.roll_deg, s.pitch_deg, s.yaw_deg);
-    } else if (id == "sens.compass" || id == "sens.heading") {
-        // magcal sphere while rotating, else a compass rose with the aircraft heading
-        bool rotating = false;
-        for (const auto& c : s.magcal) rotating |= c.active;
-        if (rotating) {
-            std::array<uint8_t, 10> mask{};
-            int pct = 0;
-            for (const auto& c : s.magcal) {
-                if (!c.active) continue;
-                for (int k = 0; k < 10; ++k) mask[k] |= c.mask[k];
-                pct = std::max(pct, c.pct);
-            }
-            art::compassSphere(p, sq.adjusted(20, 10, -20, -10), mask, pct, time_);
-        } else {
-            const QPointF c = sq.center();
-            const double rad = sq.width() * 0.36;
-            p.setPen(QPen(alpha(kCyan, 0.6), 1.5));
-            p.setBrush(alpha(kBg, 0.6));
-            p.drawEllipse(c, rad, rad);
-            for (int k = 0; k < 36; ++k) {
-                p.save();
-                p.translate(c);
-                p.rotate(k * 10.0);
-                p.setPen(QPen(alpha(kCyan, k % 9 == 0 ? 0.95 : 0.4), k % 9 == 0 ? 2 : 1));
-                p.drawLine(QPointF(0, -rad), QPointF(0, -rad + (k % 9 == 0 ? 12 : 6)));
-                p.restore();
-            }
-            const char* card[] = {"N", "E", "S", "W"};
-            for (int k = 0; k < 4; ++k) {
-                const double ang = k * geo::kPi / 2;
-                drawText(p, QRectF(c.x() + std::sin(ang) * (rad - 26) - 12, c.y() - std::cos(ang) * (rad - 26) - 10, 24, 20),
-                         Qt::AlignCenter, QString::fromLatin1(card[k]), labelFont(12), kCyan);
-            }
-            p.save();
-            p.translate(c);
-            p.rotate(s.yaw_deg);
-            p.setPen(QPen(kAmber, 3));
-            p.drawLine(QPointF(0, 10), QPointF(0, -rad + 20));
-            p.setBrush(kAmber);
-            p.setPen(Qt::NoPen);
-            p.drawPolygon(QPolygonF({QPointF(0, -rad + 12), QPointF(-8, -rad + 28), QPointF(8, -rad + 28)}));
-            p.restore();
-            drawText(p, QRectF(c.x() - 80, c.y() + rad + 6, 160, 24), Qt::AlignCenter,
-                     QStringLiteral("NOSE %1°").arg(static_cast<int>(std::lround(geo::wrap360(s.yaw_deg))) % 360, 3, 10, QLatin1Char('0')),
-                     monoFont(16, true), kAmber);
+    } else if (id == "sens.vibe") {
+        const double v[3] = {s.vibe_x, s.vibe_y, s.vibe_z};
+        const char* n[3] = {"X", "Y", "Z"};
+        for (int k = 0; k < 3; ++k) {
+            gaugeAt(k, v[k], 0, 60, 0, 15, QStringLiteral("VIBRATION %1  %2").arg(QString::fromLatin1(n[k])).arg(v[k], 0, 'f', 1));
         }
-    } else if (id == "sens.baro" || id == "sens.pitot") {
-        art::pitot(p, sq.adjusted(10, 10, -10, -10), s.airspeed, time_);
-    } else if (id == "sens.orientation") {
-        paintAttitudeBall(p, QPointF(r.center().x(), r.top() + std::min(r.height() * 0.4, 110.0)),
-                          std::min(r.height() * 0.32, 90.0), s.roll_deg, s.pitch_deg, s.yaw_deg);
-        const double yy = r.top() + std::min(r.height() * 0.4, 110.0) + std::min(r.height() * 0.32, 90.0) + 34;
-        const QString row = QStringLiteral("%1 TILT RIGHT     %2 NOSE UP     %3 TURN 45°")
-                                .arg(a.orient_roll ? QStringLiteral("✓") : QStringLiteral("·"))
-                                .arg(a.orient_pitch ? QStringLiteral("✓") : QStringLiteral("·"))
-                                .arg(a.orient_yaw ? QStringLiteral("✓") : QStringLiteral("·"));
-        drawText(p, QRectF(r.left(), yy, r.width(), 26), Qt::AlignCenter, row, labelFont(13), kGreen);
-    } else if (id.rfind("surf.", 0) == 0 && id != "surf.trim") {
+    } else if (id.rfind("surf.", 0) == 0) {
         art::surface(p, r.adjusted(r.width() * 0.1, 0, -r.width() * 0.1, 0),
-                     a.axis == 0 ? art::Axis::Roll : a.axis == 1 ? art::Axis::Pitch : art::Axis::Yaw, a.surf_cmd, a.surf_out, time_);
+                     a.axis == 0 ? art::Axis::Roll : a.axis == 1 ? art::Axis::Pitch : art::Axis::Yaw, a.surf_cmd, a.surf_out,
+                     time_);
     } else if (id == "pay.gimbal") {
         art::gimbal(p, sq, a.gimbal_pitch, a.gimbal_yaw);
-    } else if (id == "site.area" || id == "site.people") {
-        art::site(p, sq, time_);
     } else if (id.rfind("mis.", 0) == 0) {
         // route preview: waypoints, L and H, fitted into the box
         if (s.mission_known && s.has_home) {
@@ -701,13 +807,13 @@ void PreflightScreen::paintArt(QPainter& p, const QRectF& r) {
             std::optional<geo::NE> land;
             if (plan.land) land = geo::delta(s.home_lat, s.home_lon, plan.land->lat, plan.land->lon);
             double ext = 50;
-            for (const auto& q : pts) ext = std::max({ext, std::abs(q.north), std::abs(q.east)});
+            for (const auto& pt : pts) ext = std::max({ext, std::abs(pt.north), std::abs(pt.east)});
             if (land) ext = std::max({ext, std::abs(land->north), std::abs(land->east)});
-            const double sc = std::min(r.width(), r.height()) * 0.42 / ext;
+            const double sc = side * 0.42 / ext;
             const QPointF c = r.center();
-            auto at = [&](const geo::NE& q) { return QPointF(c.x() + q.east * sc, c.y() - q.north * sc); };
+            auto at = [&](const geo::NE& pt) { return QPointF(c.x() + pt.east * sc, c.y() - pt.north * sc); };
             QPolygonF poly;
-            for (const auto& q : pts) poly << at(q);
+            for (const auto& pt : pts) poly << at(pt);
             if (!poly.isEmpty()) poly << poly.front();
             p.setPen(QPen(kCyan, 2, Qt::DashLine));
             p.setBrush(Qt::NoBrush);
@@ -716,134 +822,32 @@ void PreflightScreen::paintArt(QPainter& p, const QRectF& r) {
                 p.setPen(QPen(kCyan, 2));
                 p.setBrush(alpha(kBg, 0.9));
                 p.drawEllipse(at(pts[k]), 11, 11);
-                drawText(p, QRectF(at(pts[k]).x() - 11, at(pts[k]).y() - 11, 22, 22), Qt::AlignCenter,
-                         QString::number(k + 1), monoFont(11, true), kCyan);
+                drawText(p, QRectF(at(pts[k]).x() - 11, at(pts[k]).y() - 11, 22, 22), Qt::AlignCenter, QString::number(k + 1),
+                         monoFont(11, true), kCyan);
             }
-            p.setPen(QPen(kGreen, 2));
+            p.setPen(QPen(kText, 2));
             p.drawEllipse(c, 12, 12);
-            drawText(p, QRectF(c.x() - 12, c.y() - 12, 24, 24), Qt::AlignCenter, QStringLiteral("H"), monoFont(12, true), kGreen);
+            drawText(p, QRectF(c.x() - 12, c.y() - 12, 24, 24), Qt::AlignCenter, QStringLiteral("H"), monoFont(12, true), kText);
             if (land) {
                 const QPointF l = at(*land);
-                p.setPen(QPen(kGreen, 2));
+                p.setPen(QPen(kCyan, 2));
                 p.drawRect(QRectF(l.x() - 11, l.y() - 11, 22, 22));
-                drawText(p, QRectF(l.x() - 11, l.y() - 11, 22, 22), Qt::AlignCenter, QStringLiteral("L"), monoFont(12, true), kGreen);
+                drawText(p, QRectF(l.x() - 11, l.y() - 11, 22, 22), Qt::AlignCenter, QStringLiteral("L"), monoFont(12, true), kCyan);
             }
         } else {
             bigGlyph(QStringLiteral("…"), kMuted);
         }
-    } else if (id == "fin.ready" || id == "fin.safety") {
-        struct Row {
-            QString t;
-            bool ok;
-        };
-        const Row rows[] = {
-            {QStringLiteral("Disarmed"), !s.armed},
-            {QStringLiteral("AUTO selected"), s.custom_mode == plane::AUTO},
-            {QStringLiteral("Mission at its takeoff"), s.mission_known && s.mission_current == 1},
-            {QStringLiteral("Pre-arm checks pass"), prearmHealthy(s)},
-            {QStringLiteral("GPS and EKF good"), gpsHealthy(s) && ekfHealthy(s)},
-            {QStringLiteral("Safety OFF (motors live)"), safetyState(s) == SafetyState::Live},
-        };
-        double yy = r.top() + 6;
-        for (const auto& row : rows) {
-            art::statusGlyph(p, QPointF(r.left() + r.width() * 0.25, yy + 16), 13, row.ok ? Status::Pass : Status::Pending, time_);
-            drawText(p, QRectF(r.left() + r.width() * 0.25 + 26, yy, r.width() * 0.6, 32), Qt::AlignLeft | Qt::AlignVCenter,
-                     row.t, body(16, true), row.ok ? kGreen : kText);
-            yy += 38;
-        }
-    } else if (id.rfind("param.", 0) == 0) {
-        bigGlyph(QStringLiteral("⚙"), kCyan);
-    } else if (id == "sens.gps" || id == "sens.gps2") {
-        const int sats = id == "sens.gps" ? s.gps_sats : s.gps2_sats;
-        const double hdop = id == "sens.gps" ? s.gps_hdop : s.gps2_hdop;
-        art::gauge(p, QRectF(r.left() + 40, r.center().y() - 50, r.width() - 80, 30), sats, 0, 25, 10, 25,
-                   QStringLiteral("SATELLITES  %1").arg(sats));
-        art::gauge(p, QRectF(r.left() + 40, r.center().y() + 10, r.width() - 80, 30), 3.0 - std::min(3.0, hdop), 0, 3, 1.8, 3,
-                   QStringLiteral("HDOP  %1  (lower is better)").arg(hdop, 0, 'f', 1));
-    } else if (id == "sens.ekf") {
-        const double v[4] = {s.ekf_vel_var, s.ekf_pos_var, s.ekf_hgt_var, s.ekf_mag_var};
-        const char* n[4] = {"VELOCITY", "POSITION", "HEIGHT", "COMPASS"};
-        for (int k = 0; k < 4; ++k) {
-            art::gauge(p, QRectF(r.left() + 40, r.top() + 20 + k * 52, r.width() - 80, 30), v[k], 0, 1.2, 0, 0.5,
-                       QStringLiteral("%1  %2").arg(QString::fromLatin1(n[k])).arg(v[k], 0, 'f', 2));
-        }
-    } else if (id == "sens.vibe") {
-        const double v[3] = {s.vibe_x, s.vibe_y, s.vibe_z};
-        const char* n[3] = {"X", "Y", "Z"};
-        for (int k = 0; k < 3; ++k) {
-            art::gauge(p, QRectF(r.left() + 40, r.top() + 20 + k * 52, r.width() - 80, 30), v[k], 0, 60, 0, 15,
-                       QStringLiteral("VIBRATION %1  %2 m/s²").arg(QString::fromLatin1(n[k])).arg(v[k], 0, 'f', 1));
-        }
     } else {
-        const QString g = id == "site.airspace" ? QStringLiteral("✈") : id == "site.weather" ? QStringLiteral("☁")
-                        : id == "site.landing"  ? QStringLiteral("L")  : id == "site.gcs"    ? QStringLiteral("▣")
-                        : id == "pay.video"     ? QStringLiteral("▶") : id == "sens.home"   ? QStringLiteral("H")
-                        : id == "sens.health"   ? QStringLiteral("♥") : id == "sens.logging" ? QStringLiteral("SD")
-                        : id == "surf.trim"     ? QStringLiteral("═") : QStringLiteral("•");
+        const QString g = id == "pay.video" ? QStringLiteral("▶")
+                        : id == "sens.home" ? QStringLiteral("H")
+                        : id == "sens.health" ? QStringLiteral("♥")
+                        : id == "sens.logging" ? QStringLiteral("SD")
+                        : id.rfind("setup.", 0) == 0 ? QStringLiteral("⚙")
+                        : id == "fin.ready" ? QStringLiteral("✓")
+                                            : QStringLiteral("•");
         bigGlyph(g, statusColor(runner_->status(id)));
     }
     p.restore();
-}
-
-void PreflightScreen::paintData(QPainter& p, const QRectF& r) {
-    drawGlass(p, chamferPath(r, 12), kCyan, 0.35, alpha(kGlassDeep, 0.9));
-    const auto& s = runner_->vehicle();
-    double y = r.top() + 12;
-    auto row = [&](const QString& k, const QString& v, const QColor& c) {
-        drawText(p, QRectF(r.left() + 14, y, r.width() - 28, 16), Qt::AlignLeft | Qt::AlignVCenter, k, labelFont(9), kMuted);
-        drawText(p, QRectF(r.left() + 14, y + 15, r.width() - 28, 22), Qt::AlignLeft | Qt::AlignVCenter, v, monoFont(14, true), c);
-        y += 44;
-    };
-    drawText(p, QRectF(r.left() + 14, y, r.width() - 28, 18), Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("LIVE"),
-             labelFont(11), kCyan);
-    y += 26;
-    row(QStringLiteral("MODE · STATE"),
-        QStringLiteral("%1 · %2").arg(QString::fromStdString(s.mode_name.empty() ? std::string("—") : s.mode_name),
-                                      s.armed ? QStringLiteral("ARMED") : QStringLiteral("DISARMED")),
-        s.armed ? kRed : kText);
-    const SafetyState sf = safetyState(s);
-    row(QStringLiteral("SAFETY"), sf == SafetyState::Safe ? QStringLiteral("ON (motors cut)") : sf == SafetyState::Live ? QStringLiteral("OFF (live)") : QStringLiteral("—"),
-        sf == SafetyState::Safe ? kAmber : sf == SafetyState::Live ? kRed : kMuted);
-    row(QStringLiteral("BATTERY"), s.has_battery ? QStringLiteral("%1 V  %2 A").arg(s.battery_v, 0, 'f', 2).arg(std::max(0.0, s.battery_a), 0, 'f', 1) : QStringLiteral("—"), kText);
-    row(QStringLiteral("GPS"), s.has_gps ? QStringLiteral("fix %1 · %2 sats · %3").arg(s.gps_fix).arg(s.gps_sats).arg(s.gps_hdop, 0, 'f', 1) : QStringLiteral("—"),
-        gpsHealthy(s) ? kGreen : kAmber);
-    row(QStringLiteral("EKF (worst ratio)"), s.has_ekf ? QString::number(std::max({s.ekf_vel_var, s.ekf_pos_var, s.ekf_hgt_var, s.ekf_mag_var}), 'f', 2) : QStringLiteral("—"),
-        ekfHealthy(s) ? kGreen : kAmber);
-    row(QStringLiteral("ATTITUDE"), QStringLiteral("R %1° P %2° Y %3°").arg(s.roll_deg, 0, 'f', 0).arg(s.pitch_deg, 0, 'f', 0).arg(geo::wrap360(s.yaw_deg), 0, 'f', 0), kText);
-    row(QStringLiteral("AIRSPEED"), QStringLiteral("%1 m/s").arg(s.airspeed, 0, 'f', 1), kText);
-    row(QStringLiteral("RC"), s.has_rc ? QStringLiteral("%1 ch · RSSI %2").arg(s.rc_count).arg(s.rc_rssi == 255 ? QStringLiteral("—") : QString::number(s.rc_rssi)) : QStringLiteral("—"),
-        s.has_rc && s.rc_count > 0 ? kText : kAmber);
-    row(QStringLiteral("LINK"), QStringLiteral("%1 Hz%2").arg(s.attitude_hz, 0, 'f', 0).arg(s.has_radio ? QStringLiteral(" · rssi %1/%2").arg(s.radio_rssi).arg(s.radio_remrssi) : QString()), kText);
-    if (y + 44 < r.bottom()) {
-        row(QStringLiteral("VIBRATION"), s.has_vibe ? QStringLiteral("%1 / %2 / %3").arg(s.vibe_x, 0, 'f', 0).arg(s.vibe_y, 0, 'f', 0).arg(s.vibe_z, 0, 'f', 0) : QStringLiteral("—"), kText);
-    }
-}
-
-void PreflightScreen::paintReady(QPainter& p, const QRectF& r) {
-    p.fillRect(r, alpha(kBg, 0.75));
-    const QRectF box(r.center().x() - 300, r.center().y() - 170, 600, 340);
-    drawGlass(p, chamferPath(box, 18), kGreen, 1.0, alpha(kGlassDeep, 0.97));
-    drawBrackets(p, box.adjusted(-8, -8, 8, 8), 30, kGreen, 2.0);
-    const double pulse = reducedMotion() ? 1.0 : 0.75 + 0.25 * std::sin(time_ * 3.0);
-    drawText(p, QRectF(box.left(), box.top() + 30, box.width(), 50), Qt::AlignCenter, QStringLiteral("READY TO LAUNCH"),
-             titleFont(34), alpha(kGreen, pulse));
-    const auto& ses = runner_->session();
-    int warn = 0, skip = 0;
-    for (const auto* d : ses.activeSteps()) {
-        const Status st = ses.result(d->id).status;
-        warn += st == Status::Warn;
-        skip += st == Status::Skipped;
-    }
-    drawText(p, QRectF(box.left(), box.top() + 96, box.width(), 30), Qt::AlignCenter,
-             QStringLiteral("%1 checks · %2 warnings · %3 skipped").arg(ses.totalCount()).arg(warn).arg(skip),
-             labelFont(13), kText);
-    drawText(p, QRectF(box.left() + 40, box.top() + 136, box.width() - 80, 60), Qt::AlignCenter | Qt::TextWordWrap,
-             QStringLiteral("AUTO is selected, the mission starts at its takeoff and the pre-arm checks pass. "
-                            "The props are live. Launch from the dock (hold)."),
-             body(14), alpha(kText, 0.85));
-    const QRectF ok(box.center().x() - 140, box.bottom() - 80, 280, 56);
-    paintButton(p, ok, QStringLiteral("CLOSE · GO TO LAUNCH"), Style::Good, true, false, 0);
-    hits_.push_back({ok, "ready", "", false, 1.0, true, {}});
 }
 
 }  // namespace gcs::ui

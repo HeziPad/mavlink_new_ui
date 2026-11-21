@@ -346,4 +346,9 @@ enum class SafetyState { Unknown, Safe, Live };
 constexpr uint32_t kSensorMotorOutputs = 0x8000;
 SafetyState safetyState(const VehicleState& s);
 
+// Parameters ArduPilot rewrites by itself (ground pressure at arming, the
+// airspeed offset at boot, run-time statistics): a change to one isn't
+// someone else editing the setup, so it doesn't count in `params_changed`.
+bool autopilotOwnedParam(const std::string& name);
+
 }  // namespace gcs

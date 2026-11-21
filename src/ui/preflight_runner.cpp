@@ -1,7 +1,5 @@
 #include "preflight_runner.hpp"
 
-#include "preflight_art.hpp"
-
 #include "core/geo.hpp"
 #include "core/plane_modes.hpp"
 #include "link/mavlink_client.hpp"
@@ -24,11 +22,12 @@ namespace {
 
 constexpr float kLiftTestPct = 15.0f;   // just above spin-min, far below hover
 constexpr float kLiftTestSecs = 2.0f;
+constexpr double kMotorGapSecs = 0.8;   // between two motors
 constexpr int kPusherThrottle = 120;    // MANUAL_CONTROL z (0..1000): 12 %
 constexpr double kPusherSecs = 2.0;
-constexpr uint32_t kRcBit = 0x10000;
-constexpr int kAccelSuccess = 16777215;
-constexpr int kAccelFailed = 16777216;
+constexpr double kSwingNeeded = 0.3;    // of the output's travel, each way (elevon mixing halves it)
+constexpr double kAmpsRise = 0.2;       // A: a spinning motor draws at least this
+constexpr int kSpinPwm = 1050;          // an output above this is spinning
 
 double secs(Clock::time_point a, Clock::time_point b) {
     return std::chrono::duration<double>(b - a).count();
@@ -38,7 +37,7 @@ QString q(const std::string& s) {
     return QString::fromStdString(s);
 }
 
-// sweep: 0 -> +1 -> hold -> -1 -> hold -> 0 over 4.4 s
+// sweep: 0 -> +1 -> hold -> -1 -> hold -> 0 over 4.2 s
 double sweepCmd(double t) {
     if (t < 0.6) return t / 0.6;
     if (t < 1.4) return 1.0;
@@ -49,14 +48,10 @@ double sweepCmd(double t) {
 }
 constexpr double kSweepSecs = 4.2;
 
-int modePosition(int pwm) {
-    if (pwm <= 900) return -1;
-    if (pwm <= 1230) return 0;
-    if (pwm <= 1360) return 1;
-    if (pwm <= 1490) return 2;
-    if (pwm <= 1620) return 3;
-    if (pwm <= 1749) return 4;
-    return 5;
+std::string where(const LiftMotor& m) {
+    const bool right = m.angle > 0;
+    const bool front = std::abs(m.angle) < 90;
+    return std::string(front ? "front " : "back ") + (right ? "right" : "left");
 }
 
 }  // namespace
@@ -70,8 +65,7 @@ PreflightRunner::PreflightRunner(link::MavlinkClient* client) : client_(client) 
 
 void PreflightRunner::loadProfile() {
     QSettings qs;
-    profile_.set = qs.value(QStringLiteral("preflight/profile_set"), false).toBool();
-    profile_.chemistry = static_cast<Chemistry>(qs.value(QStringLiteral("preflight/chemistry"), 0).toInt());
+    profile_.chemistry = static_cast<Chemistry>(std::clamp(qs.value(QStringLiteral("preflight/chemistry"), 0).toInt(), 0, 2));
     profile_.cells = qs.value(QStringLiteral("preflight/cells"), 0).toInt();
     profile_.capacity_mah = qs.value(QStringLiteral("preflight/capacity_mah"), 0).toInt();
     profile_.endurance_min = qs.value(QStringLiteral("preflight/endurance_min"), 0.0).toDouble();
@@ -79,19 +73,29 @@ void PreflightRunner::loadProfile() {
 
 void PreflightRunner::saveProfile() const {
     QSettings qs;
-    qs.setValue(QStringLiteral("preflight/profile_set"), profile_.set);
     qs.setValue(QStringLiteral("preflight/chemistry"), static_cast<int>(profile_.chemistry));
     qs.setValue(QStringLiteral("preflight/cells"), profile_.cells);
     qs.setValue(QStringLiteral("preflight/capacity_mah"), profile_.capacity_mah);
     qs.setValue(QStringLiteral("preflight/endurance_min"), profile_.endurance_min);
 }
 
+void PreflightRunner::setBattery(Chemistry chem, int capacity_mah, double endurance_min) {
+    if (chem != profile_.chemistry) {
+        profile_.cells = 0;  // read off the pack again for this chemistry
+    }
+    profile_.chemistry = chem;
+    profile_.capacity_mah = std::max(0, capacity_mah);
+    profile_.endurance_min = std::max(0.0, endurance_min);
+    saveProfile();
+}
+
 QString PreflightRunner::saveReport() const {
-    const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + QStringLiteral("/preflight");
+    const QString dir = QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)).filePath(QStringLiteral("preflight"));
     QDir().mkpath(dir);
     const QDateTime now = QDateTime::currentDateTime();
-    const QString path = dir + QStringLiteral("/") + now.toString(QStringLiteral("yyyy-MM-dd_HHmmss")) +
-                         (session_.turnaround() ? QStringLiteral("_turnaround") : QString()) + QStringLiteral(".json");
+    const QString path = QDir(dir).filePath(now.toString(QStringLiteral("yyyy-MM-dd_HHmmss")) +
+                                            (session_.turnaround() ? QStringLiteral("_turnaround") : QString()) +
+                                            QStringLiteral(".json"));
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) {
         return {};
@@ -102,22 +106,34 @@ QString PreflightRunner::saveReport() const {
 
 // ---- lifecycle --------------------------------------------------------------------------------
 
+void PreflightRunner::newSession(bool turnaround) {
+    stopAll();
+    session_.begin(s_, Clock::now(), turnaround);
+    flow_.start(session_, Clock::now());
+    motor_idx_ = 0;
+    motor_faults_.clear();
+    motor_notes_.clear();
+    pitot_peak_ = 0.0;
+    started_row_.clear();
+}
+
 void PreflightRunner::open(const VehicleState& s, bool turnaround) {
     s_ = s;
     open_ = true;
     if (!session_.active() || (session_.passed() && !session_.invalidReason(s, Clock::now()).empty()) ||
         session_.turnaround() != turnaround) {
-        session_.begin(s, Clock::now(), turnaround);
-        live_.clear();
-        was_complete_ = false;
-        motor_ok_.clear();
+        newSession(turnaround);
+    } else if (session_.passed() && flow_.phase() != Phase::Result) {
+        flow_.showResult();
     }
     if (!fetched_) {
-        auto names = paramsToFetch();
-        names.push_back("MNT1_TYPE");
-        client_->fetchParams(std::move(names));
+        client_->fetchParams(paramsToFetch());
         fetched_ = true;
     }
+}
+
+void PreflightRunner::restart() {
+    newSession(session_.turnaround());
 }
 
 void PreflightRunner::close() {
@@ -139,15 +155,17 @@ bool PreflightRunner::launchAllowed(const VehicleState& s, Clock::time_point now
 
 QString PreflightRunner::launchBlockReason(const VehicleState& s, Clock::time_point now) const {
     if (!session_.active()) {
-        return QStringLiteral("Preflight not done: open PREFLIGHT (slot 3)");
+        return QStringLiteral("Preflight not done: tap PREFLIGHT");
     }
     const std::string why = session_.invalidReason(s, now);
     if (session_.passed()) {
-        return QStringLiteral("Preflight no longer valid: %1. Open PREFLIGHT (slot 3)").arg(q(why));
+        return QStringLiteral("Preflight no longer valid: %1. Tap PREFLIGHT").arg(q(why));
     }
-    return QStringLiteral("Preflight %1/%2: finish it in PREFLIGHT (slot 3)")
-        .arg(session_.doneCount())
-        .arg(session_.totalCount());
+    const size_t n = problems(session_).size();
+    if (flow_.phase() == Phase::Result && n > 0) {
+        return QStringLiteral("Preflight found %1 problem%2: tap PREFLIGHT").arg(n).arg(n == 1 ? "" : "s");
+    }
+    return QStringLiteral("Preflight not finished: tap PREFLIGHT");
 }
 
 void PreflightRunner::overrideLaunch(Clock::time_point now) {
@@ -188,18 +206,6 @@ double PreflightRunner::outputNorm(int ch) const {
     return pwm >= tr ? (pwm - tr) / std::max(1.0, mx - tr) : (pwm - tr) / std::max(1.0, tr - mn);
 }
 
-int PreflightRunner::rcChannel(const char* rcmap, int fallback) const {
-    const auto it = s_.params.find(rcmap);
-    return it != s_.params.end() && it->second >= 1 ? static_cast<int>(it->second) : fallback;
-}
-
-double PreflightRunner::rcNorm(int ch) const {
-    if (ch < 1 || ch > 18 || s_.rc[ch - 1] == 0) {
-        return 0.0;
-    }
-    return std::clamp((s_.rc[ch - 1] - 1500.0) / 400.0, -1.0, 1.0);
-}
-
 void PreflightRunner::saveMode() {
     if (!mode_saved_) {
         mode_before_ = s_.custom_mode;
@@ -215,16 +221,18 @@ void PreflightRunner::restoreMode() {
     }
 }
 
-bool PreflightRunner::testRunning() const {
-    return !running_.empty();
+void PreflightRunner::restoreSafety() {
+    if (safety_restore_ && !s_.armed) {
+        safety_restore_ = false;
+        if (onSafety) onSafety(true);
+    }
 }
 
-void PreflightRunner::stopAll() {
+void PreflightRunner::abortTest(const std::string& why) {
     if (running_.empty()) {
         return;
     }
     client_->stopManualControl();
-    // stop motor tests and anything armed for a test
     std::vector<link::CommandRequest> stop;
     if (running_ == "mot.lift") {
         stop.push_back(link::makeMotorTest(1, 0.0f, 0.1f, 1));
@@ -238,12 +246,36 @@ void PreflightRunner::stopAll() {
         }
         client_->runSequence("pf:stop", std::move(stop));
     }
-    if (running_ == "sens.compass" && compass_method_ == 2) {
-        client_->runSequence("pf:stop", {link::makeCancelMagCal()});
+    if (running_ == "pay.gimbal") {
+        client_->runSequence("pf:gimbal", {link::makeMountControl(0.0f, 0.0f)});
     }
-    restoreMode();
+    const std::string was = running_;
     running_.clear();
     phase_ = 0;
+    setResult(was, Status::Fail, why, false, why);
+    restoreMode();
+    art_ = Art{};
+}
+
+void PreflightRunner::stopAll() {
+    if (cal_ != Cal::None) {
+        cancelCal();
+    }
+    if (running_.empty()) {
+        restoreSafety();
+        return;
+    }
+    // the test running and every moving part still to come: stopped
+    const std::string was = running_;
+    abortTest("stopped");
+    if (findStep(was) && findStep(was)->stage == Stage::Moving) {
+        for (const auto* d : session_.activeSteps()) {
+            if (d->stage == Stage::Moving && status(d->id) == Status::Pending) {
+                setResult(d->id, Status::Fail, "stopped", true, "stopped");
+            }
+        }
+    }
+    restoreSafety();
 }
 
 // ---- events --------------------------------------------------------------------------------------
@@ -251,14 +283,32 @@ void PreflightRunner::stopAll() {
 void PreflightRunner::onEvent(const LinkEvent& ev) {
     if (ev.type == LinkEvent::Type::ParamSet) {
         const auto it = fix_from_to_.find(ev.tag);
-        if (it != fix_from_to_.end()) {
-            session_.noteParamWrite(ev.tag, it->second.first, it->second.second, ev.ok);
-            if (onToast) {
-                onToast(ev.ok ? QStringLiteral("%1 set to %2").arg(q(ev.tag)).arg(it->second.second)
-                              : QStringLiteral("%1 not set: %2").arg(q(ev.tag), q(ev.text)),
-                        ev.ok);
+        if (it == fix_from_to_.end()) {
+            return;
+        }
+        session_.noteParamWrite(ev.tag, it->second.first, it->second.second, ev.ok);
+        for (const auto& c : paramChecks()) {
+            if (c.name == ev.tag && ev.ok) {
+                setup_done_.push_back(c.title);
+                if (c.reboot) {
+                    reboot_pending_ = true;
+                    reboot_boot_count_ = s_.boot_count;
+                }
             }
-            fix_from_to_.erase(it);
+        }
+        setup_failed_ |= !ev.ok;
+        fix_from_to_.erase(it);
+        setup_pending_.erase(ev.tag);
+        if (setup_pending_.empty() && onToast) {
+            QString list;
+            for (const auto& t : setup_done_) {
+                list += (list.isEmpty() ? QString() : QStringLiteral(" · ")) + q(t);
+            }
+            onToast(setup_failed_ ? QStringLiteral("Some settings couldn't be written: try SET IT UP again")
+                                  : QStringLiteral("Fixed: %1").arg(list),
+                    !setup_failed_);
+            setup_done_.clear();
+            setup_failed_ = false;
         }
         return;
     }
@@ -280,573 +330,259 @@ QString PreflightRunner::detail(const std::string& id) const {
     return q(session_.result(id).detail);
 }
 
-QString PreflightRunner::instruction(const std::string& id) const {
+// ---- what the operator does -------------------------------------------------------------------------
+
+void PreflightRunner::setLook(const std::string& id, bool done) {
     const StepDef* d = findStep(id);
-    if (!d) {
-        return {};
+    if (d && d->stage == Stage::Look && d->kind == Kind::You) {
+        setResult(id, done ? Status::Pass : Status::Pending, done ? "checked" : "", true);
     }
-    const bool run = running_ == id;
-    if (id == "mot.lift" && motor_idx_ < static_cast<int>(motor_order_.size())) {
-        const auto& m = frame_.motors[motor_order_[motor_idx_]];
-        const QString which = QStringLiteral("motor %1 (%2, %3)")
-                                  .arg(QChar(m.letter()))
-                                  .arg(m.angle > 0 ? (std::abs(m.angle) < 90 ? QStringLiteral("front right") : QStringLiteral("back right"))
-                                                   : (std::abs(m.angle) < 90 ? QStringLiteral("front left") : QStringLiteral("back left")))
-                                  .arg(m.ccw ? QStringLiteral("counter-clockwise") : QStringLiteral("clockwise"));
-        if (run && phase_ == 1) return QStringLiteral("Spinning %1 …").arg(which);
-        if (run && phase_ == 2)
-            return QStringLiteral("Did %1 spin, in the place shown, turning %2 seen from above?")
-                .arg(which, m.ccw ? QStringLiteral("counter-clockwise") : QStringLiteral("clockwise"));
-        return QStringLiteral("Next: %1. Hold SPIN to run it for 2 s at 15 %.").arg(which);
-    }
-    if (id == "mot.pusher" && run) {
-        switch (phase_) {
-        case 1: return QStringLiteral("Arming in MANUAL…");
-        case 2: return QStringLiteral("Pusher spinning at 12 %…");
-        case 3: return QStringLiteral("Disarming…");
-        case 4: return QStringLiteral("Did the pusher spin and blow air backwards (away from the nose)?");
-        default: break;
-        }
-    }
-    if ((id == "surf.roll" || id == "surf.pitch" || id == "surf.yaw") && run) {
-        if (phase_ == 1) return QStringLiteral("Switching to MANUAL (disarmed: no motor can spin)…");
-        if (phase_ == 2) return QStringLiteral("Watch the surface: it must move the way the picture shows.");
-        if (phase_ == 3) return QStringLiteral("Did it move the way shown, through its full throw, without binding?");
-    }
-    if (id == "surf.stabilize" && run) {
-        if (phase_ == 1) return QStringLiteral("Switching to FBWA…");
-        return QStringLiteral("Tilt the aircraft right wing down by hand: the right aileron must go DOWN and the left UP "
-                              "(it fights the tilt).");
-    }
-    if (id == "link.rcfailsafe") {
-        if (rcfs_phase_ == 0) return QStringLiteral("Turn the transmitter OFF now.");
-        if (rcfs_phase_ == 1) return QStringLiteral("Failsafe seen. Turn the transmitter back ON.");
-    }
-    if (id == "sens.accel" && run && art_.pose > 0 && art_.pose <= 6) {
-        return QStringLiteral("Place the aircraft %1, hold it still, then tap PLACED.").arg(art::poseName(art_.pose).toLower());
-    }
-    if (id == "sens.compass" && run && compass_method_ == 2) {
-        return QStringLiteral("Rotate the aircraft slowly through every orientation: nose up, down, both sides, "
-                              "upside down. The sphere fills in.");
-    }
-    if (id == "sens.compass" && compass_method_ == 1) {
-        return QStringLiteral("Point the nose exactly at %1° true (north = 0). Use a known landmark or a phone "
-                              "compass away from the aircraft, then calibrate.")
-            .arg(fixed_yaw_deg_, 3, 10, QLatin1Char('0'));
-    }
-    return q(d->how);
 }
 
-// ---- buttons ----------------------------------------------------------------------------------------
+void PreflightRunner::lookContinue() {
+    if (lookComplete(session_)) {
+        flow_.lookDone(now_);
+    }
+}
 
-std::vector<PreflightRunner::Button> PreflightRunner::buttons(const std::string& id) const {
-    std::vector<Button> b;
+void PreflightRunner::goMoving() {
+    if (flow_.phase() != Phase::Gate || s_.armed) {
+        return;
+    }
+    if (safetyState(s_) == SafetyState::Safe) {
+        safety_restore_ = true;
+        if (onSafety) onSafety(false);
+    }
+    flow_.gateGo(now_);
+}
+
+void PreflightRunner::rerun() {
+    stopAll();
+    for (const auto* d : session_.activeSteps()) {
+        if (d->kind == Kind::Test && d->stage != Stage::Look && status(d->id) != Status::Pass) {
+            setResult(d->id, Status::Pending, "");
+        }
+    }
+    motor_idx_ = 0;
+    motor_faults_.clear();
+    motor_notes_.clear();
+    started_row_.clear();
+    flow_.rerun(now_);
+}
+
+bool PreflightRunner::setupFixable() const {
+    return !s_.armed && setupReport(s_, profile_).fixable();
+}
+
+void PreflightRunner::fixSetup() {
+    if (s_.armed || !setup_pending_.empty()) {
+        return;
+    }
+    for (const auto& w : setupReport(s_, profile_).wrong) {
+        if (!w.verdict.recommended || w.check->name.empty()) continue;
+        fix_from_to_[w.check->name] = {w.verdict.current, *w.verdict.recommended};
+        setup_pending_.insert(w.check->name);
+        client_->setParam(w.check->name, *w.verdict.recommended);
+    }
+}
+
+void PreflightRunner::reboot() {
+    if (s_.armed) {
+        return;
+    }
+    send("reboot", {link::makeReboot()});
+    if (onToast) onToast(QStringLiteral("Restarting the autopilot: the link comes back in a few seconds"), true);
+}
+
+// ---- calibrations ---------------------------------------------------------------------------------------
+
+PreflightRunner::Cal PreflightRunner::calFor(const std::string& id) const {
+    auto bad = [&](uint32_t bit) {
+        return (s_.sensors_present & bit) && (s_.sensors_enabled & bit) && !(s_.sensors_health & bit);
+    };
+    if (id == "sens.health" || id == "sens.ekf") {
+        if (bad(0x4) || bad(0x80000) || (s_.has_ekf && s_.ekf_mag_var >= kEkfVarCaution)) return Cal::Compass;
+        if (id == "sens.health" && (bad(0x2) || bad(0x40000))) return Cal::Accel;
+    }
+    return Cal::None;
+}
+
+void PreflightRunner::startCal(Cal c) {
+    if (c == Cal::None || cal_ != Cal::None || !running_.empty() || s_.armed) {
+        return;
+    }
+    cal_ = c;
+    cal_t_ = now_;
+    if (c == Cal::Compass) {
+        send("compassstart", {link::makeStartMagCal()});
+    } else {
+        send("accel", {link::makeCalibration(link::Calibration::AccelSimple)});
+    }
+}
+
+void PreflightRunner::cancelCal() {
+    if (cal_ == Cal::Compass) {
+        client_->runSequence("pf:stop", {link::makeCancelMagCal()});
+    }
+    cal_ = Cal::None;
+}
+
+QString PreflightRunner::calText() const {
+    if (cal_ == Cal::Compass) {
+        return QStringLiteral("Pick the aircraft up and turn it slowly through every direction: nose up, nose down, "
+                              "each wing down, upside down. The sphere fills in as it learns.");
+    }
+    if (cal_ == Cal::Accel) {
+        return QStringLiteral("Keep the aircraft level and still…");
+    }
+    return {};
+}
+
+int PreflightRunner::calPercent() const {
+    int pct = 0;
+    for (const auto& c : s_.magcal) {
+        if (c.active) pct = std::max(pct, c.pct);
+    }
+    return pct;
+}
+
+void PreflightRunner::tickCal(Clock::time_point now) {
+    if (cal_ == Cal::Accel) {
+        const auto it = tag_done_.find("accel");
+        if (it != tag_done_.end() && it->second) {
+            const bool ok = tag_result_["accel"] == "ok";
+            if (onToast) onToast(ok ? QStringLiteral("Accelerometer calibrated") : QStringLiteral("Accelerometer calibration failed: keep it still and try again"), ok);
+            cal_ = Cal::None;
+        }
+        return;
+    }
+    if (cal_ != Cal::Compass) {
+        return;
+    }
+    // onboard: wait for every compass that is calibrating to report
+    int active = 0, done = 0, ok = 0;
+    for (const auto& c : s_.magcal) {
+        if (secs(c.rx, now) > 5.0 && !c.reported) continue;
+        ++active;
+        if (c.reported && c.rx >= cal_t_) {
+            ++done;
+            if (c.status == MAG_CAL_SUCCESS) ++ok;
+        }
+    }
+    if (active > 0 && done == active) {
+        const bool good = ok == done;
+        if (good) {
+            reboot_pending_ = true;
+            reboot_boot_count_ = s_.boot_count;
+        }
+        if (onToast) onToast(good ? QStringLiteral("Compass calibrated: restart the autopilot to use it")
+                                  : QStringLiteral("Compass calibration failed: turn it more slowly, through every side"),
+                             good);
+        cal_ = Cal::None;
+    } else if (secs(cal_t_, now) > 300) {
+        cancelCal();
+        if (onToast) onToast(QStringLiteral("Compass calibration timed out"), false);
+    }
+}
+
+// ---- tests -----------------------------------------------------------------------------------------------
+
+std::vector<int> PreflightRunner::surfaceChannels(const std::string& id) const {
+    const OutputMap m = outputMap(s_, static_cast<int>(frame_.motors.size()));
+    std::vector<int> v;
+    auto add = [&](int ch) {
+        if (ch && std::find(v.begin(), v.end(), ch) == v.end()) v.push_back(ch);
+    };
+    if (id == "surf.roll") {
+        for (int ch : m.ailerons) add(ch);
+        add(m.elevon_l);
+        add(m.elevon_r);
+    } else if (id == "surf.pitch") {
+        add(m.elevator);
+        add(m.elevon_l);
+        add(m.elevon_r);
+        add(m.vtail_l);
+        add(m.vtail_r);
+    } else if (id == "surf.yaw") {
+        add(m.rudder);
+        add(m.vtail_l);
+        add(m.vtail_r);
+    }
+    return v;
+}
+
+void PreflightRunner::startTest(const std::string& id) {
     const StepDef* d = findStep(id);
-    if (!d) {
-        return b;
+    if (!d || !running_.empty() || cal_ != Cal::None) {
+        return;
     }
-    const Status st = status(id);
-    const bool run = running_ == id;
-    const bool busy = !running_.empty() && !run;
-    const bool armed = s_.armed;
-    const QString busy_reason = QStringLiteral("Another test is running");
-    auto add = [&](std::string a, QString l, Style s = Style::Primary, bool hold = false, bool en = true,
-                   QString why = {}) { b.push_back({std::move(a), std::move(l), s, hold, en, std::move(why)}); };
-    auto skip = [&] {
-        if (!d->critical && st != Status::Pass && st != Status::Skipped) {
-            add("skip", QStringLiteral("SKIP"), Style::Neutral);
+    if (s_.armed) {
+        setResult(id, Status::Fail, "the aircraft is armed: tests run disarmed only");
+        return;
+    }
+    if (d->stage == Stage::Moving && safetyState(s_) == SafetyState::Safe) {
+        setResult(id, Status::Waiting, "turning safety off");
+        return;  // tried again next frame
+    }
+    phase_t_ = now_;
+    if (id == "surf.roll" || id == "surf.pitch" || id == "surf.yaw") {
+        if (surfaceChannels(id).empty()) {
+            setResult(id, Status::NotApplicable, id == "surf.yaw" ? "no rudder" : "no output for this surface");
+            return;
         }
-    };
-    auto confirmPair = [&](const QString& yes) {
-        add("yes", yes, Style::Good);
-        add("no", QStringLiteral("✗ NO"), Style::Bad);
-    };
-
-    if (id == "profile.battery") {
-        add("chem:0", QStringLiteral("LiPo"), profile_.chemistry == Chemistry::LiPo ? Style::Good : Style::Neutral);
-        add("chem:1", QStringLiteral("LiHV"), profile_.chemistry == Chemistry::LiHV ? Style::Good : Style::Neutral);
-        add("chem:2", QStringLiteral("Li-ion"), profile_.chemistry == Chemistry::LiIon ? Style::Good : Style::Neutral);
-        add("cells-", QStringLiteral("− CELL"), Style::Neutral);
-        add("cells+", QStringLiteral("+ CELL"), Style::Neutral);
-        add("cap-", QStringLiteral("− 500 mAh"), Style::Neutral);
-        add("cap+", QStringLiteral("+ 500 mAh"), Style::Neutral);
-        add("end-", QStringLiteral("− 1 min"), Style::Neutral);
-        add("end+", QStringLiteral("+ 1 min"), Style::Neutral);
-        add("save", QStringLiteral("✓ SAVE PROFILE"), Style::Good, false, profile_.cells > 0 && profile_.capacity_mah > 0,
-            QStringLiteral("Set the cells and capacity"));
-        return b;
-    }
-
-    if (d->kind == Kind::You) {
-        if (id == "mot.gate") {
-            add("props:off", QStringLiteral("PROPS OFF"), props_on_ || st != Status::Pass ? Style::Primary : Style::Good);
-            add("props:on", QStringLiteral("PROPS ON · TIED DOWN, ALL CLEAR"), Style::Neutral);
-            return b;
-        }
-        if (st != Status::Pass) {
-            add("yes", QStringLiteral("✓ DONE"), Style::Good);
-        } else {
-            add("undo", QStringLiteral("UNDO"), Style::Neutral);
-        }
-        skip();
-        return b;
-    }
-
-    if (d->kind == Kind::Fix) {
-        const auto pend = fix_pending_.find(id);
-        for (const auto& c : paramChecks()) {
-            if (c.id != id) continue;
-            const ParamVerdict v = checkParam(c, s_, profile_);
-            if (pend != fix_pending_.end()) {
-                add("fixconfirm", QStringLiteral("✓ WRITE %1 = %2").arg(q(c.name)).arg(v.recommended ? *v.recommended : 0.0f),
-                    Style::Good);
-                add("fixcancel", QStringLiteral("CANCEL"), Style::Neutral);
-                return b;
-            }
-            if (v.known && !v.ok && v.recommended && !c.name.empty()) {
-                add("fix", QStringLiteral("SET %1 → %2").arg(q(c.name)).arg(*v.recommended), Style::Primary, false, !armed,
-                    QStringLiteral("Disarm first"));
-            }
-            if (v.known && !v.ok && !c.critical && st != Status::Skipped) {
-                add("skip", QStringLiteral("KEEP AS IS"), Style::Neutral);
-            }
-            // written here and only applied at boot
-            if (c.reboot && v.ok && fix_from_to_.count(c.name)) {
-                add("reboot", QStringLiteral("REBOOT AUTOPILOT"), Style::Primary, true, !armed,
-                    QStringLiteral("Disarm first"));
-            }
-        }
-        return b;
-    }
-
-    if (d->kind == Kind::Auto) {
-        if (id == "pay.video" && st != Status::Pass) {
-            add("na", QStringLiteral("NO CAMERA"), Style::Neutral);
-        } else if (id == "fin.ready") {
-            add("start", QStringLiteral("PREPARE FOR LAUNCH"), Style::Primary, false, !busy && !armed,
-                armed ? QStringLiteral("Disarmed only") : busy_reason);
-        } else if (id == "fin.safety" && st != Status::Pass && st != Status::NotApplicable) {
-            add("safetyoff", QStringLiteral("HOLD: SAFETY OFF"), Style::Danger, true, !armed, QStringLiteral("Disarmed only"));
-        } else if (id == "sens.gps2" && st != Status::Pass) {
-            add("na", QStringLiteral("NOT FITTED"), Style::Neutral);
-        }
-        if (st == Status::Fail || st == Status::Waiting || st == Status::Warn) {
-            skip();
-        }
-        return b;
-    }
-
-    // ---- calibrations
-    if (id == "sens.gyro" || id == "sens.level" || id == "sens.baro") {
-        add("start", run ? QStringLiteral("CALIBRATING…") : QStringLiteral("CALIBRATE"), Style::Primary, false,
-            !run && !busy && !armed, armed ? QStringLiteral("Disarmed only") : busy_reason);
-        skip();
-        return b;
-    }
-    if (id == "sens.accel") {
-        if (run) {
-            if (art_.pose >= 1 && art_.pose <= 6) {
-                add("pose", QStringLiteral("✓ PLACED %1").arg(art::poseName(art_.pose)), Style::Good);
-            }
-            add("cancel", QStringLiteral("CANCEL"), Style::Neutral);
-            return b;
-        }
-        add("already", QStringLiteral("✓ ALREADY CALIBRATED"), Style::Good, false, (s_.sensors_health & 0x2) != 0,
-            QStringLiteral("The accelerometer reports unhealthy"));
-        add("simple", QStringLiteral("SIMPLE CAL (LEVEL)"), Style::Primary, false, !busy && !armed);
-        add("full", QStringLiteral("6-POSITION CAL"), Style::Primary, false, !busy && !armed);
-        return b;
-    }
-    if (id == "sens.compass") {
-        if (run && compass_method_ == 2) {
-            add("cancel", QStringLiteral("CANCEL"), Style::Neutral);
-            return b;
-        }
-        if (compass_method_ == 1 && !run) {
-            add("yaw-10", QStringLiteral("−10°"), Style::Neutral);
-            add("yaw-1", QStringLiteral("−1°"), Style::Neutral);
-            add("yaw+1", QStringLiteral("+1°"), Style::Neutral);
-            add("yaw+10", QStringLiteral("+10°"), Style::Neutral);
-            add("fixedcal", QStringLiteral("CALIBRATE AT %1°").arg(fixed_yaw_deg_, 3, 10, QLatin1Char('0')),
-                Style::Primary, false, !busy && !armed && s_.has_gps && s_.gps_fix >= 3,
-                QStringLiteral("Needs a GPS fix (for declination)"));
-            add("back", QStringLiteral("◀ METHODS"), Style::Neutral);
-            return b;
-        }
-        if (st == Status::Pass && (tag_result_.count("compass") && tag_result_.at("compass") == "ok")) {
-            add("reboot", QStringLiteral("REBOOT AUTOPILOT"), Style::Primary, true, !armed);
-        }
-        add("already", QStringLiteral("✓ ALREADY CALIBRATED"), Style::Good, false,
-            (s_.sensors_health & 0x4) != 0 && s_.ekf_mag_var < 0.3,
-            QStringLiteral("The compass isn't healthy or disagrees with the motion"));
-        add("method:fixed", QStringLiteral("FROM A KNOWN HEADING"), Style::Primary, false, !busy && !armed);
-        add("method:rotate", QStringLiteral("BY ROTATING IT"), Style::Primary, false, !busy && !armed);
-        return b;
-    }
-
-    // ---- tests
-    if (id == "link.sticks" || id == "sens.orientation") {
-        add("reset", QStringLiteral("↻ START OVER"), Style::Neutral);
-        return b;
-    }
-    if (id == "link.modes") {
-        add("yes", QStringLiteral("✓ MODES ARE RIGHT"), Style::Good, false, art_.mode_positions_seen >= 2,
-            QStringLiteral("Flip the switch through its positions first"));
-        add("na", QStringLiteral("NO MODE SWITCH"), Style::Neutral);
-        return b;
-    }
-    if (id == "link.rcfailsafe") {
-        add("reset", QStringLiteral("↻ START OVER"), Style::Neutral);
-        return b;
-    }
-    if (id == "sens.pitot") {
-        add("reset", QStringLiteral("↻ START OVER"), Style::Neutral);
-        return b;
-    }
-    if (id == "surf.roll" || id == "surf.pitch" || id == "surf.yaw" || id == "surf.stabilize") {
-        if (run && phase_ == 3) {
-            confirmPair(QStringLiteral("✓ MOVED AS SHOWN"));
-            add("again", QStringLiteral("↻ AGAIN"), Style::Neutral);
-        } else if (run && id == "surf.stabilize" && phase_ == 2) {
-            confirmPair(QStringLiteral("✓ AILERONS PUSH BACK"));
-        } else if (!run) {
-            add("start", id == "surf.stabilize" ? QStringLiteral("START (FBWA)") : QStringLiteral("SWEEP"), Style::Primary,
-                false, !busy && !armed, armed ? QStringLiteral("Disarmed only") : busy_reason);
-            if (st == Status::Fail && id != "surf.stabilize") {
-                add("reverse", QStringLiteral("REVERSE THIS SURFACE"), Style::Primary);
-            }
-        }
-        if (id == "surf.yaw") skip();
-        return b;
+        running_ = id;
+        phase_ = 1;
+        swing_.clear();
+        saveMode();
+        send("surfmode", {link::makeSetMode(plane::MANUAL, "MANUAL")});
+        setResult(id, Status::Waiting, "switching to MANUAL (disarmed: nothing spins)");
+        return;
     }
     if (id == "mot.lift") {
-        const bool safe = safetyState(s_) == SafetyState::Safe;
-        const bool gate = status("mot.gate") == Status::Pass;
-        if (run && phase_ == 2) {
-            add("yes", QStringLiteral("✓ RIGHT MOTOR, RIGHT WAY"), Style::Good);
-            add("wrongmotor", QStringLiteral("✗ WRONG MOTOR"), Style::Bad);
-            add("wrongdir", QStringLiteral("✗ WRONG DIRECTION"), Style::Bad);
-            add("again", QStringLiteral("↻ AGAIN"), Style::Neutral);
-        } else if (!run || phase_ == 0) {
-            const bool done = motor_idx_ >= static_cast<int>(motor_order_.size()) && !motor_order_.empty();
-            if (!done) {
-                const char letter = motor_order_.empty() ? 'A' : frame_.motors[motor_order_[std::min<size_t>(motor_idx_, motor_order_.size() - 1)]].letter();
-                add("spin", QStringLiteral("HOLD: SPIN %1").arg(QChar(letter)), Style::Danger, true,
-                    gate && !safe && !armed && !busy,
-                    !gate ? QStringLiteral("Confirm the props choice first") : safe ? QStringLiteral("Safety is ON: hold SAFETY OFF") : armed ? QStringLiteral("Disarmed only") : busy_reason);
-            } else {
-                add("restart", QStringLiteral("↻ TEST ALL AGAIN"), Style::Neutral);
-            }
-            if (safe) add("safetyoff", QStringLiteral("HOLD: SAFETY OFF"), Style::Danger, true);
+        if (motor_order_.empty()) {
+            setResult(id, Status::Fail, "the frame has no lift motors");
+            return;
         }
-        return b;
+        running_ = id;
+        motor_idx_ = 0;
+        motor_faults_.clear();
+        motor_notes_.clear();
+        phase_ = 3;  // starts with the gap, then the first motor
+        return;
     }
     if (id == "mot.pusher") {
-        const bool safe = safetyState(s_) == SafetyState::Safe;
-        const bool gate = status("mot.gate") == Status::Pass;
-        if (run && phase_ == 4) {
-            confirmPair(QStringLiteral("✓ SPUN, AIR BACKWARDS"));
-            add("again", QStringLiteral("↻ AGAIN"), Style::Neutral);
-        } else if (!run) {
-            add("spin", QStringLiteral("HOLD: SPIN PUSHER"), Style::Danger, true, gate && !safe && !armed && !busy,
-                !gate ? QStringLiteral("Confirm the props choice first") : safe ? QStringLiteral("Safety is ON") : armed ? QStringLiteral("Disarmed only") : busy_reason);
-            if (safe) add("safetyoff", QStringLiteral("HOLD: SAFETY OFF"), Style::Danger, true);
-        }
-        return b;
+        running_ = id;
+        phase_ = 1;
+        spun_channel_ = 0;
+        amps0_ = std::max(0.0, s_.battery_a);
+        amps_peak_ = amps0_;
+        saveMode();
+        client_->manualControl(0, 0, 0, 0, 1500);  // throttle held at zero while arming
+        send("pusherarm", {link::makeSetMode(plane::MANUAL, "MANUAL"), link::makeArm(true)});
+        setResult(id, Status::Waiting, "arming in MANUAL");
+        return;
     }
     if (id == "pay.gimbal") {
         const auto mt = s_.params.find("MNT1_TYPE");
-        if (run && phase_ == 2) {
-            confirmPair(QStringLiteral("✓ MOVED AS SHOWN"));
-        } else if (!run) {
-            add("start", QStringLiteral("SWEEP GIMBAL"), Style::Primary, false, !busy && (mt == s_.params.end() || mt->second > 0),
-                QStringLiteral("No gimbal configured (MNT1_TYPE = 0)"));
-            add("na", QStringLiteral("NO GIMBAL"), Style::Neutral);
-        }
-        return b;
-    }
-    return b;
-}
-
-// ---- actions ------------------------------------------------------------------------------------------
-
-void PreflightRunner::act(const std::string& id, const std::string& a) {
-    const StepDef* d = findStep(id);
-    if (!d) {
-        return;
-    }
-    auto toast = [&](const QString& t, bool good) {
-        if (onToast) onToast(t, good);
-    };
-    if (a == "skip") {
-        setResult(id, Status::Skipped, live_.count(id) ? live_[id].detail : "", true, "skipped by the pilot");
-        return;
-    }
-    if (a == "na") {
-        setResult(id, Status::NotApplicable, "not fitted", true, "not fitted");
-        return;
-    }
-    if (a == "undo") {
-        setResult(id, Status::Pending, "", true);
-        return;
-    }
-    if (a == "safetyoff") {
-        if (onSafety) onSafety(false);
-        return;
-    }
-
-    // profile
-    if (id == "profile.battery") {
-        if (a.rfind("chem:", 0) == 0) profile_.chemistry = static_cast<Chemistry>(std::stoi(a.substr(5)));
-        if (a == "cells-") profile_.cells = std::max(1, profile_.cells - 1);
-        if (a == "cells+") profile_.cells = std::min(24, profile_.cells + 1);
-        if (a == "cap-") profile_.capacity_mah = std::max(0, profile_.capacity_mah - 500);
-        if (a == "cap+") profile_.capacity_mah += 500;
-        if (a == "end-") profile_.endurance_min = std::max(0.0, profile_.endurance_min - 1.0);
-        if (a == "end+") profile_.endurance_min += 1.0;
-        if (a == "save") {
-            profile_.set = true;
-            saveProfile();
-            setResult(id, Status::Pass, std::to_string(profile_.cells) + "S " +
-                                            (profile_.chemistry == Chemistry::LiPo ? "LiPo" : profile_.chemistry == Chemistry::LiHV ? "LiHV" : "Li-ion") +
-                                            " · " + std::to_string(profile_.capacity_mah) + " mAh",
-                      true);
-        } else if (status(id) == Status::Pass) {
-            setResult(id, Status::Pending, "", true);  // changed: save again
-        }
-        return;
-    }
-
-    // physical checks
-    if (d->kind == Kind::You) {
-        if (id == "mot.gate") {
-            props_on_ = a == "props:on";
-            setResult(id, Status::Pass, props_on_ ? "props ON, tied down, area clear" : "props OFF", true);
+        if (mt == s_.params.end() || mt->second < 0.5f) {
+            setResult(id, Status::NotApplicable, "no gimbal");
             return;
         }
-        if (a == "yes") setResult(id, Status::Pass, "confirmed", true);
-        return;
-    }
-
-    // parameter fixes
-    if (d->kind == Kind::Fix) {
-        for (const auto& c : paramChecks()) {
-            if (c.id != id) continue;
-            const ParamVerdict v = checkParam(c, s_, profile_);
-            if (a == "fix") fix_pending_[id] = c.name;
-            if (a == "fixcancel") fix_pending_.erase(id);
-            if (a == "fixconfirm" && v.recommended) {
-                fix_pending_.erase(id);
-                fix_from_to_[c.name] = {v.current, *v.recommended};
-                client_->setParam(c.name, *v.recommended);
-            }
-            if (a == "reboot") {
-                send("reboot", {link::makeReboot()});
-                toast(QStringLiteral("Rebooting the autopilot: the link comes back in a few seconds"), true);
-            }
-        }
-        return;
-    }
-
-    if (id == "fin.ready" && a == "start") {
-        send("final", {link::makeSetMode(plane::AUTO, "AUTO"), link::makeSetMissionCurrent(1, true),
-                       link::makeRunPrearmChecks()});
-        return;
-    }
-
-    // calibrations
-    if ((id == "sens.gyro" || id == "sens.level" || id == "sens.baro") && a == "start") {
         running_ = id;
         phase_ = 1;
-        phase_t_ = now_;
-        send(id, {link::makeCalibration(id == "sens.gyro" ? link::Calibration::Gyro
-                                         : id == "sens.level" ? link::Calibration::Level
-                                                              : link::Calibration::BaroAirspeed)});
+        gimbal_seen_ = false;
+        gimbal_min_pitch_ = 0.0;
+        gimbal_yaw_lo_ = gimbal_yaw_hi_ = 0.0;
+        setResult(id, Status::Waiting, "moving the gimbal");
         return;
     }
-    if (id == "sens.accel") {
-        if (a == "already") setResult(id, Status::Pass, "calibrated earlier, accel healthy", true);
-        if (a == "simple") {
-            running_ = id;
-            phase_ = 10;
-            send("accel", {link::makeCalibration(link::Calibration::AccelSimple)});
-        }
-        if (a == "full") {
-            running_ = id;
-            phase_ = 1;
-            phase_t_ = now_;
-            send("accel", {link::makeCalibration(link::Calibration::AccelFull)});
-        }
-        if (a == "pose" && art_.pose >= 1 && art_.pose <= 6) {
-            send("accelpos", {link::makeAccelCalPos(art_.pose)});
-        }
-        if (a == "cancel") stopAll();
-        return;
-    }
-    if (id == "sens.compass") {
-        if (a == "already") setResult(id, Status::Pass, "calibrated earlier, compass healthy and consistent", true);
-        if (a == "method:fixed") {
-            compass_method_ = 1;
-            fixed_yaw_deg_ = static_cast<int>(std::lround(geo::wrap360(s_.yaw_deg)));
-        }
-        if (a == "back") compass_method_ = 0;
-        if (a.rfind("yaw", 0) == 0) {
-            fixed_yaw_deg_ = static_cast<int>(geo::wrap360(fixed_yaw_deg_ + std::stoi(a.substr(3))));
-        }
-        if (a == "fixedcal") {
-            running_ = id;
-            phase_ = 1;
-            send("compass", {link::makeFixedMagCalYaw(static_cast<float>(fixed_yaw_deg_))});
-        }
-        if (a == "method:rotate") {
-            compass_method_ = 2;
-            running_ = id;
-            phase_ = 1;
-            phase_t_ = now_;
-            send("compassstart", {link::makeStartMagCal()});
-        }
-        if (a == "cancel") {
-            stopAll();
-            compass_method_ = 0;
-        }
-        if (a == "reboot") {
-            send("reboot", {link::makeReboot()});
-            toast(QStringLiteral("Rebooting the autopilot: the link comes back in a few seconds"), true);
-        }
-        return;
-    }
+}
 
-    // tests
-    if (id == "link.sticks" && a == "reset") art_.stick_reached = {};
-    if (id == "sens.orientation" && a == "reset") {
-        art_.orient_roll = art_.orient_pitch = art_.orient_yaw = false;
-        yaw0_ = s_.yaw_deg;
-        setResult(id, Status::Pending, "", true);
-    }
-    if (id == "link.modes") {
-        if (a == "yes") setResult(id, Status::Pass, std::to_string(art_.mode_positions_seen) + " positions checked", true);
-    }
-    if (id == "link.rcfailsafe" && a == "reset") {
-        rcfs_phase_ = 0;
-        setResult(id, Status::Pending, "", true);
-    }
-    if (id == "sens.pitot" && a == "reset") {
-        pitot_peak_ = 0.0;
-        setResult(id, Status::Pending, "", true);
-    }
-
-    if (id == "surf.roll" || id == "surf.pitch" || id == "surf.yaw" || id == "surf.stabilize") {
-        if (a == "start" || a == "again") {
-            running_ = id;
-            phase_ = 1;
-            phase_t_ = now_;
-            saveMode();
-            send("surfmode", {link::makeSetMode(id == "surf.stabilize" ? plane::FBWA : plane::MANUAL,
-                                                id == "surf.stabilize" ? "FBWA" : "MANUAL")});
-        }
-        if (a == "yes" || a == "no") {
-            const char* what = id == "surf.roll" ? "ailerons" : id == "surf.pitch" ? "elevator" : id == "surf.yaw" ? "rudder" : "stabilisation";
-            setResult(id, a == "yes" ? Status::Pass : Status::Fail,
-                      a == "yes" ? std::string(what) + " correct"
-                                 : std::string(what) + " wrong: reverse the servo (button) or fix the linkage, then sweep again",
-                      true);
-            running_.clear();
-            phase_ = 0;
-            client_->stopManualControl();
-            restoreMode();
-        }
-        if (a == "reverse") {
-            const preflight::OutputMap m = outputMap(s_, static_cast<int>(frame_.motors.size()));
-            std::vector<int> chans;
-            if (id == "surf.roll") chans = m.ailerons;
-            if (id == "surf.pitch" && m.elevator) chans = {m.elevator};
-            if (id == "surf.yaw" && m.rudder) chans = {m.rudder};
-            for (int ch : chans) {
-                const std::string n = "SERVO" + std::to_string(ch) + "_REVERSED";
-                const auto it = s_.params.find(n);
-                const float from = it != s_.params.end() ? it->second : 0.0f;
-                fix_from_to_[n] = {from, from > 0.5f ? 0.0f : 1.0f};
-                client_->setParam(n, from > 0.5f ? 0.0f : 1.0f);
-            }
-            toast(chans.empty() ? QStringLiteral("No single servo to reverse (elevons / V-tail): fix in the mixer")
-                                : QStringLiteral("Reversed; sweep again to check"),
-                  !chans.empty());
-            setResult(id, Status::Pending, "", true);
-        }
-        return;
-    }
-
-    if (id == "mot.lift") {
-        if (a == "restart") {
-            motor_idx_ = 0;
-            motor_ok_.assign(motor_order_.size(), false);
-            setResult(id, Status::Pending, "", true);
-        }
-        if (a == "spin" || a == "again") {
-            if (motor_idx_ >= static_cast<int>(motor_order_.size())) return;
-            const auto& m = frame_.motors[motor_order_[motor_idx_]];
-            running_ = id;
-            phase_ = 1;
-            phase_t_ = now_;
-            spun_channel_ = 0;
-            send("motor", {link::makeMotorTest(m.test_order, kLiftTestPct, kLiftTestSecs)});
-        }
-        if (a == "yes") {
-            motor_ok_.resize(motor_order_.size(), false);
-            motor_ok_[motor_idx_] = true;
-            ++motor_idx_;
-            running_.clear();
-            phase_ = 0;
-            if (motor_idx_ >= static_cast<int>(motor_order_.size())) {
-                setResult(id, Status::Pass, "all " + std::to_string(motor_order_.size()) + " lift motors: right place, right direction", true);
-            }
-        }
-        if (a == "wrongmotor" || a == "wrongdir") {
-            const auto& m = frame_.motors[motor_order_[motor_idx_]];
-            setResult(id, Status::Fail,
-                      a == "wrongmotor"
-                          ? std::string("motor ") + m.letter() + " spun in the wrong place: swap the ESC signal leads, or fix SERVOn_FUNCTION for MOTOR" + std::to_string(m.number)
-                          : std::string("motor ") + m.letter() + " spins the wrong way: swap any two of its three motor wires (or reverse it in the ESC)",
-                      true);
-            running_.clear();
-            phase_ = 0;
-        }
-        return;
-    }
-    if (id == "mot.pusher") {
-        if (a == "spin" || a == "again") {
-            running_ = id;
-            phase_ = 1;
-            phase_t_ = now_;
-            spun_channel_ = 0;
-            saveMode();
-            client_->manualControl(0, 0, 0, 0, 1500);  // throttle held at zero while arming
-            send("pusherarm", {link::makeSetMode(plane::MANUAL, "MANUAL"), link::makeArm(true)});
-        }
-        if (a == "yes" || a == "no") {
-            setResult(id, a == "yes" ? Status::Pass : Status::Fail,
-                      a == "yes" ? "pusher spins and pushes" : "pusher wrong: if it blows forwards, swap two motor wires or flip the prop",
-                      true);
-            running_.clear();
-            phase_ = 0;
-            restoreMode();
-        }
-        return;
-    }
-    if (id == "pay.gimbal") {
-        if (a == "start") {
-            running_ = id;
-            phase_ = 1;
-            phase_t_ = now_;
-        }
-        if (a == "yes" || a == "no") {
-            setResult(id, a == "yes" ? Status::Pass : Status::Fail, a == "yes" ? "gimbal moves as commanded" : "gimbal wrong", true);
-            running_.clear();
-            phase_ = 0;
-            client_->runSequence("pf:gimbal", {link::makeMountControl(0.0f, 0.0f)});
-        }
-        return;
-    }
+void PreflightRunner::endTest(const std::string& id, Status st, const std::string& detail) {
+    setResult(id, st, detail);
+    running_.clear();
+    phase_ = 0;
+    art_ = Art{};
 }
 
 // ---- per-frame -----------------------------------------------------------------------------------------
@@ -870,44 +606,101 @@ void PreflightRunner::update(const VehicleState& s, Clock::time_point now, doubl
             for (size_t i = 0; i < frame_.motors.size(); ++i) motor_order_.push_back(static_cast<int>(i));
             std::sort(motor_order_.begin(), motor_order_.end(),
                       [&](int a, int b) { return frame_.motors[a].test_order < frame_.motors[b].test_order; });
-            motor_ok_.assign(motor_order_.size(), false);
-            motor_idx_ = 0;
         }
     }
-    if (profile_.cells <= 0 && s.has_battery && s.battery_v > 0.0) {
-        profile_.cells = guessCells(s.battery_v, profile_.chemistry);
+    // the cell count, read off the pack: a battery that reports its cells says
+    // so; otherwise the voltage. A flat pack can look like one cell fewer, so
+    // a guess only ever raises what was seen before.
+    if (s.has_battery && s.battery_v > 0.0 && !s.armed) {
+        const int cells = s.cell_v.size() >= 2 ? static_cast<int>(s.cell_v.size()) : guessCells(s.battery_v, profile_.chemistry);
+        if (cells > 0 && (s.cell_v.size() >= 2 ? cells != profile_.cells : cells > profile_.cells)) {
+            profile_.cells = cells;
+            saveProfile();
+        }
+    }
+    if (reboot_pending_ && s.boot_count != reboot_boot_count_) {
+        reboot_pending_ = false;  // restarted
     }
 
     if (!session_.active()) {
         return;
     }
 
-    // automatic steps (and the automatic side of settings)
+    // automatic steps
     for (const auto* d : session_.activeSteps()) {
-        if (d->kind != Kind::Auto && d->kind != Kind::Fix) continue;
-        const Status user = session_.result(d->id).status;
-        if (user == Status::Skipped || user == Status::NotApplicable) {
-            if (session_.result(d->id).by_user) continue;
-        }
+        if (d->kind != Kind::Auto) continue;
         std::optional<Eval> e;
         if (d->id == "pay.video") {
-            e = video_age_ < 2.0 ? Eval{Status::Pass, "frames arriving"} : Eval{Status::Waiting, "no frames yet"};
+            e = video_age_ < 2.0 ? Eval{Status::Pass, "pictures arriving"} : Eval{Status::Waiting, "no pictures yet"};
         } else {
             e = evaluate(d->id, s, profile_, now);
         }
-        if (e && d->id == "fin.ready" && e->status != Status::Pass && !prearm_.empty() && !prearmHealthy(s)) {
-            for (const auto& r : prearm_) e->detail += "\n• " + r;
-        }
-        if (e) {
-            live_[d->id] = *e;
-            if (e->status == Status::Fail || e->status == Status::Waiting) {
-                // a fixed problem comes back by itself; a non-critical one may be skipped
+        if (!e) continue;
+        if (d->id == "fin.ready" && e->status != Status::Pass && !prearmHealthy(s)) {
+            // With safety ON the autopilot's own check fails on that alone;
+            // Launch turns safety off, so that one doesn't count here.
+            const bool only_safety =
+                std::all_of(prearm_.begin(), prearm_.end(),
+                            [](const std::string& r) { return r.find("afety") != std::string::npos; });
+            if (safetyState(s) == SafetyState::Safe && only_safety && !s.armed && gpsHealthy(s) && ekfHealthy(s)) {
+                e = Eval{Status::Pass, "ready (Launch turns safety off)"};
+            } else {
+                for (const auto& r : prearm_) e->detail += "\n• " + r;
             }
-            session_.set(d->id, e->status, e->detail, false, now);
+        }
+        std::string note;
+        if (flow_.timedOut(d->id) && !isDone(e->status) && e->status != Status::Fail) {
+            // waited long enough: a required step fails, an optional one is a note
+            e->status = d->critical ? Status::Fail : Status::Warn;
+            note = "timed out";
+        }
+        session_.set(d->id, e->status, e->detail, false, now, note);
+    }
+
+    // the pitot on the look card: an observer, no button
+    if (session_.includes("sens.pitot") && status("sens.pitot") != Status::Pass) {
+        const auto t = s_.params.find("ARSPD_TYPE");
+        if (t != s_.params.end() && t->second < 0.5f) {
+            setResult("sens.pitot", Status::NotApplicable, "no airspeed sensor");
+        } else {
+            pitot_peak_ = std::max(pitot_peak_, s_.airspeed);
+            if (pitot_peak_ > 5.0 && s_.airspeed < 3.0) {
+                setResult("sens.pitot", Status::Pass,
+                          "rose to " + std::to_string(static_cast<int>(pitot_peak_)) + " m/s and settled back");
+            } else {
+                setResult("sens.pitot", Status::Waiting,
+                          pitot_peak_ > 5.0 ? "good, now let it settle" : "waiting for the airspeed to rise");
+            }
+        }
+    }
+
+    if (open_) {
+        flow_.tick(session_, now);
+        const std::string row = flow_.currentId();
+        const StepDef* d = row.empty() ? nullptr : findStep(row);
+        if (flow_.phase() == Phase::Scan && d) {
+            if (row != started_row_) {
+                started_row_ = row;
+                if (row == "fin.ready") {
+                    send("prearm", {link::makeRunPrearmChecks()});  // its reasons arrive sooner
+                }
+            }
+            if (d->kind == Kind::Test && running_.empty() && !isDone(status(row)) && status(row) != Status::Fail) {
+                startTest(row);
+            }
+        }
+        // a test whose row timed out (the flow has moved on)
+        if (!running_.empty() && flow_.timedOut(running_)) {
+            abortTest("timed out");
+        }
+        // after the moving parts: safety back as it was
+        if (safety_restore_ && running_.empty() && (!d || d->stage != Stage::Moving)) {
+            restoreSafety();
         }
     }
 
     tickTests(now);
+    tickCal(now);
     if (mode_saved_ && restore_sent_ && running_.empty() && s.custom_mode == mode_before_) {
         mode_saved_ = restore_sent_ = false;  // back where we started
     }
@@ -917,270 +710,142 @@ void PreflightRunner::update(const VehicleState& s, Clock::time_point now, doubl
         saveReport();
         if (onComplete) onComplete();
     }
-    if (session_.passed() && !session_.invalidReason(s, now).empty() && !open_) {
-        // stays recorded; the next open starts over
-    }
 }
 
 void PreflightRunner::tickTests(Clock::time_point now) {
-    const preflight::OutputMap m = outputMap(s_, static_cast<int>(frame_.motors.size()));
-
-    // ---- always-on observers (they need no button) -------------------------------------------
-    if (session_.includes("link.sticks") && status("link.sticks") != Status::Pass) {
-        const int r = rcChannel("RCMAP_ROLL", 1), pi = rcChannel("RCMAP_PITCH", 2), t = rcChannel("RCMAP_THROTTLE", 3),
-                  y = rcChannel("RCMAP_YAW", 4);
-        auto mark = [&](int ch, int lo, int hi) {
-            if (ch < 1 || ch > 18 || s_.rc[ch - 1] == 0) return;
-            if (s_.rc[ch - 1] < 1150) art_.stick_reached[lo] = true;
-            if (s_.rc[ch - 1] > 1850) art_.stick_reached[hi] = true;
-        };
-        mark(r, 0, 1);
-        mark(pi, 2, 3);
-        mark(t, 4, 5);
-        mark(y, 6, 7);
-        const bool all = std::all_of(art_.stick_reached.begin(), art_.stick_reached.end(), [](bool b) { return b; });
-        const bool thr_low = t >= 1 && s_.rc[t - 1] > 0 && s_.rc[t - 1] < 1150;
-        if (!s_.has_rc || s_.rc_count == 0) {
-            setResult("link.sticks", Status::Waiting, "no RC input: is the transmitter on?", false);
-        } else if (all && thr_low) {
-            setResult("link.sticks", Status::Pass, "all four axes reach both ends; throttle low", false);
-        } else {
-            const int n = static_cast<int>(std::count(art_.stick_reached.begin(), art_.stick_reached.end(), true));
-            setResult("link.sticks", Status::Waiting,
-                      std::to_string(n) + "/8 stick ends reached" + (all && !thr_low ? "; now put the throttle low" : ""), false);
-        }
-    }
-    if (session_.includes("link.modes")) {
-        const int ch = rcChannel("FLTMODE_CH", 8);
-        const int pos = ch >= 1 && ch <= 18 ? modePosition(s_.rc[ch - 1]) : -1;
-        if (pos >= 0) mode_seen_[pos] = true;
-        art_.mode_positions_seen = static_cast<int>(std::count(mode_seen_.begin(), mode_seen_.end(), true));
-        art_.mode_live = pos;
-        art_.mode_list.clear();
-        for (int i = 0; i < 6; ++i) {
-            const auto it = s_.params.find("FLTMODE" + std::to_string(i + 1));
-            const char* name = it != s_.params.end() ? plane::modeName(static_cast<uint32_t>(it->second)) : nullptr;
-            art_.mode_list.push_back(QStringLiteral("%1  %2%3")
-                                         .arg(i + 1)
-                                         .arg(name ? QString::fromLatin1(name) : QStringLiteral("?"))
-                                         .arg(mode_seen_[i] ? QStringLiteral("  ✓") : QString()));
-        }
-    }
-    if (session_.includes("link.rcfailsafe") && status("link.rcfailsafe") != Status::Pass) {
-        const bool rc_bad = (s_.sensors_present & kRcBit) && !(s_.sensors_health & kRcBit);
-        if (rcfs_phase_ == 0 && rc_bad) rcfs_phase_ = 1;
-        if (rcfs_phase_ == 1 && !rc_bad && s_.rc_count > 0) {
-            rcfs_phase_ = 2;
-            setResult("link.rcfailsafe", Status::Pass, "failsafe triggered with the transmitter off, cleared when back on", false);
-        } else if (rcfs_phase_ < 2) {
-            setResult("link.rcfailsafe", Status::Waiting,
-                      rcfs_phase_ == 0 ? "waiting for the RC failsafe…" : "failsafe seen; waiting for the transmitter", false);
-        }
-    }
-    if (session_.includes("sens.pitot") && status("sens.pitot") != Status::Pass) {
-        const auto t = s_.params.find("ARSPD_TYPE");
-        if (t != s_.params.end() && t->second < 0.5f) {
-            setResult("sens.pitot", Status::NotApplicable, "no airspeed sensor (ARSPD_TYPE = 0)", false);
-        } else {
-            pitot_peak_ = std::max(pitot_peak_, s_.airspeed);
-            if (pitot_peak_ > 5.0 && s_.airspeed < 3.0) {
-                setResult("sens.pitot", Status::Pass, "rose to " + std::to_string(static_cast<int>(pitot_peak_)) + " m/s and settled back", false);
-            } else {
-                setResult("sens.pitot", Status::Waiting,
-                          pitot_peak_ > 5.0 ? "good rise; now let it settle" : "waiting for the airspeed to rise", false);
-            }
-        }
-    }
-    if (session_.includes("sens.orientation") && status("sens.orientation") != Status::Pass) {
-        if (s_.roll_deg > 15) art_.orient_roll = true;
-        if (s_.pitch_deg > 10) art_.orient_pitch = true;
-        if (std::abs(geo::wrap180(s_.yaw_deg - yaw0_)) > 45) art_.orient_yaw = true;
-        if (art_.orient_roll && art_.orient_pitch && art_.orient_yaw) {
-            setResult("sens.orientation", Status::Pass, "roll, pitch and heading all follow", false);
-        } else {
-            setResult("sens.orientation", Status::Waiting,
-                      std::string(art_.orient_roll ? "roll ✓ " : "roll · ") + (art_.orient_pitch ? "pitch ✓ " : "pitch · ") +
-                          (art_.orient_yaw ? "heading ✓" : "heading ·"),
-                      false);
-        }
-    }
-
-    // ---- the test in progress ------------------------------------------------------------------
     const std::string id = running_;
     if (id.empty()) {
-        art_.lit_motor = -1;
-        art_.pusher_lit = false;
-        art_.surf_cmd = 0.0;
         return;
     }
+    const OutputMap m = outputMap(s_, static_cast<int>(frame_.motors.size()));
     const double t = secs(phase_t_, now);
     auto result = [&](const std::string& tag) -> std::string {
         const auto it = tag_done_.find(tag);
         return it != tag_done_.end() && it->second ? tag_result_[tag] : std::string();
     };
-
-    if (id == "sens.gyro" || id == "sens.level" || id == "sens.baro") {
-        const std::string r = result(id);
-        if (!r.empty()) {
-            const bool ok = r == "ok";
-            std::string d = ok ? "calibrated" : "failed: " + r;
-            Status st = ok ? Status::Pass : Status::Fail;
-            if (ok && id == "sens.level" && (std::abs(s_.roll_deg) > 2.0 || std::abs(s_.pitch_deg) > 2.0)) {
-                st = Status::Warn;
-                d = "calibrated, but it still reads " + std::to_string(static_cast<int>(s_.roll_deg)) + "° / " +
-                    std::to_string(static_cast<int>(s_.pitch_deg)) + "°: was it level?";
-            }
-            setResult(id, st, d, false);
-            running_.clear();
-        }
-        return;
-    }
-    if (id == "sens.accel") {
-        art_.pose = s_.accelcal_pos;
-        if (phase_ == 10) {
-            const std::string r = result("accel");
-            if (!r.empty()) {
-                setResult(id, r == "ok" ? Status::Pass : Status::Fail, r == "ok" ? "simple calibration done" : "failed: " + r, false);
-                running_.clear();
-            }
-            return;
-        }
-        if (s_.accelcal_pos == kAccelSuccess) {
-            setResult(id, Status::Pass, "6-position calibration done", false);
-            running_.clear();
-            art_.pose = 0;
-        } else if (s_.accelcal_pos == kAccelFailed) {
-            setResult(id, Status::Fail, "6-position calibration failed: hold it still in each pose and retry", false);
-            running_.clear();
-            art_.pose = 0;
-        } else if (t > 600) {
-            stopAll();
-        }
-        return;
-    }
-    if (id == "sens.compass") {
-        if (compass_method_ == 1) {
-            const std::string r = result("compass");
-            if (!r.empty()) {
-                setResult(id, r == "ok" ? Status::Pass : Status::Fail,
-                          r == "ok" ? "calibrated at " + std::to_string(fixed_yaw_deg_) + "°; reboot to apply" : "failed: " + r, false);
-                running_.clear();
-                compass_method_ = 0;
-            }
-            return;
-        }
-        // onboard: wait for every active compass to report
-        int active = 0, done = 0, ok = 0;
-        double worst = 0.0;
-        for (const auto& c : s_.magcal) {
-            if (secs(c.rx, now) > 5.0 && !c.reported) continue;
-            ++active;
-            if (c.reported && c.rx >= phase_t_) {
-                ++done;
-                if (c.status == MAG_CAL_SUCCESS) ++ok;
-                worst = std::max(worst, c.fitness);
-            }
-        }
-        if (active > 0 && done == active) {
-            tag_result_["compass"] = ok == done ? "ok" : "failed";
-            setResult(id, ok == done ? Status::Pass : Status::Fail,
-                      ok == done ? "fitness " + std::to_string(static_cast<int>(worst)) + " (lower is better), saved; reboot to apply"
-                                 : "calibration failed: rotate more slowly and through every side",
-                      false);
-            running_.clear();
-            compass_method_ = 0;
-        } else if (t > 300) {
-            stopAll();
-            setResult(id, Status::Fail, "timed out", false);
-        }
-        return;
-    }
+    // a current sensor that reads high at rest (power.current's note) can't tell a spin
+    const bool amps_known = s_.has_battery && s_.battery_a >= 0.0 && amps0_ < 8.0;
 
     if (id == "surf.roll" || id == "surf.pitch" || id == "surf.yaw") {
         art_.axis = id == "surf.roll" ? 0 : id == "surf.pitch" ? 1 : 2;
-        int ch = id == "surf.roll" ? m.aileron : id == "surf.pitch" ? m.elevator : m.rudder;
-        if (!ch && id == "surf.pitch") ch = m.elevon_l;
-        if (!ch && id == "surf.roll") ch = m.elevon_r;
-        art_.surf_out = outputNorm(ch);
+        const std::vector<int> chans = surfaceChannels(id);
+        art_.surf_out = chans.empty() ? std::nan("") : outputNorm(chans.front());
         if (phase_ == 1) {
             const std::string r = result("surfmode");
             if (r == "ok" && s_.custom_mode == plane::MANUAL) {
                 phase_ = 2;
                 phase_t_ = now;
+                setResult(id, Status::Waiting, "moving it right, then left");
             } else if (!r.empty() && r != "ok") {
-                setResult(id, Status::Fail, "couldn't switch to MANUAL: " + r, false);
-                running_.clear();
+                endTest(id, Status::Fail, "couldn't switch to MANUAL: " + r);
                 restoreMode();
             }
             return;
         }
-        if (phase_ == 2) {
-            const double cmd = sweepCmd(t);
-            art_.surf_cmd = cmd;
-            const int v = static_cast<int>(std::lround(cmd * 1000.0));
-            // MANUAL_CONTROL: y roll (+ right), x pitch (+ forward = nose down), r yaw (+ right)
-            if (art_.axis == 0) client_->manualControl(0, v, 0, 0, 300);
-            if (art_.axis == 1) client_->manualControl(-v, 0, 0, 0, 300);
-            if (art_.axis == 2) client_->manualControl(0, 0, 0, v, 300);
-            if (art_.axis == 0 && cmd > 0.95 && std::isfinite(art_.surf_out)) {
-                surf_right_sign_ = art_.surf_out > 0 ? 1.0 : -1.0;
-            }
-            if (t > kSweepSecs) {
-                phase_ = 3;
-                client_->stopManualControl();
-            }
-        }
-        return;
-    }
-    if (id == "surf.stabilize") {
-        art_.axis = 0;
-        art_.surf_out = outputNorm(m.aileron ? m.aileron : m.elevon_r);
-        art_.surf_cmd = std::clamp(-s_.roll_deg / 30.0, -1.0, 1.0);  // what it should command against the tilt
-        if (phase_ == 1) {
-            const std::string r = result("surfmode");
-            if (r == "ok" && s_.custom_mode == plane::FBWA) {
-                phase_ = 2;
-                phase_t_ = now;
-            } else if (!r.empty() && r != "ok") {
-                setResult(id, Status::Fail, "couldn't switch to FBWA: " + r, false);
-                running_.clear();
-                restoreMode();
+        const double cmd = sweepCmd(t);
+        art_.surf_cmd = cmd;
+        const int v = static_cast<int>(std::lround(cmd * 1000.0));
+        // MANUAL_CONTROL: y roll (+ right), x pitch (+ forward = nose down), r yaw (+ right)
+        if (art_.axis == 0) client_->manualControl(0, v, 0, 0, 300);
+        if (art_.axis == 1) client_->manualControl(-v, 0, 0, 0, 300);
+        if (art_.axis == 2) client_->manualControl(0, 0, 0, v, 300);
+        for (int ch : chans) {
+            const double o = outputNorm(ch);
+            if (!std::isfinite(o)) continue;
+            auto it = swing_.find(ch);
+            if (it == swing_.end()) {
+                swing_[ch] = {o, o};
+            } else {
+                it->second.first = std::min(it->second.first, o);
+                it->second.second = std::max(it->second.second, o);
             }
         }
+        if (t <= kSweepSecs) {
+            return;
+        }
+        client_->stopManualControl();
+        restoreMode();
+        if (!s_.has_servo_raw) {
+            endTest(id, Status::Warn, "the autopilot doesn't report its outputs: watch the surfaces move yourself");
+            return;
+        }
+        std::string stuck;
+        for (int ch : chans) {
+            const auto it = swing_.find(ch);
+            const bool moved = it != swing_.end() && it->second.first <= -kSwingNeeded && it->second.second >= kSwingNeeded;
+            if (!moved) {
+                stuck += (stuck.empty() ? "output " : ", ") + std::to_string(ch);
+            }
+        }
+        endTest(id, stuck.empty() ? Status::Pass : Status::Fail,
+                stuck.empty() ? "moved both ways" : stuck + " didn't move both ways");
         return;
     }
 
     if (id == "mot.lift") {
-        if (motor_idx_ >= static_cast<int>(motor_order_.size())) {
-            running_.clear();
+        if (phase_ == 3) {
+            // the gap before the next motor (and before the first)
+            art_.lit_motor = -1;
+            if (t < kMotorGapSecs) {
+                return;
+            }
+            if (motor_idx_ >= static_cast<int>(motor_order_.size())) {
+                std::string d;
+                for (const auto& f : motor_faults_) d += (d.empty() ? "" : " · ") + f;
+                if (!d.empty()) {
+                    endTest(id, Status::Fail, d);
+                } else {
+                    for (const auto& f : motor_notes_) d += (d.empty() ? "" : " · ") + f;
+                    endTest(id, d.empty() ? Status::Pass : Status::Warn,
+                            d.empty() ? "all " + std::to_string(motor_order_.size()) + " spun, each on its own output" : d);
+                }
+                return;
+            }
+            const auto& mo = frame_.motors[motor_order_[motor_idx_]];
+            phase_ = 1;
+            phase_t_ = now;
+            spun_channel_ = 0;
+            amps0_ = std::max(0.0, s_.battery_a);
+            amps_peak_ = amps0_;
+            send("motor", {link::makeMotorTest(mo.test_order, kLiftTestPct, kLiftTestSecs)});
+            setResult(id, Status::Waiting,
+                      std::string("motor ") + mo.letter() + " (" + where(mo) + "), " + std::to_string(motor_idx_ + 1) +
+                          " of " + std::to_string(motor_order_.size()));
             return;
         }
         const int mi = motor_order_[motor_idx_];
-        art_.lit_motor = phase_ == 1 ? mi : -1;
-        if (phase_ == 1) {
-            const std::string r = result("motor");
-            if (!r.empty() && r != "ok") {
-                setResult(id, Status::Fail, "the vehicle refused the motor test: " + r, false);
-                running_.clear();
-                phase_ = 0;
-                return;
-            }
-            for (int k = 0; k < static_cast<int>(m.lift.size()); ++k) {
-                const int ch = m.lift[k];
-                if (ch && s_.has_servo_raw && s_.servo_raw[ch - 1] > 1050) spun_channel_ = ch;
-            }
-            if (t > kLiftTestSecs + 0.6) {
-                phase_ = 2;
-                const int want = m.lift[frame_.motors[mi].number - 1];
-                if (spun_channel_ && spun_channel_ != want) {
-                    setResult(id, Status::Fail, "output " + std::to_string(spun_channel_) + " spun, expected " +
-                                                    std::to_string(want) + ": check SERVOn_FUNCTION",
-                              false);
-                }
-            }
+        const auto& mo = frame_.motors[mi];
+        art_.lit_motor = mi;
+        const std::string r = result("motor");
+        if (!r.empty() && r != "ok") {
+            endTest(id, Status::Fail, "the autopilot refused the motor test: " + r);
+            return;
         }
+        for (int ch : m.lift) {
+            if (ch && s_.has_servo_raw && s_.servo_raw[ch - 1] > kSpinPwm) spun_channel_ = ch;
+        }
+        amps_peak_ = std::max(amps_peak_, s_.battery_a);
+        if (t < kLiftTestSecs + 0.6) {
+            return;
+        }
+        const int want = mo.number >= 1 && mo.number <= static_cast<int>(m.lift.size()) ? m.lift[mo.number - 1] : 0;
+        const std::string name = std::string("motor ") + mo.letter();
+        if (!s_.has_servo_raw) {
+            motor_notes_.push_back(name + ": outputs not reported");
+        } else if (!spun_channel_) {
+            motor_faults_.push_back(name + " didn't spin");
+        } else if (spun_channel_ != want) {
+            motor_faults_.push_back(name + " came out on output " + std::to_string(spun_channel_) + ", not " +
+                                    std::to_string(want));
+        } else if (amps_known && amps_peak_ - amps0_ < kAmpsRise) {
+            motor_notes_.push_back(name + " drew no current: is it connected?");
+        }
+        ++motor_idx_;
+        phase_ = 3;
+        phase_t_ = now;
         return;
     }
+
     if (id == "mot.pusher") {
         art_.pusher_lit = phase_ == 2;
         if (phase_ == 1) {
@@ -1189,18 +854,18 @@ void PreflightRunner::tickTests(Clock::time_point now) {
             if (r == "ok" && s_.armed) {
                 phase_ = 2;
                 phase_t_ = now;
+                setResult(id, Status::Waiting, "spinning at 12 % for 2 s");
             } else if (!r.empty() && r != "ok") {
-                setResult(id, Status::Fail, "couldn't arm in MANUAL: " + r + " (see the PreArm message)", false);
-                running_.clear();
-                phase_ = 0;
                 client_->stopManualControl();
                 restoreMode();
+                endTest(id, Status::Fail, "couldn't arm to spin it: " + r);
             }
             return;
         }
         if (phase_ == 2) {
             client_->manualControl(0, 0, kPusherThrottle, 0, 300);
-            if (m.throttle && s_.servo_raw[m.throttle - 1] > 1050) spun_channel_ = m.throttle;
+            if (m.throttle && s_.has_servo_raw && s_.servo_raw[m.throttle - 1] > kSpinPwm) spun_channel_ = m.throttle;
+            amps_peak_ = std::max(amps_peak_, s_.battery_a);
             if (t > kPusherSecs) {
                 phase_ = 3;
                 phase_t_ = now;
@@ -1215,33 +880,56 @@ void PreflightRunner::tickTests(Clock::time_point now) {
                 phase_t_ = now;
             }
             if (!s_.armed) {
-                phase_ = 4;
-                if (!spun_channel_) {
-                    setResult(id, Status::Warn, "no throttle output seen: check the pusher ESC", false);
+                restoreMode();
+                if (!s_.has_servo_raw) {
+                    endTest(id, Status::Warn, "the autopilot doesn't report its outputs");
+                } else if (!spun_channel_) {
+                    endTest(id, Status::Fail, "the pusher output didn't come on");
+                } else if (amps_known && amps_peak_ - amps0_ < kAmpsRise) {
+                    endTest(id, Status::Warn, "the output came on but it drew no current: is it connected?");
+                } else {
+                    endTest(id, Status::Pass, "spun");
                 }
             }
             return;
         }
         return;
     }
+
     if (id == "pay.gimbal") {
         struct P {
             double at, pitch, yaw;
         };
         static const P seq[] = {{0.0, -45, 0}, {1.6, 0, 40}, {3.2, 0, -40}, {4.8, 0, 0}};
-        if (phase_ == 1) {
-            for (int k = 3; k >= 0; --k) {
-                if (t >= seq[k].at) {
-                    if (art_.gimbal_pitch != seq[k].pitch || art_.gimbal_yaw != seq[k].yaw) {
-                        art_.gimbal_pitch = seq[k].pitch;
-                        art_.gimbal_yaw = seq[k].yaw;
-                        client_->runSequence("pf:gimbal", {link::makeMountControl(static_cast<float>(seq[k].pitch),
-                                                                                   static_cast<float>(seq[k].yaw))});
-                    }
-                    break;
+        for (int k = 3; k >= 0; --k) {
+            if (t >= seq[k].at) {
+                if (art_.gimbal_pitch != seq[k].pitch || art_.gimbal_yaw != seq[k].yaw) {
+                    art_.gimbal_pitch = seq[k].pitch;
+                    art_.gimbal_yaw = seq[k].yaw;
+                    client_->runSequence("pf:gimbal", {link::makeMountControl(static_cast<float>(seq[k].pitch),
+                                                                               static_cast<float>(seq[k].yaw))});
                 }
+                break;
             }
-            if (t > 6.0) phase_ = 2;
+        }
+        if (s_.has_gimbal && secs(s_.gimbal_rx, now) < 1.0) {
+            const double yaw = s_.gimbal_yaw_earth ? geo::wrap180(s_.gimbal_yaw - s_.yaw_deg) : s_.gimbal_yaw;
+            if (!gimbal_seen_) {
+                gimbal_yaw_lo_ = gimbal_yaw_hi_ = yaw;
+                gimbal_seen_ = true;
+            }
+            gimbal_min_pitch_ = std::min(gimbal_min_pitch_, s_.gimbal_pitch);
+            gimbal_yaw_lo_ = std::min(gimbal_yaw_lo_, yaw);
+            gimbal_yaw_hi_ = std::max(gimbal_yaw_hi_, yaw);
+        }
+        if (t > 6.4) {
+            if (!gimbal_seen_) {
+                endTest(id, Status::Warn, "the gimbal doesn't report where it points");
+            } else if (gimbal_min_pitch_ < -30.0 && gimbal_yaw_hi_ - gimbal_yaw_lo_ > 40.0) {
+                endTest(id, Status::Pass, "followed down, right and left");
+            } else {
+                endTest(id, Status::Fail, "it didn't follow the commands");
+            }
         }
         return;
     }

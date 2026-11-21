@@ -50,7 +50,14 @@ public:
         bool labels_english = false;
         int reserve_pct = 20;  // battery time left: never plan into this much of the pack
         int text_size = 0;     // theme::TextSize
+        // this aircraft's battery (the preflight checks against it)
+        int battery_chem = 0;        // preflight::Chemistry
+        int battery_mah = 0;         // 0 = not entered
+        int battery_minutes = 0;     // typical flight time, 0 = not entered
+        int battery_cells = 0;       // read off the pack (shown only)
     };
+    enum BatteryField { kCapacityField = 0, kFlightTimeField = 1 };
+    void setBattery(int mah, int minutes);  // after the entry pad
     // the landing reserves offered (% of the pack)
     static const std::vector<int>& reserveChoices();
     // the trail lengths offered (seconds, 0 = all)
@@ -89,6 +96,8 @@ signals:
     void speedUnitChanged(int unit);
     void coordFormatChanged(int fmt);
     void reserveChanged(int pct);
+    void batteryChemistryChanged(int chem);
+    void batteryEdit(int field);  // BatteryField: open the entry pad for it
     void textSizeChanged(int size);  // theme::TextSize
     void trailChanged(bool on, int secs);
     void offlineCountry();       // download / update the country pack
@@ -147,6 +156,8 @@ private:
     Segmented labels_;
     Segmented online_;
     Segmented reserve_;
+    Segmented chem_;
+    QRectF capacity_rect_, flight_rect_;
     Segmented text_size_;
     Offline off_;
     QRectF country_rect_, area_rect_, clear_rect_, delete_rect_, folder_rect_;

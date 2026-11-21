@@ -9,10 +9,15 @@
 
 namespace gcs::ui {
 
-// The preflight window: a full-window overlay with the stage rail on the
-// left, the steps of the stage, the step card (depiction, what to do, live
-// result, actions) and a live data column. Touch-first: every target is at
-// least 48 px; actions that spin or change the vehicle need a 1 s hold.
+// The preflight window, a full-window overlay in three views that follow
+// the runner's flow:
+//   look    "look at the aircraft": big tick rows and CONTINUE
+//   checks  the list filling in, one row at a time, and on the right what
+//           is being checked now (or the hold before the moving parts)
+//   result  READY TO FLY, or the problems and notes in plain words, each
+//           with at most one action
+// Touch-first: every target is at least 48 px; whatever spins or changes
+// the vehicle needs a hold.
 class PreflightScreen : public QWidget {
     Q_OBJECT
 
@@ -23,8 +28,6 @@ public:
     void close();
     bool isOpen() const { return open_target_ > 0.5; }
     void tick(double dt);
-    void selectStep(const std::string& id);
-    const std::string& currentStep() const { return step_; }
 
 signals:
     void closed();
@@ -40,38 +43,41 @@ protected:
 private:
     struct Hit {
         QRectF rect;
-        std::string kind;    // "stage" "step" "btn" "close" "prev" "next" "stop" "override" "full" "turn" "ready"
-        std::string value;   // stage index / step id / action
+        std::string kind;    // "close" "look" "continue" "gate" "stop" "override" "rerun" "restart"
+                             // "setup" "cal" "calcancel" "reboot" "ready"
+        std::string value;
         bool hold = false;
         double hold_secs = 1.0;
         bool enabled = true;
         QString reason;
     };
 
-    void paintRail(QPainter& p, const QRectF& r);
-    void paintSteps(QPainter& p, const QRectF& r);
-    void paintCard(QPainter& p, const QRectF& r);
-    void paintArt(QPainter& p, const QRectF& r);
-    void paintData(QPainter& p, const QRectF& r);
-    void paintReady(QPainter& p, const QRectF& r);
+    void paintTop(QPainter& p, const QRectF& r);
+    void paintLook(QPainter& p, const QRectF& r);
+    void paintChecks(QPainter& p, const QRectF& r);
+    void paintNow(QPainter& p, const QRectF& r);   // the right side of the checks view
+    void paintGate(QPainter& p, const QRectF& r);
+    void paintResult(QPainter& p, const QRectF& r);
+    void paintCal(QPainter& p, const QRectF& r);
+    void paintArt(QPainter& p, const QRectF& r, const std::string& id);
     void paintButton(QPainter& p, const QRectF& r, const QString& label, PreflightRunner::Style style, bool enabled,
                      bool hold, double charge);
-    std::vector<const preflight::StepDef*> stageSteps(int stage) const;
-    void selectStage(int stage);
-    void stepBy(int delta);
+    void addButton(QPainter& p, const QRectF& r, const QString& label, PreflightRunner::Style style, Hit h);
     void fire(const Hit& h);
+    void clampScroll();
 
     PreflightRunner* runner_;
     double open_ = 0.0;
     double open_target_ = 0.0;
     double time_ = 0.0;
-    int stage_ = 0;
-    std::string step_;
+    preflight::Phase last_phase_ = preflight::Phase::Idle;
+
+    // the one scrolling list of the view shown
     double list_scroll_ = 0.0;
     double list_content_h_ = 0.0;
     QRectF list_rect_;
-    bool ready_shown_ = false;
-    bool ready_dismissed_ = false;
+    double user_scrolled_t_ = -100.0;  // when the operator last dragged the list
+    int last_row_ = -1;
 
     std::vector<Hit> hits_;
     int pressed_ = -1;          // index into hits_ while held

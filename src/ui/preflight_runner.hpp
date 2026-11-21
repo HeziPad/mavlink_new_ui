@@ -1,13 +1,16 @@
 #pragma once
 
 #include "core/preflight.hpp"
+#include "core/preflight_flow.hpp"
 #include "link/command_sender.hpp"
 #include "link/link_events.hpp"
 
 #include <QString>
 
+#include <array>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -17,21 +20,15 @@ class MavlinkClient;
 
 namespace gcs::ui {
 
-// Runs the preflight: evaluates the automatic steps every frame, drives the
-// tests and calibrations through the link, and keeps the session. The screen
-// is only a view of it: it asks for the buttons of a step and passes the
-// pressed action back in.
+// Runs the preflight by itself: evaluates the automatic steps every frame,
+// walks the run with `preflight::Flow`, starts each test when its row comes
+// up and judges it from what the vehicle reports (servo outputs, current,
+// gimbal attitude), and keeps the session. The screen is only a view: the
+// operator ticks the look card, holds the moving-parts gate, and answers the
+// result (SET IT UP, a calibration, TRY AGAIN).
 class PreflightRunner {
 public:
     enum class Style { Primary, Good, Bad, Neutral, Danger };
-    struct Button {
-        std::string action;
-        QString label;
-        Style style = Style::Primary;
-        bool hold = false;     // needs a 1 s hold (spins things / changes the vehicle)
-        bool enabled = true;
-        QString reason;        // when disabled
-    };
 
     explicit PreflightRunner(link::MavlinkClient* client);
 
@@ -45,16 +42,38 @@ public:
     // ---- state for the view ------------------------------------------------------------
     preflight::Session& session() { return session_; }
     const preflight::Session& session() const { return session_; }
-    preflight::Profile& profile() { return profile_; }
+    const preflight::Profile& profile() const { return profile_; }
+    const preflight::Flow& flow() const { return flow_; }
     preflight::Status status(const std::string& id) const;
     QString detail(const std::string& id) const;
-    QString instruction(const std::string& id) const;  // what to do right now (phase-aware)
-    std::vector<Button> buttons(const std::string& id) const;
-    void act(const std::string& id, const std::string& action);
-    bool testRunning() const;
-    void stopAll();
     const VehicleState& vehicle() const { return s_; }
     const FrameLayout& frame() const { return frame_; }
+
+    // ---- what the operator does ---------------------------------------------------------
+    void setLook(const std::string& id, bool done);  // a look-card tick
+    void lookContinue();                             // CONTINUE (every tick done)
+    void goMoving();     // the hold before the moving parts: safety off, then the tests
+    void rerun();        // TRY AGAIN: the scan again; failed tests run again
+    void restart();      // a fresh run from the look card
+    bool testRunning() const { return !running_.empty(); }
+    void stopAll();      // STOP: ends the test running and the moving parts still to come
+
+    // SET IT UP: writes every wrong setup parameter with its recommended value
+    bool setupFixable() const;
+    bool setupWriting() const { return !setup_pending_.empty(); }
+    void fixSetup();
+    // a parameter that only applies after a restart was written
+    bool rebootPending() const { return reboot_pending_; }
+    void reboot();
+
+    // the calibration a problem offers (from the sensor that's unhealthy)
+    enum class Cal { None, Compass, Accel };
+    Cal calFor(const std::string& id) const;
+    Cal calRunning() const { return cal_; }
+    void startCal(Cal c);
+    void cancelCal();
+    QString calText() const;  // what to do now
+    int calPercent() const;   // compass progress (0..100)
 
     // ---- what the pictures need ----------------------------------------------------------
     struct Art {
@@ -63,13 +82,7 @@ public:
         double surf_cmd = 0.0;    // stick command being swept, -1..1
         double surf_out = 0.0;    // live output, -1..1 (NaN unknown)
         int axis = 0;             // 0 roll 1 pitch 2 yaw
-        int pose = 0;             // accel cal pose requested, 0 none
-        std::array<bool, 8> stick_reached{};
         double gimbal_pitch = 0.0, gimbal_yaw = 0.0;
-        bool orient_roll = false, orient_pitch = false, orient_yaw = false;
-        int mode_positions_seen = 0;
-        std::vector<QString> mode_list;  // "1: FBWA" ... with the live one marked
-        int mode_live = -1;
     };
     const Art& art() const { return art_; }
 
@@ -79,6 +92,9 @@ public:
     void overrideLaunch(Clock::time_point now);
     void noteFlight();
     void setPrearmReasons(std::vector<std::string> r) { prearm_ = std::move(r); }
+
+    // Settings -> BATTERY (the cell count comes from the pack)
+    void setBattery(preflight::Chemistry chem, int capacity_mah, double endurance_min);
 
     // callbacks the window wires up
     std::function<void(bool make_safe)> onSafety;
@@ -90,14 +106,20 @@ public:
     QString saveReport() const;  // path written ("" on failure)
 
 private:
-    void setResult(const std::string& id, preflight::Status st, const std::string& detail, bool by_user,
+    void setResult(const std::string& id, preflight::Status st, const std::string& detail, bool by_user = false,
                    const std::string& note = {});
     void send(const std::string& tag, std::vector<link::CommandRequest> steps);
+    void startTest(const std::string& id);
+    void endTest(const std::string& id, preflight::Status st, const std::string& detail);
+    void abortTest(const std::string& why);  // stop the running test: it fails with `why`
     void tickTests(Clock::time_point now);
+    void tickCal(Clock::time_point now);
+    void restoreSafety();
+    std::vector<int> surfaceChannels(const std::string& id) const;
     double outputNorm(int channel) const;  // servo output -1..1 from SERVOn_MIN/TRIM/MAX
-    int rcChannel(const char* rcmap_param, int fallback) const;
-    double rcNorm(int ch) const;
     void restoreMode();
+    void saveMode();
+    void newSession(bool turnaround);
 
     link::MavlinkClient* client_;
     bool open_ = false;
@@ -106,14 +128,15 @@ private:
     double video_age_ = 1e9;
     preflight::Session session_;
     preflight::Profile profile_;
+    preflight::Flow flow_;
     FrameLayout frame_;
     Art art_;
-    std::map<std::string, preflight::Eval> live_;  // last automatic evaluation per step
     bool fetched_ = false;
     bool passed_override_ = false;
-    bool was_complete_ = false;
+    std::vector<std::string> prearm_;  // the vehicle's current PreArm reasons
+    std::string started_row_;          // the row whose start was handled
 
-    // generic test bookkeeping
+    // test bookkeeping
     std::string running_;            // step id of the test in progress ("" none)
     int phase_ = 0;
     Clock::time_point phase_t_{};
@@ -124,24 +147,30 @@ private:
     uint32_t mode_before_ = 0;
     bool mode_saved_ = false;
     bool restore_sent_ = false;
-    void saveMode();
-    std::vector<std::string> prearm_;  // the vehicle's current PreArm reasons
+    bool safety_restore_ = false;    // the gate turned safety off: back on afterwards
 
     // per-test state
-    int motor_idx_ = 0;              // lift test: which motor (index in frame_.motors order of test letters)
+    std::map<int, std::pair<double, double>> swing_;  // surface channel -> (min, max) output seen
+    int motor_idx_ = 0;              // lift test: position in motor_order_
     std::vector<int> motor_order_;   // frame_.motors indices sorted by test order
-    std::vector<bool> motor_ok_;
-    int spun_channel_ = 0;           // the output seen spinning during a lift test
-    double surf_right_sign_ = 0.0;   // aileron output change for a roll-right command (for the stabilise check)
-    std::map<std::string, std::string> fix_pending_;  // step id -> parameter awaiting confirmation
-    std::map<std::string, std::pair<float, float>> fix_from_to_;  // param -> (from, to)
-    int rcfs_phase_ = 0;
+    std::vector<std::string> motor_faults_, motor_notes_;
+    int spun_channel_ = 0;           // the output seen spinning
+    double amps0_ = 0.0, amps_peak_ = 0.0;  // current before / during a spin
     double pitot_peak_ = 0.0;
-    double yaw0_ = 0.0;
-    std::array<bool, 6> mode_seen_{};
-    bool props_on_ = false;
-    int compass_method_ = 0;         // 1 fixed-yaw, 2 onboard
-    int fixed_yaw_deg_ = 0;
+    double gimbal_min_pitch_ = 0.0, gimbal_yaw_lo_ = 0.0, gimbal_yaw_hi_ = 0.0;
+    bool gimbal_seen_ = false;
+
+    // SET IT UP / restart
+    std::map<std::string, std::pair<float, float>> fix_from_to_;  // param -> (from, to)
+    std::set<std::string> setup_pending_;  // written, not confirmed yet
+    std::vector<std::string> setup_done_;  // titles fixed, for the toast
+    bool setup_failed_ = false;
+    bool reboot_pending_ = false;
+    int reboot_boot_count_ = 0;
+
+    // calibration
+    Cal cal_ = Cal::None;
+    Clock::time_point cal_t_{};
 };
 
 }  // namespace gcs::ui

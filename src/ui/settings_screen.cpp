@@ -1,7 +1,6 @@
 #include "settings_screen.hpp"
 
 #include "anim.hpp"
-#include "core/endurance.hpp"
 #include "theme.hpp"
 
 #include <QFontMetricsF>
@@ -50,6 +49,7 @@ SettingsScreen::SettingsScreen(QWidget* parent) : QWidget(parent) {
     for (int pct : reserveChoices()) {
         reserve_.labels << QStringLiteral("%1 %").arg(pct);
     }
+    chem_.labels = {QStringLiteral("LIPO"), QStringLiteral("LIHV"), QStringLiteral("LI-ION")};
     text_size_.labels = {QStringLiteral("SMALL"), QStringLiteral("MEDIUM"), QStringLiteral("LARGE")};
     link_type_.labels = {QStringLiteral("UDP · NETWORK"), QStringLiteral("SERIAL · USB / RADIO")};
     for (int b : link::serialBauds()) {
@@ -78,10 +78,11 @@ void SettingsScreen::open(const Values& v) {
     });
     reserve_.selected = static_cast<int>(rit - rc.begin());
     text_size_.selected = std::clamp(v.text_size, 0, 2);
+    chem_.selected = std::clamp(v.battery_chem, 0, 2);
     setLink(v.link);
     applied_ = v.link;
     refreshPorts();
-    for (Segmented* s : {&alt_, &speed_, &coord_, &trail_on_, &trail_len_, &labels_, &online_, &reserve_, &text_size_, &link_type_, &baud_}) {
+    for (Segmented* s : {&alt_, &speed_, &coord_, &trail_on_, &trail_len_, &labels_, &online_, &reserve_, &chem_, &text_size_, &link_type_, &baud_}) {
         s->knob = s->selected;
     }
     confirm_ = Confirm::None;
@@ -130,7 +131,7 @@ void SettingsScreen::tick(double dt) {
         return;
     }
     const double k = reducedMotion() ? 1.0 : 1.0 - std::exp(-16.0 * dt);
-    for (Segmented* s : {&alt_, &speed_, &coord_, &trail_on_, &trail_len_, &labels_, &online_, &reserve_, &text_size_, &link_type_, &baud_}) {
+    for (Segmented* s : {&alt_, &speed_, &coord_, &trail_on_, &trail_len_, &labels_, &online_, &reserve_, &chem_, &text_size_, &link_type_, &baud_}) {
         s->knob += (s->selected - s->knob) * k;
     }
     // the serial port list follows what is plugged in
@@ -218,6 +219,13 @@ void SettingsScreen::mousePressEvent(QMouseEvent* e) {
     } else if (category_ == kBattery) {
         if (pressSegmented(reserve_, pos)) {
             emit reserveChanged(reserveChoices()[reserve_.selected]);
+        } else if (pressSegmented(chem_, pos)) {
+            v_.battery_chem = chem_.selected;
+            emit batteryChemistryChanged(chem_.selected);
+        } else if (capacity_rect_.contains(pos)) {
+            emit batteryEdit(kCapacityField);
+        } else if (flight_rect_.contains(pos)) {
+            emit batteryEdit(kFlightTimeField);
         }
     } else if (category_ == kOffline) {
         if (country_rect_.contains(pos)) {
@@ -372,20 +380,32 @@ void SettingsScreen::paintEvent(QPaintEvent*) {
                      Qt::AlignLeft | Qt::AlignVCenter, notes[i], labelFont(10.5, false), i == 0 ? kText : kMuted);
         }
     } else if (category_ == kBattery) {
-        paintRow(p, body, QStringLiteral("LANDING RESERVE"),
-                 QStringLiteral("battery that \"time left\" never counts on, on top of the return and the landing"));
-        paintSegmented(p, QRectF(body.left(), body.top() + 54, body.width(), 58), reserve_);
-        const QStringList notes = {
-            QStringLiteral("TIME LEFT (battery chip, in flight) = how long it can keep flying the mission and still:"),
-            QStringLiteral("  · fly back to L (or home) into a wind %1 % stronger than measured")
-                .arg(std::lround((endurance::kWindFactor - 1.0) * 100.0)),
-            QStringLiteral("  · circle down the approach, go around once, and land on the lift rotors"),
-            QStringLiteral("  · with all of that x %1, and this reserve left untouched").arg(endurance::kReturnMargin),
-            QStringLiteral("Warns at 5 min, says LAND NOW at 0. It never lands by itself.")};
-        for (int i = 0; i < notes.size(); ++i) {
-            drawText(p, QRectF(body.left(), body.top() + 136 + i * 22, body.width(), 20),
-                     Qt::AlignLeft | Qt::AlignVCenter, notes[i], labelFont(10.5, false), i == 0 ? kText : kMuted);
-        }
+        paintRow(p, body,
+                 v_.battery_cells > 0 ? QStringLiteral("BATTERY · %1 CELLS").arg(v_.battery_cells) : QStringLiteral("BATTERY"),
+                 QStringLiteral("the preflight checks the charge against it · cells are read from the pack"));
+        paintSegmented(p, QRectF(body.left(), body.top() + 48, std::min(body.width(), 420.0), 52), chem_);
+        const double fw = std::min((body.width() - 12) / 2, 300.0);
+        capacity_rect_ = QRectF(body.left(), body.top() + 112, fw, 54);
+        flight_rect_ = QRectF(body.left() + fw + 12, body.top() + 112, fw, 54);
+        auto field = [&](const QRectF& fr, const QString& name, const QString& value) {
+            drawGlass(p, chamferPath(fr, 8), kCyan, 0.45, alpha(kBg, 0.6));
+            drawText(p, QRectF(fr.left() + 14, fr.top() + 4, fr.width() - 28, 18), Qt::AlignLeft | Qt::AlignVCenter, name,
+                     labelFont(10), kMuted);
+            drawText(p, QRectF(fr.left() + 14, fr.top() + 22, fr.width() - 28, 28), Qt::AlignLeft | Qt::AlignVCenter, value,
+                     monoFont(15, true), kText);
+            drawText(p, fr.adjusted(0, 0, -12, 0), Qt::AlignRight | Qt::AlignVCenter, QStringLiteral("EDIT"), labelFont(11),
+                     kCyan);
+        };
+        field(capacity_rect_, QStringLiteral("SIZE"),
+              v_.battery_mah > 0 ? QStringLiteral("%1 mAh").arg(v_.battery_mah) : QStringLiteral("—"));
+        field(flight_rect_, QStringLiteral("FLIGHT TIME"),
+              v_.battery_minutes > 0 ? QStringLiteral("%1 min").arg(v_.battery_minutes) : QStringLiteral("—"));
+        const QRectF res = body.adjusted(0, 186, 0, 0);
+        paintRow(p, res, QStringLiteral("LANDING RESERVE"), QStringLiteral("battery that TIME LEFT never counts on"));
+        paintSegmented(p, QRectF(res.left(), res.top() + 48, res.width(), 52), reserve_);
+        drawText(p, QRectF(res.left(), res.top() + 110, res.width(), 20), Qt::AlignLeft | Qt::AlignVCenter,
+                 QStringLiteral("TIME LEFT warns at 5 min and at 0 · it never lands by itself"),
+                 labelFont(10.5, false), kMuted);
     } else {
         paintRow(p, body, QStringLiteral("FLIGHT TRAIL"), QStringLiteral("the line the aircraft leaves behind on the map"));
         paintSegmented(p, QRectF(body.left(), body.top() + 54, std::min(body.width(), 220.0), 58), trail_on_);
@@ -404,6 +424,12 @@ void SettingsScreen::paintEvent(QPaintEvent*) {
     }
     paintConfirm(p, pr);
     p.restore();
+}
+
+void SettingsScreen::setBattery(int mah, int minutes) {
+    v_.battery_mah = mah;
+    v_.battery_minutes = minutes;
+    update();
 }
 
 void SettingsScreen::setOffline(const Offline& o) {

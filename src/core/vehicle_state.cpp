@@ -64,6 +64,16 @@ bool hasFlyableMission(const VehicleState& s) {
     return s.mission_known && s.mission.size() > 1 && !extractPlan(s.mission).wps.empty();
 }
 
+bool autopilotOwnedParam(const std::string& n) {
+    auto ends = [&](const char* suf) {
+        const size_t k = std::char_traits<char>::length(suf);
+        return n.size() >= k && n.compare(n.size() - k, k, suf) == 0;
+    };
+    return n.rfind("STAT_", 0) == 0 || (n.rfind("BARO", 0) == 0 && (ends("_GND_PRESS") || ends("_GND_TEMP"))) ||
+           (n.rfind("ARSPD", 0) == 0 && ends("_OFFSET")) || n == "MIS_TOTAL" || n == "FORMAT_VERSION" ||
+           n == "SYSID_SW_MREV";
+}
+
 SafetyState safetyState(const VehicleState& s) {
     if (!s.has_sys_status || !(s.sensors_present & kSensorMotorOutputs)) {
         return SafetyState::Unknown;

@@ -24,7 +24,6 @@ VehicleState live() {
 
 Profile lipo6s() {
     Profile p;
-    p.set = true;
     p.chemistry = Chemistry::LiPo;
     p.cells = 6;
     p.capacity_mah = 16000;
@@ -39,15 +38,21 @@ Status st(const std::string& id, const VehicleState& s, const Profile& p = lipo6
 
 void testCatalogue() {
     std::set<std::string> ids;
-    Stage last = Stage::Profile;
+    Stage last = Stage::Look;
     for (const auto& d : steps()) {
         CHECK(ids.insert(d.id).second);  // unique
-        CHECK(!d.title.empty() && !d.why.empty());
+        CHECK(!d.title.empty() && !d.how.empty());
         CHECK(d.stage >= last);          // ordered by stage
+        // every step that runs by itself says what it's doing
+        CHECK(d.stage == Stage::Look || !d.sentence.empty());
+        CHECK(d.stage == Stage::Look || d.wait_s > 0.0);
         last = d.stage;
     }
     CHECK(findStep("mot.lift") && findStep("mot.lift")->critical);
-    CHECK(findStep("param.Q_GUIDED_MODE") && findStep("param.Q_GUIDED_MODE")->stage == Stage::Params);
+    CHECK(findStep("setup.app") && findStep("setup.app")->critical);
+    CHECK(findStep("setup.battery") && !findStep("setup.battery")->critical);  // a note, never written
+    // gone for the simple run: tuning parameters, transmitter tests, the safety step
+    CHECK(!findStep("param.Q_WVANE_GAIN") && !findStep("link.sticks") && !findStep("fin.safety"));
     // every stage has steps
     for (int i = 0; i < static_cast<int>(Stage::Count); ++i) {
         bool any = false;
@@ -147,23 +152,10 @@ void testParams() {
     s.params.erase("ARMING_SKIPCHK");
     s.params["ARMING_CHECK"] = 1.0f;
     CHECK(check("param.ARMING").ok);
-    // loiter radius vs bank limit: 25 m/s at 45 deg -> ~ 64 / tan(33.75) ~ 95 m
-    s.params["WP_LOITER_RAD"] = 60.0f;
-    s.params["ROLL_LIMIT_DEG"] = 45.0f;
-    s.params["AIRSPEED_CRUISE"] = 25.0f;
-    v = check("param.WP_LOITER_RAD");
-    CHECK(!v.ok && v.recommended && *v.recommended >= 90.0f);
-    // and the step evaluator maps critical failures to Fail
-    s.params["Q_GUIDED_MODE"] = 1.0f;
-    CHECK(st("param.Q_GUIDED_MODE", s) == Status::Fail);
-    s.params["FENCE_ENABLE"] = 0.0f;
-    v = check("param.FENCE_ENABLE");
-    CHECK(v.known && !v.ok && !v.recommended);  // advice only: no blind write
     // failsafes fly the Land approach: RTL_AUTOLAND 2, Q_RTL_MODE 0
     s.params["RTL_AUTOLAND"] = 0.0f;
     v = check("param.RTL_AUTOLAND");
     CHECK(v.known && !v.ok && v.recommended && *v.recommended == 2.0f);
-    CHECK(st("param.RTL_AUTOLAND", s) == Status::Fail);
     s.params["Q_RTL_MODE"] = 2.0f;  // VTOL approach at home would skip the landing at L
     v = check("param.Q_RTL_MODE");
     CHECK(!v.ok && v.recommended && *v.recommended == 0.0f);
@@ -182,12 +174,75 @@ void testParams() {
     CHECK(!v.ok && v.recommended && *v.recommended == 1.0f);
     for (const auto& c : paramChecks()) {
         if (c.id == "param.BRD_SAFETY_DEFLT") {
-            CHECK(c.reboot && c.critical);
+            CHECK(c.reboot && c.group == ParamGroup::Setup);
         }
     }
     const auto names = paramsToFetch();
     CHECK(std::find(names.begin(), names.end(), "RTL_AUTOLAND") != names.end());
     CHECK(std::find(names.begin(), names.end(), "Q_FRAME_CLASS") != names.end());
+}
+
+// every setup parameter right for this app
+void goodSetup(VehicleState& s) {
+    s.params["Q_GUIDED_MODE"] = 0.0f;
+    s.params["Q_ASSIST_SPEED"] = 14.0f;
+    s.params["AIRSPEED_MIN"] = 16.0f;
+    s.params["AIRSPEED_CRUISE"] = 22.0f;
+    s.params["AIRSPEED_MAX"] = 30.0f;
+    s.params["ARMING_CHECK"] = 1.0f;
+    s.params["THR_FAILSAFE"] = 1.0f;
+    s.params["FS_LONG_ACTN"] = 1.0f;
+    s.params["FS_GCS_ENABL"] = 1.0f;
+    s.params["RTL_AUTOLAND"] = 2.0f;
+    s.params["Q_RTL_MODE"] = 0.0f;
+    s.params["BRD_SAFETY_DEFLT"] = 1.0f;
+    s.params["BATT_FS_LOW_ACT"] = 1.0f;
+    s.params["BATT_FS_CRT_ACT"] = 4.0f;
+}
+
+void testSetup() {
+    VehicleState s = live();
+    const Profile p = lipo6s();
+    CHECK(st("setup.app", s) == Status::Waiting);  // not read yet
+    goodSetup(s);
+    CHECK(setupReport(s, p).known && setupReport(s, p).wrong.empty());
+    CHECK(st("setup.app", s) == Status::Pass);
+    // two wrong: one row, a failure, both named, both fixable in one go
+    s.params["Q_GUIDED_MODE"] = 1.0f;
+    s.params["RTL_AUTOLAND"] = 0.0f;
+    const SetupReport r = setupReport(s, p);
+    CHECK(r.wrong.size() == 2 && r.fixable());
+    const auto e = evaluate("setup.app", s, p, T0);
+    CHECK(e && e->status == Status::Fail && e->detail.find("2 settings") != std::string::npos);
+    CHECK(e && e->detail.find("Return home flies the landing") != std::string::npos);
+    // airspeed out of order has no single right value: still listed, not fixable alone
+    goodSetup(s);
+    s.params["AIRSPEED_CRUISE"] = 40.0f;
+    CHECK(setupReport(s, p).wrong.size() == 1 && !setupReport(s, p).fixable());
+    // battery levels are never part of the setup fix, and only a note
+    goodSetup(s);
+    s.params["BATT_LOW_VOLT"] = 14.0f;  // set for a 4S pack, a 6S one is fitted
+    s.params["BATT_CRT_VOLT"] = 19.8f;
+    s.params["BATT_ARM_VOLT"] = 23.0f;
+    s.params["BATT_CAPACITY"] = 16000.0f;
+    CHECK(setupReport(s, p).wrong.empty());
+    const auto b = evaluate("setup.battery", s, p, T0);
+    CHECK(b && b->status == Status::Warn && b->detail.find("6-cell") != std::string::npos);
+    s.params["BATT_LOW_VOLT"] = 21.0f;
+    CHECK(st("setup.battery", s) == Status::Pass);
+    Profile no_cap = p;
+    no_cap.capacity_mah = 0;  // not entered: the size isn't compared
+    s.params["BATT_CAPACITY"] = 5000.0f;
+    CHECK(st("setup.battery", s, no_cap) == Status::Pass);
+    CHECK(st("setup.battery", s) == Status::Warn);
+}
+
+void testOwnedParams() {
+    // ArduPilot rewrites these itself: not "parameters changed elsewhere"
+    CHECK(autopilotOwnedParam("BARO1_GND_PRESS") && autopilotOwnedParam("BARO2_GND_TEMP"));
+    CHECK(autopilotOwnedParam("ARSPD_OFFSET") && autopilotOwnedParam("ARSPD2_OFFSET"));
+    CHECK(autopilotOwnedParam("STAT_RUNTIME"));
+    CHECK(!autopilotOwnedParam("Q_GUIDED_MODE") && !autopilotOwnedParam("BARO_ALT_OFFSET"));
 }
 
 void testMissionElsewhere() {
@@ -242,9 +297,7 @@ void testNoPlan() {
 
 void testFinal() {
     VehicleState s = live();
-    s.custom_mode = plane::AUTO;
-    s.mission_known = true;
-    s.mission_current = 1;
+    s.custom_mode = plane::QLOITER;  // Launch picks the mode itself
     s.has_sys_status = true;
     s.sensors_present = s.sensors_health = 0x10000000;  // pre-arm passing
     s.has_gps = true;
@@ -253,14 +306,8 @@ void testFinal() {
     s.has_ekf = true;
     s.ekf_flags = 1 | 2 | 4 | 16 | 32;
     CHECK(st("fin.ready", s) == Status::Pass);
-    s.mission_current = 7;
+    s.sensors_health = 0;  // a PreArm problem
     CHECK(st("fin.ready", s) == Status::Waiting);
-    s.has_sys_status = true;
-    s.sensors_present = kSensorMotorOutputs;
-    s.sensors_enabled = 0;
-    CHECK(st("fin.safety", s) == Status::Waiting);
-    s.sensors_enabled = kSensorMotorOutputs;
-    CHECK(st("fin.safety", s) == Status::Pass);
 }
 
 void testSession() {
@@ -269,7 +316,7 @@ void testSession() {
     Session ses;
     ses.begin(s, T0, false);
     CHECK(!ses.complete());
-    CHECK(ses.totalCount() > 40);
+    CHECK(ses.totalCount() > 25);
     for (const auto* d : ses.activeSteps()) {
         ses.set(d->id, Status::Pass, "", true, T0);
     }
@@ -278,8 +325,12 @@ void testSession() {
     ses.set("mot.lift", Status::Skipped, "", true, T0, "props off");
     CHECK(!ses.complete());
     ses.set("mot.lift", Status::Pass, "", true, T0);
-    // a non-critical skip is fine
-    ses.set("air.cg", Status::Skipped, "", true, T0, "checked earlier");
+    // an optional step that failed is a note, not a block
+    ses.set("power.balance", Status::Fail, "", false, T0);
+    CHECK(ses.complete());
+    ses.set("power.balance", Status::Waiting, "", false, T0);  // not decided yet
+    CHECK(!ses.complete());
+    ses.set("power.balance", Status::Skipped, "", true, T0, "checked earlier");
     CHECK(ses.complete());
 
     ses.markPassed(s, T0);
@@ -300,8 +351,8 @@ void testSession() {
     // the turnaround list is a short subset
     Session t;
     t.begin(s, T0, true);
-    CHECK(t.totalCount() < ses.totalCount() / 2);
-    CHECK(t.includes("power.voltage") && !t.includes("mot.lift"));
+    CHECK(t.totalCount() < ses.totalCount());
+    CHECK(t.includes("power.voltage") && t.includes("air.props") && !t.includes("mot.lift"));
 
     ses.noteParamWrite("Q_GUIDED_MODE", 1.0f, 0.0f, true);
     ses.noteOverride("skipped by the pilot", T0);
@@ -314,33 +365,9 @@ void testSession() {
 
 }  // namespace
 
-static void testWeathervane() {
-    using namespace gcs;
-    using namespace gcs::preflight;
-    const ParamCheck* c = nullptr;
-    for (const auto& x : paramChecks()) {
-        if (x.id == "param.Q_WVANE_GAIN") c = &x;
-    }
-    CHECK(c != nullptr);
-    if (!c) return;
-    VehicleState s;
-    Profile p;
-    CHECK(!checkParam(*c, s, p).known);
-    s.params["Q_WVANE_ENABLE"] = 1.0f;
-    s.params["Q_WVANE_GAIN"] = 0.0f;  // ArduPlane's default: effectively off
-    auto v = checkParam(*c, s, p);
-    CHECK(v.known && !v.ok && v.recommended && *v.recommended == 1.0f);
-    s.params["Q_WVANE_GAIN"] = 1.0f;
-    CHECK(checkParam(*c, s, p).ok);
-    s.params["Q_WVANE_ENABLE"] = 4.0f;  // tail into wind
-    v = checkParam(*c, s, p);
-    CHECK(v.known && !v.ok && !v.recommended);
-    s.params["Q_WVANE_ENABLE"] = -1.0f;  // takeoff / landing only: nose into wind there
-    CHECK(checkParam(*c, s, p).ok);
-}
-
 int main() {
-    testWeathervane();
+    testSetup();
+    testOwnedParams();
     testMissionElsewhere();
     testNoPlan();
     testCatalogue();

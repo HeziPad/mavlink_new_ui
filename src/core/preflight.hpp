@@ -2,8 +2,12 @@
 
 // Preflight: the step catalogue, automatic evaluators, parameter checks and a
 // session that records results, decides when they stop being valid, and
-// writes the report. Qt-free; the UI runs the tests and calibrations and
-// reports their outcome back into the session.
+// writes the report. Qt-free; the UI runs the tests and reports their
+// outcome back into the session, and `preflight_flow` paces the run.
+//
+// The run is made for a simple operator: one "look at the aircraft" card
+// (the things only a person can see), then every other step checks itself,
+// one after another, and the result lists what is wrong in plain words.
 
 #include "frame_layout.hpp"
 #include "health.hpp"
@@ -16,18 +20,16 @@
 
 namespace gcs::preflight {
 
+// the run's sections, in order
 enum class Stage {
-    Profile,
-    Site,
-    Airframe,
-    Power,
-    Links,
+    Look,        // the "look at the aircraft" card
+    Connection,
+    Battery,
     Sensors,
-    Surfaces,
-    Motors,
-    Payload,
-    Params,
-    Mission,
+    Setup,       // the vehicle's parameters
+    Camera,
+    Plan,
+    Moving,      // surfaces and motors: behind a hold
     Final,
     Count
 };
@@ -35,10 +37,8 @@ const char* stageName(Stage s);
 
 enum class Kind {
     Auto,  // judged from telemetry / parameters
-    Test,  // the GCS acts, you confirm what you saw
-    Cal,   // a calibration run
+    Test,  // the GCS acts (or watches) and judges what it measured
     You,   // a physical check you confirm
-    Fix,   // a parameter that can be written
 };
 const char* kindName(Kind k);
 
@@ -48,26 +48,28 @@ bool isDone(Status s);  // Pass, Warn, Skipped, NotApplicable
 
 struct StepDef {
     std::string id;
-    Stage stage = Stage::Profile;
+    Stage stage = Stage::Look;
     Kind kind = Kind::You;
-    std::string title;
-    std::string why;    // one line: why it matters
-    std::string how;    // what to do
-    bool critical = false;    // can't be skipped
+    std::string title;      // what it is, a few words
+    std::string sentence;   // while it runs: "Checking the battery is charged"
+    std::string how;        // what to do when it isn't right
+    bool critical = false;    // a failure blocks Launch (otherwise it's a note)
     bool turnaround = false;  // part of the short after-landing preflight
+    double wait_s = 10.0;     // how long a "still waiting" step is waited for
 };
 const std::vector<StepDef>& steps();
 const StepDef* findStep(const std::string& id);
 
 // ---- aircraft profile ----------------------------------------------------------------
 enum class Chemistry { LiPo = 0, LiHV = 1, LiIon = 2 };
+// Set once in Settings -> BATTERY; the cell count is read off each pack.
 struct Profile {
-    bool set = false;
     Chemistry chemistry = Chemistry::LiPo;
-    int cells = 0;
-    int capacity_mah = 0;
+    int cells = 0;               // of the pack fitted now (guessCells), 0 = unknown
+    int capacity_mah = 0;        // 0 = not entered
     double endurance_min = 0.0;  // typical flight time on a full pack (0 = unknown)
 };
+const char* chemistryName(Chemistry c);
 double fullCellVolts(Chemistry c);      // "charged" threshold per cell
 double storageCellVolts(Chemistry c);   // below this: clearly not charged
 double lowCellVolts(Chemistry c);       // recommended BATT_LOW_VOLT per cell
@@ -84,13 +86,17 @@ struct Eval {
 std::optional<Eval> evaluate(const std::string& id, const VehicleState& s, const Profile& p,
                              Clock::time_point now);
 
-// ---- parameter checks (stage Params) ------------------------------------------------
+// ---- parameter checks (stage Setup) --------------------------------------------------
+// Setup: how this app flies the aircraft and its failsafes. One SET IT UP tap
+// writes every wrong one. Battery: the pack's warning levels; checked against
+// the pack fitted, never written (packs change).
+enum class ParamGroup { Setup, Battery };
 struct ParamCheck {
-    std::string id;     // step id: "param.<NAME>"
+    std::string id;     // "param.<NAME>"
     std::string name;   // the parameter written by a fix ("" = no single fix)
-    std::string title;
+    std::string title;  // plain words, as the result shows it
     std::string why;
-    bool critical = false;
+    ParamGroup group = ParamGroup::Setup;
     bool reboot = false;  // takes effect after a reboot
 };
 const std::vector<ParamCheck>& paramChecks();
@@ -104,6 +110,19 @@ struct ParamVerdict {
 ParamVerdict checkParam(const ParamCheck& c, const VehicleState& s, const Profile& p);
 // every parameter the preflight reads
 std::vector<std::string> paramsToFetch();
+
+// The setup parameters that are wrong, with the value SET IT UP writes
+// (`fix` empty when there's no single right value: a technician's job).
+struct SetupItem {
+    const ParamCheck* check = nullptr;
+    ParamVerdict verdict;
+};
+struct SetupReport {
+    bool known = false;  // every setup parameter read
+    std::vector<SetupItem> wrong;
+    bool fixable() const;  // at least one has a recommended value
+};
+SetupReport setupReport(const VehicleState& s, const Profile& p);
 
 // ---- output map ---------------------------------------------------------------------
 struct OutputMap {
@@ -119,7 +138,7 @@ OutputMap outputMap(const VehicleState& s, int lift_motors);
 struct Result {
     Status status = Status::Pending;
     std::string detail;
-    std::string note;        // skip reason, user's comment
+    std::string note;        // a comment (e.g. "timed out")
     bool by_user = false;
     double at_s = 0.0;       // seconds since the session started
 };
@@ -140,7 +159,7 @@ public:
     int doneCount() const;
     int totalCount() const;
     int failCount() const;
-    // every step done, and no critical step failed or skipped
+    // every required step passed (or warned), every optional one decided
     bool complete() const;
     // the passed state no longer holds (empty = still valid)
     std::string invalidReason(const VehicleState& s, Clock::time_point now) const;
